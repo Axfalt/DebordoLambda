@@ -1,0 +1,28 @@
+[package]
+name = "DebordoLambda"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.8"
+rand_mt = "4.2"
+rayon = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+
+# AWS Lambda
+lambda_runtime = "0.13"
+aws_lambda_events = "0.15"
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client pour Discord webhooks
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Discord signature verification
+ed25519-dalek = { version = "2.1", features = ["std"] }
+hex = "0.4"
+
+# Tracing pour les logs Lambda
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
