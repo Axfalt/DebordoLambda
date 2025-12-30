@@ -25,13 +25,6 @@ jobs:
       - name: Build Lambda
         run: cargo lambda build --release --arm64
 
-      - name: Debug - List build output
-        run: |
-          echo "=== Listing target/lambda ==="
-          ls -la target/lambda/ || echo "No target/lambda directory"
-          echo "=== Listing target/lambda/bootstrap ==="
-          ls -la target/lambda/bootstrap/ || echo "No bootstrap directory"
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -44,6 +37,8 @@ jobs:
           cargo lambda deploy \
             --binary-name bootstrap \
             --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
+            --region eu-west-3 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
+            --env-var SKIP_SIGNATURE_CHECK=true \
             DebordoLambda
 
