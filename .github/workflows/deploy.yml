@@ -34,7 +34,7 @@ jobs:
 
       - name: Deploy to Lambda
         run: |
-          cargo lambda deploy DebordoLambda \
+          cargo lambda deploy debordostats \
             --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }}
 
