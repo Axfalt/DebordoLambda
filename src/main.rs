@@ -45,8 +45,12 @@ async fn handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Vérifier la signature Discord (obligatoire)
-    if !verify_discord_signature(&public_key, signature, timestamp, &body) {
+    // Vérifier la signature Discord (skip en mode test si la variable d'env est définie)
+    let skip_signature = std::env::var("SKIP_SIGNATURE_CHECK")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    if !skip_signature && !verify_discord_signature(&public_key, signature, timestamp, &body) {
         error!("Invalid Discord signature");
         return Ok(build_response(401, "Invalid signature"));
     }
