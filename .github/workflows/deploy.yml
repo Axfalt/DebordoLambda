@@ -32,13 +32,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
-      - name: Deploy to Lambda
+      - name: Deploy Receiver Lambda
         run: |
           cargo lambda deploy \
             --binary-name bootstrap \
             --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
-            --env-var SKIP_SIGNATURE_CHECK=true \
+            --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
             DebordoLambda
+
+      - name: Deploy Worker Lambda
+        run: |
+          cargo lambda deploy \
+            --binary-name worker \
+            --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
+            --region eu-west-3 \
+            --timeout 300 \
+            DebordoLambdaWorker
 

@@ -7,6 +7,10 @@ edition = "2024"
 name = "bootstrap"
 path = "src/main.rs"
 
+[[bin]]
+name = "worker"
+path = "src/worker.rs"
+
 [dependencies]
 rand = "0.8"
 rand_mt = "4.2"
@@ -15,9 +19,13 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 
 # AWS Lambda
-lambda_runtime = "0.13"
-aws_lambda_events = "0.15"
+lambda_runtime = "1.1.1"
+aws_lambda_events = "1.1.1"
 tokio = { version = "1", features = ["full"] }
+
+# AWS SDK
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-sqs = "1"
 
 # HTTP client pour Discord webhooks
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

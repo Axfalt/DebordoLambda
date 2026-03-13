@@ -5,7 +5,6 @@
 
 mod config;
 mod discord;
-mod simulation;
 
 use aws_lambda_events::apigw::{ApiGatewayProxyRequest, ApiGatewayProxyResponse};
 use aws_lambda_events::http::HeaderMap;
@@ -13,12 +12,11 @@ use lambda_runtime::{service_fn, Error, LambdaEvent};
 use serde::Serialize;
 use tracing::{error, info};
 
-use crate::config::{format_results, SimConfig};
+use crate::config::SimulationJob;
 use crate::discord::{
     interaction_types, response_types, verify_discord_signature, DiscordInteraction,
-    DiscordResponse, ResponseData,
+    DiscordResponse,
 };
-use crate::simulation::calculate_defense_probabilities;
 
 // ============================================================================
 // LAMBDA HANDLER
@@ -27,6 +25,8 @@ use crate::simulation::calculate_defense_probabilities;
 /// Handler principal pour les requêtes Lambda via API Gateway.
 async fn handler(
     event: LambdaEvent<ApiGatewayProxyRequest>,
+    sqs_client: aws_sdk_sqs::Client,
+    queue_url: String,
 ) -> Result<ApiGatewayProxyResponse, Error> {
     let public_key =
         std::env::var("DISCORD_PUBLIC_KEY").expect("DISCORD_PUBLIC_KEY must be set");
@@ -67,7 +67,9 @@ async fn handler(
     // Router selon le type d'interaction
     match interaction.interaction_type {
         interaction_types::PING => handle_ping(),
-        interaction_types::APPLICATION_COMMAND => handle_command(interaction).await,
+        interaction_types::APPLICATION_COMMAND => {
+            handle_command(interaction, &sqs_client, &queue_url).await
+        }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
 }
@@ -82,61 +84,36 @@ fn handle_ping() -> Result<ApiGatewayProxyResponse, Error> {
     Ok(build_json_response(200, &response))
 }
 
-/// Traite une commande slash Discord.
+/// Envoie un job de simulation sur SQS et répond immédiatement avec une réponse différée.
 async fn handle_command(
     interaction: DiscordInteraction,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
 ) -> Result<ApiGatewayProxyResponse, Error> {
-    // Extraire les options de la commande
+    let token = interaction.token.unwrap_or_default();
+    let application_id = interaction.application_id.unwrap_or_default();
+
     let options = interaction
         .data
-        .as_ref()
-        .and_then(|d| d.options.as_ref())
-        .map(|o| o.as_slice())
-        .unwrap_or(&[]);
+        .and_then(|d| d.options)
+        .unwrap_or_default();
 
-    let config = SimConfig::from_options(options);
-    info!("Running simulation with config: {:?}", config);
+    let job = SimulationJob { token, application_id, options };
+    let job_json = serde_json::to_string(&job)?;
 
-    // Cloner les valeurs nécessaires pour le spawn_blocking
-    let defense_range = config.defense_range();
-    let tdg_interval = config.tdg_interval();
-    let min_def = config.min_def;
-    let nb_drapo = config.nb_drapo;
-    let day = config.day;
-    let iterations = config.iterations;
-    let points = config.points;
-    let is_reactor_built = config.is_reactor_built;
+    sqs_client
+        .send_message()
+        .queue_url(queue_url)
+        .message_body(job_json)
+        .send()
+        .await?;
 
-    // Exécuter la simulation dans un thread séparé (car elle est bloquante)
-    let results = tokio::task::spawn_blocking(move || {
-        calculate_defense_probabilities(
-            defense_range,
-            tdg_interval,
-            min_def,
-            nb_drapo,
-            day,
-            iterations,
-            points,
-            is_reactor_built,
-        )
-    })
-    .await?;
-
-    // Trier les résultats par défense
-    let mut sorted_results = results;
-    sorted_results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-    // Formater la réponse
-    let content = format_results(&config, &sorted_results);
+    info!("Simulation job enqueued to SQS");
 
     let response = DiscordResponse {
-        response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
-        data: Some(ResponseData {
-            content,
-            flags: None,
-        }),
+        response_type: response_types::DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: None,
     };
-
     Ok(build_json_response(200, &response))
 }
 
@@ -182,6 +159,16 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let aws_config = aws_config::load_from_env().await;
+    let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
+    let queue_url = std::env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set");
+
     info!("Starting DebordoLambda Discord handler");
-    lambda_runtime::run(service_fn(handler)).await
+
+    lambda_runtime::run(service_fn(move |event| {
+        let client = sqs_client.clone();
+        let url = queue_url.clone();
+        async move { handler(event, client, url).await }
+    }))
+    .await
 }
