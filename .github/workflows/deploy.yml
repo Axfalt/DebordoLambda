@@ -36,19 +36,18 @@ jobs:
         run: |
           cargo lambda deploy \
             --binary-name bootstrap \
-            --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
+            --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
-            --architecture arm64 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
-            DebordoLambda -- --architecture arm64 
+            DebordoLambda
 
       - name: Deploy Worker Lambda
         run: |
           cargo lambda deploy \
             --binary-name worker \
-            --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
+            --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --timeout 300 \
-            DebordoLambdaWorker -- --architecture arm64 
+            DebordoLambdaWorker
 
