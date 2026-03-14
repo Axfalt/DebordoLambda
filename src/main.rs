@@ -6,7 +6,7 @@
 mod config;
 mod discord;
 
-use aws_lambda_events::apigw::{ApiGatewayProxyRequest, ApiGatewayProxyResponse};
+use aws_lambda_events::apigw::{ApiGatewayV2httpRequest, ApiGatewayV2httpResponse};
 use aws_lambda_events::http::HeaderMap;
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use serde::Serialize;
@@ -24,10 +24,10 @@ use crate::discord::{
 
 /// Handler principal pour les requêtes Lambda via API Gateway.
 async fn handler(
-    event: LambdaEvent<ApiGatewayProxyRequest>,
+    event: LambdaEvent<ApiGatewayV2httpRequest>,
     sqs_client: aws_sdk_sqs::Client,
     queue_url: String,
-) -> Result<ApiGatewayProxyResponse, Error> {
+) -> Result<ApiGatewayV2httpResponse, Error> {
     let public_key =
         std::env::var("DISCORD_PUBLIC_KEY").expect("DISCORD_PUBLIC_KEY must be set");
 
@@ -75,7 +75,7 @@ async fn handler(
 }
 
 /// Répond au PING de validation Discord.
-fn handle_ping() -> Result<ApiGatewayProxyResponse, Error> {
+fn handle_ping() -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Received PING, responding with PONG");
     let response = DiscordResponse {
         response_type: response_types::PONG,
@@ -89,7 +89,7 @@ async fn handle_command(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
     queue_url: &str,
-) -> Result<ApiGatewayProxyResponse, Error> {
+) -> Result<ApiGatewayV2httpResponse, Error> {
     let token = interaction.token.unwrap_or_default();
     let application_id = interaction.application_id.unwrap_or_default();
 
@@ -122,20 +122,20 @@ async fn handle_command(
 // ============================================================================
 
 /// Construit une réponse HTTP simple avec du texte.
-fn build_response(status_code: i64, body: &str) -> ApiGatewayProxyResponse {
-    let mut r = ApiGatewayProxyResponse::default();
+fn build_response(status_code: i64, body: &str) -> ApiGatewayV2httpResponse {
+    let mut r = ApiGatewayV2httpResponse::default();
     r.status_code = status_code;
     r.body = Some(aws_lambda_events::encodings::Body::Text(body.to_string()));
     r
 }
 
 /// Construit une réponse HTTP JSON.
-fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayProxyResponse {
+fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayV2httpResponse {
     let json_body = serde_json::to_string(body).unwrap_or_default();
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
 
-    let mut r = ApiGatewayProxyResponse::default();
+    let mut r = ApiGatewayV2httpResponse::default();
     r.status_code = status_code;
     r.headers = headers;
     r.body = Some(aws_lambda_events::encodings::Body::Text(json_body));
