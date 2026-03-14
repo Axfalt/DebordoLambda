@@ -25,29 +25,29 @@ url = f"https://discord.com/api/v10/applications/{APPLICATION_ID}/commands"
 
 command = {
     "name": "debordo",
-    "description": "Calcule la probabilité de débordement en fonction des paramètres de simulation",
+    "description": "Calcule la probabilité de débordement d'une ville",
     "options": [
         {
             "name": "defense",
-            "description": "Valeur de la défense de la ville",
+            "description": "Valeur de défense de la ville",
             "type": 4,  # INTEGER
             "required": True
         },
         {
             "name": "tdg_min",
-            "description": "TDG minimum de l'attaquant",
+            "description": "Estimation minimale de la TDG",
             "type": 4,  # INTEGER
             "required": True
         },
         {
             "name": "tdg_max",
-            "description": "TDG maximum de l'attaquant",
+            "description": "Estimation maximale de la TDG",
             "type": 4,  # INTEGER
             "required": True
         },
         {
             "name": "min_def",
-            "description": "Défense minimale des cibles",
+            "description": "Défense minimale en maison",
             "type": 4,  # INTEGER
             "required": True
         },
