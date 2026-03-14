@@ -14,7 +14,7 @@ use crate::config::{format_results, SimConfig, SimulationJob};
 use crate::discord::api::send_followup;
 use crate::simulation::calculate_defense_probabilities;
 
-const SIMULATION_TIMEOUT_SECS: u64 = 290;
+const SIMULATION_TIMEOUT_SECS: u64 = 120;
 
 async fn handler(event: LambdaEvent<SqsEvent>) -> Result<(), Error> {
     for record in event.payload.records {
