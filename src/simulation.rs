@@ -2,7 +2,6 @@ use std::cmp::max;
 use rand::prelude::*;
 use rand::distributions::Uniform;
 use rand_mt::Mt64;
-use rayon::prelude::*;
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -165,33 +164,23 @@ fn overflow_probability(
 
 
 pub fn calculate_defense_probabilities(
-    defense_range: (i32, i32),
+    defense: i32,
     tdg_interval: (i32, i32),
     min_def: i32,
     nb_drapo: i32,
     day: i32,
     iterations: u32,
-    points: u32,
     is_reactor_built: bool,
-) -> Vec<(f64, f64)> {
-    let step = (defense_range.1 as f64 + 1.0 - defense_range.0 as f64) / points as f64;
-
-    (0..points)
-        .into_par_iter()
-        .map(|i| {
-            let defense = defense_range.0 as f64 + i as f64 * step;
-            let prob = overflow_probability(
-                defense,
-                tdg_interval,
-                min_def,
-                nb_drapo,
-                day,
-                iterations,
-                is_reactor_built,
-            );
-            (defense, prob)
-        })
-        .collect()
+) -> f64 {
+    overflow_probability(
+        defense as f64,
+        tdg_interval,
+        min_def,
+        nb_drapo,
+        day,
+        iterations,
+        is_reactor_built,
+    )
 }
 
 #[cfg(test)]
@@ -335,37 +324,16 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_calculate_defense_probs_returns_correct_count() {
-        let results =
-            calculate_defense_probabilities((100, 200), (50, 60), 10, 0, 1, 100, 5, false);
-        assert_eq!(results.len(), 5);
-    }
-
-    #[test]
-    fn test_calculate_defense_probs_single_point_no_panic() {
-        // Regression: points=1 previously panicked due to division by (points-1).
-        let results =
-            calculate_defense_probabilities((150, 200), (50, 60), 10, 0, 1, 100, 1, false);
-        assert_eq!(results.len(), 1);
+    fn test_calculate_defense_probs_returns_probability() {
+        let prob = calculate_defense_probabilities(150, (50, 60), 10, 0, 1, 100, false);
+        assert!(prob >= 0.0 && prob <= 100.0);
     }
 
     #[test]
     fn test_calculate_defense_probs_impenetrable_defense_is_zero() {
-        // Defense >> max possible attack → no overflow → 0% probability on all points.
-        let results = calculate_defense_probabilities(
-            (100_000, 100_010),
-            (50, 100),
-            10,
-            0,
-            1,
-            100,
-            5,
-            false,
-        );
-        assert!(
-            results.iter().all(|(_, prob)| *prob == 0.0),
-            "impenetrable defense should yield 0% on every point"
-        );
+        // Defense >> max possible attack → no overflow → 0% probability.
+        let prob = calculate_defense_probabilities(100_000, (50, 100), 10, 0, 1, 100, false);
+        assert_eq!(prob, 0.0, "impenetrable defense should yield 0%");
     }
 }
 

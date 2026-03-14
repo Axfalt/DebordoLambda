@@ -41,35 +41,29 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
     let config = SimConfig::from_options(&job.options);
     info!("Processing simulation with config: {:?}", config);
 
-    let defense_range = config.defense_range();
+    let defense = config.defense;
     let tdg_interval = config.tdg_interval();
     let min_def = config.min_def;
     let nb_drapo = config.nb_drapo;
     let day = config.day;
     let iterations = config.iterations;
-    let points = config.points;
     let is_reactor_built = config.is_reactor_built;
 
     let result = tokio::task::spawn_blocking(move || {
         calculate_defense_probabilities(
-            defense_range,
+            defense,
             tdg_interval,
             min_def,
             nb_drapo,
             day,
             iterations,
-            points,
             is_reactor_built,
         )
     })
     .await;
 
     let content = match result {
-        Ok(results) => {
-            let mut sorted = results;
-            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            format_results(&config, &sorted)
-        }
+        Ok(prob) => format_results(&config, prob),
         Err(e) => {
             error!("Simulation panicked: {}", e);
             "❌ La simulation a échoué. Veuillez réessayer.".to_string()

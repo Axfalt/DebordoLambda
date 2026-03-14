@@ -28,14 +28,8 @@ command = {
     "description": "Calcule la probabilité de débordement en fonction des paramètres de simulation",
     "options": [
         {
-            "name": "defense_min",
-            "description": "Valeur minimale de la défense à tester",
-            "type": 4,  # INTEGER
-            "required": True
-        },
-        {
-            "name": "defense_max",
-            "description": "Valeur maximale de la défense à tester",
+            "name": "defense",
+            "description": "Valeur de la défense de la ville",
             "type": 4,  # INTEGER
             "required": True
         },
@@ -72,12 +66,6 @@ command = {
         {
             "name": "iterations",
             "description": "Nombre d'itérations (défaut: 10000)",
-            "type": 4,  # INTEGER
-            "required": False
-        },
-        {
-            "name": "points",
-            "description": "Nombre de points de défense à calculer (défaut: 10)",
             "type": 4,  # INTEGER
             "required": False
         },

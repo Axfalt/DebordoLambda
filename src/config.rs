@@ -14,39 +14,35 @@ pub struct CommandOption {
 /// Configuration de simulation avec tous les paramètres nécessaires.
 #[derive(Debug, Default, Clone)]
 pub struct SimConfig {
-    pub defense_min: i32,
-    pub defense_max: i32,
+    pub defense: i32,
     pub tdg_min: i32,
     pub tdg_max: i32,
     pub min_def: i32,
     pub nb_drapo: i32,
     pub day: i32,
     pub iterations: u32,
-    pub points: u32,
     pub is_reactor_built: bool,
 }
 
 impl SimConfig {
     /// Crée une configuration à partir des options de commande Discord.
+    /// Crée une configuration à partir des options de commande Discord.
     pub fn from_options(options: &[CommandOption]) -> Self {
         let mut config = SimConfig {
             iterations: 10000,
-            points: 10,
             day: 1,
             ..Default::default()
         };
 
         for opt in options {
             match opt.name.as_str() {
-                "defense_min" => config.defense_min = opt.value.as_i64().unwrap_or(0) as i32,
-                "defense_max" => config.defense_max = opt.value.as_i64().unwrap_or(0) as i32,
+                "defense" => config.defense = opt.value.as_i64().unwrap_or(0) as i32,
                 "tdg_min" => config.tdg_min = opt.value.as_i64().unwrap_or(0) as i32,
                 "tdg_max" => config.tdg_max = opt.value.as_i64().unwrap_or(0) as i32,
                 "min_def" => config.min_def = opt.value.as_i64().unwrap_or(0) as i32,
                 "nb_drapo" => config.nb_drapo = opt.value.as_i64().unwrap_or(0) as i32,
                 "day" => config.day = opt.value.as_i64().unwrap_or(1) as i32,
                 "iterations" => config.iterations = opt.value.as_i64().unwrap_or(10000) as u32,
-                "points" => config.points = opt.value.as_i64().unwrap_or(10) as u32,
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 _ => {}
             }
@@ -55,11 +51,6 @@ impl SimConfig {
         config
     }
 
-
-    pub fn defense_range(&self) -> (i32, i32) {
-        (self.defense_min, self.defense_max)
-    }
-    
     pub fn tdg_interval(&self) -> (i32, i32) {
         (self.tdg_min, self.tdg_max)
     }
@@ -74,14 +65,11 @@ pub struct SimulationJob {
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
-pub fn format_results(config: &SimConfig, results: &[(f64, f64)]) -> String {
+pub fn format_results(config: &SimConfig, prob: f64) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
-    output.push_str(&format!(
-        "• Défense: {} - {}\n",
-        config.defense_min, config.defense_max
-    ));
+    output.push_str(&format!("• Défense: {}\n", config.defense));
     output.push_str(&format!(
         "• TDG: {} - {}\n",
         config.tdg_min, config.tdg_max
@@ -91,14 +79,7 @@ pub fn format_results(config: &SimConfig, results: &[(f64, f64)]) -> String {
     output.push_str(&format!("• Jour: {}\n", config.day));
     output.push_str(&format!("• Itérations: {}\n\n", config.iterations));
 
-    output.push_str("```\n");
-    output.push_str("Défense    | Prob. mort\n");
-    output.push_str("-----------|-----------\n");
-
-    for (defense, prob) in results {
-        output.push_str(&format!("{:>9.1} | {:>8.3}%\n", defense, prob));
-    }
-    output.push_str("```");
+    output.push_str(&format!("**Probabilité de mort: {:.3}%**", prob));
 
     output
 }
@@ -121,36 +102,30 @@ mod tests {
         let config = SimConfig::from_options(&[]);
         assert_eq!(config.day, 1);
         assert_eq!(config.iterations, 10000);
-        assert_eq!(config.points, 10);
-        assert_eq!(config.defense_min, 0);
-        assert_eq!(config.defense_max, 0);
+        assert_eq!(config.defense, 0);
         assert!(!config.is_reactor_built);
     }
 
     #[test]
     fn test_simconfig_parses_all_options() {
         let options = vec![
-            make_opt("defense_min", json!(100)),
-            make_opt("defense_max", json!(200)),
+            make_opt("defense", json!(150)),
             make_opt("tdg_min", json!(50)),
             make_opt("tdg_max", json!(80)),
             make_opt("min_def", json!(30)),
             make_opt("nb_drapo", json!(3)),
             make_opt("day", json!(7)),
             make_opt("iterations", json!(500)),
-            make_opt("points", json!(5)),
             make_opt("reactor", json!(true)),
         ];
         let config = SimConfig::from_options(&options);
-        assert_eq!(config.defense_min, 100);
-        assert_eq!(config.defense_max, 200);
+        assert_eq!(config.defense, 150);
         assert_eq!(config.tdg_min, 50);
         assert_eq!(config.tdg_max, 80);
         assert_eq!(config.min_def, 30);
         assert_eq!(config.nb_drapo, 3);
         assert_eq!(config.day, 7);
         assert_eq!(config.iterations, 500);
-        assert_eq!(config.points, 5);
         assert!(config.is_reactor_built);
     }
 
@@ -161,7 +136,6 @@ mod tests {
         let config = SimConfig::from_options(&options);
         assert_eq!(config.day, 5);
         assert_eq!(config.iterations, 10000);
-        assert_eq!(config.points, 10);
         assert!(!config.is_reactor_built);
     }
 
@@ -175,13 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn test_simconfig_defense_range() {
-        let options = vec![
-            make_opt("defense_min", json!(100)),
-            make_opt("defense_max", json!(200)),
-        ];
+    fn test_simconfig_defense() {
+        let options = vec![make_opt("defense", json!(150))];
         let config = SimConfig::from_options(&options);
-        assert_eq!(config.defense_range(), (100, 200));
+        assert_eq!(config.defense, 150);
     }
 
     #[test]
@@ -201,10 +172,10 @@ mod tests {
     #[test]
     fn test_format_results_contains_section_headers() {
         let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, &[]);
+        let output = format_results(&config, 0.0);
         assert!(output.contains("Résultats de la simulation"));
         assert!(output.contains("Défense"));
-        assert!(output.contains("Prob. mort"));
+        assert!(output.contains("Probabilité de mort"));
     }
 
     #[test]
@@ -212,32 +183,19 @@ mod tests {
         let options = vec![
             make_opt("day", json!(3)),
             make_opt("iterations", json!(500)),
-            make_opt("defense_min", json!(100)),
-            make_opt("defense_max", json!(200)),
+            make_opt("defense", json!(150)),
         ];
         let config = SimConfig::from_options(&options);
-        let output = format_results(&config, &[]);
+        let output = format_results(&config, 5.678);
         assert!(output.contains("Jour: 3"));
         assert!(output.contains("Itérations: 500"));
-        assert!(output.contains("Défense: 100 - 200"));
+        assert!(output.contains("Défense: 150"));
     }
 
     #[test]
-    fn test_format_results_contains_data_rows() {
+    fn test_format_results_contains_probability() {
         let config = SimConfig::from_options(&[]);
-        let results = vec![(150.0_f64, 5.678_f64), (200.0, 0.001)];
-        let output = format_results(&config, &results);
-        assert!(output.contains("150"), "should contain defense value 150");
+        let output = format_results(&config, 5.678);
         assert!(output.contains("5.678"), "should contain probability 5.678");
-        assert!(output.contains("200"), "should contain defense value 200");
-    }
-
-    #[test]
-    fn test_format_results_empty_results_still_valid() {
-        let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, &[]);
-        // Should still produce a valid output with headers but no data rows
-        assert!(output.contains("```"));
-        assert!(output.contains("Défense"));
     }
 }
