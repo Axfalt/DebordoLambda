@@ -6,11 +6,15 @@ mod simulation;
 
 use aws_lambda_events::sqs::SqsEvent;
 use lambda_runtime::{service_fn, Error, LambdaEvent};
+use tokio::time::{timeout, Duration};
 use tracing::{error, info};
+use std::time::Instant;
 
 use crate::config::{format_results, SimConfig, SimulationJob};
 use crate::discord::api::send_followup;
 use crate::simulation::calculate_defense_probabilities;
+
+const SIMULATION_TIMEOUT_SECS: u64 = 290;
 
 async fn handler(event: LambdaEvent<SqsEvent>) -> Result<(), Error> {
     for record in event.payload.records {
@@ -49,25 +53,34 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
     let iterations = config.iterations;
     let is_reactor_built = config.is_reactor_built;
 
-    let result = tokio::task::spawn_blocking(move || {
-        calculate_defense_probabilities(
-            defense,
-            tdg_interval,
-            min_def,
-            nb_drapo,
-            day,
-            iterations,
-            is_reactor_built,
-        )
-    })
+    let start = Instant::now();
+    let result = timeout(
+        Duration::from_secs(SIMULATION_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            calculate_defense_probabilities(
+                defense,
+                tdg_interval,
+                min_def,
+                nb_drapo,
+                day,
+                iterations,
+                is_reactor_built,
+            )
+        }),
+    )
     .await;
 
     let content = match result {
-        Ok(prob) => format_results(&config, prob),
-        Err(e) => {
+        Err(_elapsed) => {
+            error!("Simulation timed out after {}s", SIMULATION_TIMEOUT_SECS);
+            "⏱️ La simulation a expiré. Essayez avec moins de points ou d'itérations."
+                .to_string()
+        }
+        Ok(Err(e)) => {
             error!("Simulation panicked: {}", e);
             "❌ La simulation a échoué. Veuillez réessayer.".to_string()
         }
+        Ok(Ok(prob)) => format_results(&config, prob, start.elapsed().as_millis()),
     };
 
     send_followup(&job.application_id, &job.token, &content).await?;

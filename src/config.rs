@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_ITERATIONS: u32 = 50_000;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommandOption {
     pub name: String,
@@ -26,7 +28,6 @@ pub struct SimConfig {
 
 impl SimConfig {
     /// Crée une configuration à partir des options de commande Discord.
-    /// Crée une configuration à partir des options de commande Discord.
     pub fn from_options(options: &[CommandOption]) -> Self {
         let mut config = SimConfig {
             iterations: 10000,
@@ -42,7 +43,7 @@ impl SimConfig {
                 "min_def" => config.min_def = opt.value.as_i64().unwrap_or(0) as i32,
                 "nb_drapo" => config.nb_drapo = opt.value.as_i64().unwrap_or(0) as i32,
                 "day" => config.day = opt.value.as_i64().unwrap_or(1) as i32,
-                "iterations" => config.iterations = opt.value.as_i64().unwrap_or(10000) as u32,
+                "iterations" => config.iterations = (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS),
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 _ => {}
             }
@@ -65,21 +66,24 @@ pub struct SimulationJob {
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
-pub fn format_results(config: &SimConfig, prob: f64) -> String {
+pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
-    output.push_str(&format!("• Défense: {}\n", config.defense));
+    output.push_str(&format!("• 🛡️ Défense: {}\n", config.defense));
     output.push_str(&format!(
-        "• TDG: {} - {}\n",
+        "• 🔭 TDG: {} - {}\n",
         config.tdg_min, config.tdg_max
     ));
-    output.push_str(&format!("• Défense min: {}\n", config.min_def));
-    output.push_str(&format!("• Drapeaux: {}\n", config.nb_drapo));
-    output.push_str(&format!("• Jour: {}\n", config.day));
-    output.push_str(&format!("• Itérations: {}\n\n", config.iterations));
+    output.push_str(&format!("• 🏠 Défense min: {}\n", config.min_def));
+    output.push_str(&format!("• 📅 Jour: {}\n", config.day));
+    output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
 
-    output.push_str(&format!("**Probabilité de mort: {:.3}%**", prob));
+    output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
+    output.push_str(&format!(
+        "-# ⏱️ {} simulations en {}ms",
+        config.iterations, elapsed_ms
+    ));
 
     output
 }
@@ -92,10 +96,6 @@ mod tests {
     fn make_opt(name: &str, value: serde_json::Value) -> CommandOption {
         CommandOption { name: name.to_string(), value }
     }
-
-    // =========================================================================
-    // SimConfig::from_options
-    // =========================================================================
 
     #[test]
     fn test_simconfig_defaults_when_no_options() {
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn test_format_results_contains_section_headers() {
         let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, 0.0);
+        let output = format_results(&config, 0.0, 0);
         assert!(output.contains("Résultats de la simulation"));
         assert!(output.contains("Défense"));
         assert!(output.contains("Probabilité de mort"));
@@ -186,7 +186,7 @@ mod tests {
             make_opt("defense", json!(150)),
         ];
         let config = SimConfig::from_options(&options);
-        let output = format_results(&config, 5.678);
+        let output = format_results(&config, 5.678, 42);
         assert!(output.contains("Jour: 3"));
         assert!(output.contains("Itérations: 500"));
         assert!(output.contains("Défense: 150"));
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn test_format_results_contains_probability() {
         let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, 5.678);
+        let output = format_results(&config, 5.678, 0);
         assert!(output.contains("5.678"), "should contain probability 5.678");
     }
 }
