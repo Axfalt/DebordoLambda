@@ -1,7 +1,4 @@
-//! DebordoLambda - Commande Discord slash pour simulations Monte Carlo sur AWS Lambda.
-//!
-//! Ce projet fournit une commande `/debordo` pour calculer les probabilités
-//! de débordement dans un jeu de stratégie.
+//! DebordoLambda - Commande Discord slash pour simulations de débordements
 
 mod config;
 mod discord;

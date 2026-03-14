@@ -66,7 +66,7 @@ pub struct SimulationJob {
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
-pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128) -> String {
+pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128, total_runs: u64) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
@@ -82,7 +82,7 @@ pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128) -> String
     output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
     output.push_str(&format!(
         "-# ⏱️ {} simulations en {}ms",
-        config.iterations, elapsed_ms
+        total_runs, elapsed_ms
     ));
 
     output
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn test_format_results_contains_section_headers() {
         let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, 0.0, 0);
+        let output = format_results(&config, 0.0, 0, 0);
         assert!(output.contains("Résultats de la simulation"));
         assert!(output.contains("Défense"));
         assert!(output.contains("Probabilité de mort"));
@@ -186,7 +186,7 @@ mod tests {
             make_opt("defense", json!(150)),
         ];
         let config = SimConfig::from_options(&options);
-        let output = format_results(&config, 5.678, 42);
+        let output = format_results(&config, 5.678, 42, 5000);
         assert!(output.contains("Jour: 3"));
         assert!(output.contains("Itérations: 500"));
         assert!(output.contains("Défense: 150"));
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn test_format_results_contains_probability() {
         let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, 5.678, 0);
+        let output = format_results(&config, 5.678, 0, 0);
         assert!(output.contains("5.678"), "should contain probability 5.678");
     }
 }

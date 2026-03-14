@@ -80,7 +80,7 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
             error!("Simulation panicked: {}", e);
             "❌ La simulation a échoué. Veuillez réessayer.".to_string()
         }
-        Ok(Ok(prob)) => format_results(&config, prob, start.elapsed().as_millis()),
+        Ok(Ok((prob, total_runs))) => format_results(&config, prob, start.elapsed().as_millis(), total_runs),
     };
 
     send_followup(&job.application_id, &job.token, &content).await?;

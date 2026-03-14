@@ -139,9 +139,10 @@ fn overflow_probability(
     day: i32,
     iterations: u32,
     is_reactor_built: bool,
-) -> f64 {
+) -> (f64, u64) {
     let prob_dist = attack_distribution(tdg_interval.0, tdg_interval.1, day);
     let mut overflow_prob = 0.0;
+    let mut total_runs: u64 = 0;
 
     for (&attack, &base_prob) in &prob_dist {
         let overflow = attack as f64 - defense;
@@ -156,10 +157,11 @@ fn overflow_probability(
                 is_reactor_built,
             );
             overflow_prob += base_prob * success_prob;
+            total_runs += iterations as u64;
         }
     }
 
-    overflow_prob * 100.0
+    (overflow_prob * 100.0, total_runs)
 }
 
 
@@ -171,7 +173,7 @@ pub fn calculate_defense_probabilities(
     day: i32,
     iterations: u32,
     is_reactor_built: bool,
-) -> f64 {
+) -> (f64, u64) {
     overflow_probability(
         defense as f64,
         tdg_interval,
@@ -325,15 +327,16 @@ mod tests {
 
     #[test]
     fn test_calculate_defense_probs_returns_probability() {
-        let prob = calculate_defense_probabilities(150, (50, 60), 10, 0, 1, 100, false);
+        let (prob, _) = calculate_defense_probabilities(150, (50, 60), 10, 0, 1, 100, false);
         assert!(prob >= 0.0 && prob <= 100.0);
     }
 
     #[test]
     fn test_calculate_defense_probs_impenetrable_defense_is_zero() {
         // Defense >> max possible attack → no overflow → 0% probability.
-        let prob = calculate_defense_probabilities(100_000, (50, 100), 10, 0, 1, 100, false);
+        let (prob, total_runs) = calculate_defense_probabilities(100_000, (50, 100), 10, 0, 1, 100, false);
         assert_eq!(prob, 0.0, "impenetrable defense should yield 0%");
+        assert_eq!(total_runs, 0, "no overflow means no MC runs");
     }
 }
 
