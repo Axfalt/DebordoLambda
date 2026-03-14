@@ -1,3 +1,6 @@
+// Shared between bootstrap and worker binaries — suppress dead-code lints.
+#![allow(dead_code)]
+
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 pub fn verify_discord_signature(

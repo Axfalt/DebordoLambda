@@ -1,3 +1,6 @@
+// Shared between bootstrap and worker binaries — suppress dead-code lints.
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use crate::config::CommandOption;
 

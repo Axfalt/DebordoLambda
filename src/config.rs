@@ -1,4 +1,7 @@
 //! Configuration de simulation extraite des paramètres Discord.
+// Shared between bootstrap and worker binaries — suppress dead-code lints for
+// items only used by one of the two.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,6 @@
+// Shared between bootstrap and worker binaries — suppress dead-code lints.
+#![allow(dead_code)]
+
 pub async fn send_followup(
     application_id: &str,
     token: &str,

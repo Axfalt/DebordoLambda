@@ -123,13 +123,10 @@ async fn handle_command(
 
 /// Construit une réponse HTTP simple avec du texte.
 fn build_response(status_code: i64, body: &str) -> ApiGatewayProxyResponse {
-    ApiGatewayProxyResponse {
-        status_code,
-        headers: HeaderMap::new(),
-        multi_value_headers: HeaderMap::new(),
-        body: Some(aws_lambda_events::encodings::Body::Text(body.to_string())),
-        is_base64_encoded: false,
-    }
+    let mut r = ApiGatewayProxyResponse::default();
+    r.status_code = status_code;
+    r.body = Some(aws_lambda_events::encodings::Body::Text(body.to_string()));
+    r
 }
 
 /// Construit une réponse HTTP JSON.
@@ -138,13 +135,11 @@ fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayPr
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
 
-    ApiGatewayProxyResponse {
-        status_code,
-        headers,
-        multi_value_headers: HeaderMap::new(),
-        body: Some(aws_lambda_events::encodings::Body::Text(json_body)),
-        is_base64_encoded: false,
-    }
+    let mut r = ApiGatewayProxyResponse::default();
+    r.status_code = status_code;
+    r.headers = headers;
+    r.body = Some(aws_lambda_events::encodings::Body::Text(json_body));
+    r
 }
 
 // ============================================================================

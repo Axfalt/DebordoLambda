@@ -14,8 +14,8 @@ Variables d'environnement requises:
 import os
 import requests
 
-BOT_TOKEN = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-APPLICATION_ID = "1455553191914639504"
+BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+APPLICATION_ID = os.environ.get("DISCORD_APPLICATION_ID", "")
 
 if not BOT_TOKEN or not APPLICATION_ID:
     print("❌ Veuillez définir DISCORD_BOT_TOKEN et DISCORD_APPLICATION_ID")
@@ -71,7 +71,7 @@ command = {
         },
         {
             "name": "iterations",
-            "description": "Nombre d'itérations Monte Carlo (défaut: 10000)",
+            "description": "Nombre d'itérations (défaut: 10000)",
             "type": 4,  # INTEGER
             "required": False
         },
