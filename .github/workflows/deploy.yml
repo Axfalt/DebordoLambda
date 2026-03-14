@@ -38,6 +38,7 @@ jobs:
             --binary-name bootstrap \
             --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
+            --architecture arm64 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
             DebordoLambda
@@ -48,6 +49,7 @@ jobs:
             --binary-name worker \
             --iam-role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
+            --architecture arm64 \
             --timeout 300 \
             DebordoLambdaWorker
 

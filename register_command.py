@@ -59,9 +59,9 @@ command = {
         },
         {
             "name": "nb_drapo",
-            "description": "Nombre de drapeaux",
+            "description": "Nombre de drapeaux (défaut: 0, fonctionnalité legacy)",
             "type": 4,  # INTEGER
-            "required": True
+            "required": False
         },
         {
             "name": "day",
