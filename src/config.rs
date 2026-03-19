@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const MAX_ITERATIONS: u32 = 50_000;
+pub const MAX_ITERATIONS: u32 = 10_000_000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommandOption {
