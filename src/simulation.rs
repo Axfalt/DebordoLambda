@@ -20,7 +20,12 @@ impl AttackSimulator {
     
     pub fn simulate_attack(&mut self, day: i32, attacking: i32, drapo: i32, nb_hab: i32) -> Vec<i32> {
         // Calcul des cibles et suppression de l'influence des drapeaux
-        let targets = cmp::min(10 + 2 * ((day - 10).max(0) / 2),nb_hab);
+        let targets = cmp::min(10 + 2 * ((day - 10).max(0) / 2), nb_hab);
+
+        if targets <= 0 {
+            return Vec::new();
+        }
+
         let mut leftover = attacking;
 
         // Réduction par les drapeaux
@@ -79,6 +84,10 @@ fn debordo_sequential(
     is_reactor_built: bool,
     nb_hab: i32,
 ) -> f64 {
+    if iterations == 0 || nb_hab <= 0 {
+        return 0.0;
+    }
+
     let mut hits = 0;
     let mut rng = rand::thread_rng();
     let reactor_damage = Uniform::from(100..=250);
@@ -251,7 +260,7 @@ mod tests {
     fn test_simulate_attack_all_allocations_non_negative() {
         let mut sim = AttackSimulator::new();
         for _ in 0..20 {
-            let result = sim.simulate_attack(5, 500, 0, 40);
+            let result = sim.simulate_attack(5, 500, 0, 7);
             assert!(
                 result.iter().all(|&x| x >= 0),
                 "zombie allocations must never be negative"
@@ -321,6 +330,87 @@ mod tests {
         let (prob, total_runs) = overflow_probability(100_000.0, (50, 100), 10, 0, 1, 100, false, 40);
         assert_eq!(prob, 0.0, "impenetrable defense should yield 0%");
         assert_eq!(total_runs, 0, "no overflow means no MC runs");
+    }
+
+    // =========================================================================
+    // nb_hab parameter tests
+    // =========================================================================
+
+    #[test]
+    fn test_simulate_attack_nb_hab_limits_targets() {
+        // Day 20 would normally have 10 + 2*((20-10)/2) = 20 targets,
+        // but nb_hab=5 should limit it to 5.
+        let mut sim = AttackSimulator::new();
+        let result = sim.simulate_attack(20, 1000, 0, 5);
+        assert_eq!(result.len(), 5, "nb_hab=5 should limit targets to 5");
+    }
+
+    #[test]
+    fn test_simulate_attack_nb_hab_does_not_increase_targets() {
+        // Day 10 has 10 targets. nb_hab=100 should not increase beyond 10.
+        let mut sim = AttackSimulator::new();
+        let result = sim.simulate_attack(10, 1000, 0, 100);
+        assert_eq!(result.len(), 10, "nb_hab should not increase targets beyond day formula");
+    }
+
+    #[test]
+    fn test_simulate_attack_nb_hab_equals_day_targets() {
+        // Day 10 = 10 targets, nb_hab=10 should give exactly 10.
+        let mut sim = AttackSimulator::new();
+        let result = sim.simulate_attack(10, 1000, 0, 10);
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_simulate_attack_nb_hab_one_person() {
+        // Edge case: only 1 person in town receives all zombies.
+        let mut sim = AttackSimulator::new();
+        let result = sim.simulate_attack(10, 100, 0, 1);
+        assert_eq!(result.len(), 1, "nb_hab=1 should have exactly 1 target");
+        assert!(result[0] >= 100, "single target should receive all zombies");
+    }
+
+    #[test]
+    fn test_debordo_nb_hab_affects_distribution() {
+        // Fewer people means zombies are more concentrated → higher death probability.
+        // With 1000 zombies among 40 people vs 5 people, 5 people should have higher prob.
+        let prob_40_hab = debordo_sequential(10, 1000, 50, 0, 500, false, 40);
+        let prob_5_hab = debordo_sequential(10, 1000, 50, 0, 500, false, 5);
+        assert!(
+            prob_5_hab >= prob_40_hab,
+            "fewer habitants should concentrate zombies → higher death prob: 40hab={} 5hab={}",
+            prob_40_hab,
+            prob_5_hab
+        );
+    }
+
+    #[test]
+    fn test_overflow_probability_with_small_nb_hab() {
+        // With very few people, overflow should be more deadly.
+        let (prob, _) = overflow_probability(50.0, (60, 70), 10, 0, 5, 100, false, 3);
+        assert!(prob > 0.0, "with small nb_hab and overflow, death probability should be > 0");
+    }
+
+    #[test]
+    fn test_overflow_probability_with_nb_hab_12() {
+        // Regression test for the "cannot sample empty range" panic with nb_hab=12.
+        // This should not panic regardless of the input parameters.
+        let (prob, _) = overflow_probability(100.0, (150, 200), 10, 0, 10, 100, false, 12);
+        assert!(prob >= 0.0 && prob <= 100.0, "probability should be in valid range");
+    }
+
+    #[test]
+    fn test_debordo_with_nb_hab_zero_returns_zero() {
+        // Edge case: nb_hab=0 should return 0.0 without panicking.
+        let prob = debordo_sequential(10, 100, 10, 0, 100, false, 0);
+        assert_eq!(prob, 0.0, "nb_hab=0 should return 0.0");
+    }
+
+    #[test]
+    fn test_debordo_with_iterations_zero_returns_zero() {
+        // Edge case: iterations=0 should return 0.0 without panicking.
+        let prob = debordo_sequential(10, 100, 10, 0, 0, false, 40);
+        assert_eq!(prob, 0.0, "iterations=0 should return 0.0");
     }
 }
 

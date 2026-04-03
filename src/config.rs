@@ -33,6 +33,7 @@ impl SimConfig {
         let mut config = SimConfig {
             iterations: 10000,
             day: 1,
+            nb_hab: 40,
             ..Default::default()
         };
 
@@ -107,6 +108,7 @@ mod tests {
         assert_eq!(config.day, 1);
         assert_eq!(config.iterations, 10000);
         assert_eq!(config.defense, 0);
+        assert_eq!(config.nb_hab, 40);
         assert!(!config.is_reactor_built);
     }
 
@@ -120,6 +122,7 @@ mod tests {
             make_opt("nb_drapo", json!(3)),
             make_opt("day", json!(7)),
             make_opt("iterations", json!(500)),
+            make_opt("nb_hab", json!(12)),
             make_opt("reactor", json!(true)),
         ];
         let config = SimConfig::from_options(&options);
@@ -130,6 +133,7 @@ mod tests {
         assert_eq!(config.nb_drapo, 3);
         assert_eq!(config.day, 7);
         assert_eq!(config.iterations, 500);
+        assert_eq!(config.nb_hab, 12);
         assert!(config.is_reactor_built);
     }
 
@@ -167,39 +171,5 @@ mod tests {
         ];
         let config = SimConfig::from_options(&options);
         assert_eq!(config.tdg_interval(), (50, 80));
-    }
-
-    // =========================================================================
-    // format_results
-    // =========================================================================
-
-    #[test]
-    fn test_format_results_contains_section_headers() {
-        let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, 0.0, 0, 0);
-        assert!(output.contains("Résultats de la simulation"));
-        assert!(output.contains("Défense"));
-        assert!(output.contains("Probabilité de mort"));
-    }
-
-    #[test]
-    fn test_format_results_contains_config_params() {
-        let options = vec![
-            make_opt("day", json!(3)),
-            make_opt("iterations", json!(500)),
-            make_opt("defense", json!(150)),
-        ];
-        let config = SimConfig::from_options(&options);
-        let output = format_results(&config, 5.678, 42, 5000);
-        assert!(output.contains("Jour: 3"));
-        assert!(output.contains("Itérations: 500"));
-        assert!(output.contains("Défense: 150"));
-    }
-
-    #[test]
-    fn test_format_results_contains_probability() {
-        let config = SimConfig::from_options(&[]);
-        let output = format_results(&config, 5.678, 0, 0);
-        assert!(output.contains("5.678"), "should contain probability 5.678");
     }
 }

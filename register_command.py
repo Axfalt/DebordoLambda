@@ -76,7 +76,7 @@ command = {
             "required": False
         },
         {
-            "name": "nb_habitant",
+            "name": "nb_hab",
             "description": "Nombre de personnes en ville (défaut: 40)",
             "type": 4,  # INTEGER
             "required": False
