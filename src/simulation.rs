@@ -1,3 +1,4 @@
+use std::cmp;
 use std::cmp::max;
 use rand::prelude::*;
 use rand::distributions::Uniform;
@@ -17,9 +18,9 @@ impl AttackSimulator {
         }
     }
     
-    pub fn simulate_attack(&mut self, day: i32, attacking: i32, drapo: i32) -> Vec<i32> {
+    pub fn simulate_attack(&mut self, day: i32, attacking: i32, drapo: i32, nb_hab: i32) -> Vec<i32> {
         // Calcul des cibles et suppression de l'influence des drapeaux
-        let targets = 10 + 2 * ((day - 10).max(0) / 2);
+        let targets = cmp::min(10 + 2 * ((day - 10).max(0) / 2),nb_hab);
         let mut leftover = attacking;
 
         // Réduction par les drapeaux
@@ -76,6 +77,7 @@ fn debordo_sequential(
     nb_drapo: i32,
     iterations: u32,
     is_reactor_built: bool,
+    nb_hab: i32,
 ) -> f64 {
     let mut hits = 0;
     let mut rng = rand::thread_rng();
@@ -89,7 +91,7 @@ fn debordo_sequential(
             attacking
         };
         let mut simulator = AttackSimulator::new();
-        let allocated = simulator.simulate_attack(day, real_attacking, nb_drapo);
+        let allocated = simulator.simulate_attack(day, real_attacking, nb_drapo, nb_hab);
         if allocated.iter().any(|&x| x > threshold) {
             hits += 1;
         }
@@ -131,7 +133,7 @@ fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64
     prob
 }
 
-fn overflow_probability(
+pub fn overflow_probability(
     defense: f64,
     tdg_interval: (i32, i32),
     min_def: i32,
@@ -139,6 +141,7 @@ fn overflow_probability(
     day: i32,
     iterations: u32,
     is_reactor_built: bool,
+    nb_hab: i32
 ) -> (f64, u64) {
     let prob_dist = attack_distribution(tdg_interval.0, tdg_interval.1, day);
     let mut overflow_prob = 0.0;
@@ -155,6 +158,7 @@ fn overflow_probability(
                 nb_drapo,
                 iterations,
                 is_reactor_built,
+                nb_hab,
             );
             overflow_prob += base_prob * success_prob;
             total_runs += iterations as u64;
@@ -164,26 +168,6 @@ fn overflow_probability(
     (overflow_prob * 100.0, total_runs)
 }
 
-
-pub fn calculate_defense_probabilities(
-    defense: i32,
-    tdg_interval: (i32, i32),
-    min_def: i32,
-    nb_drapo: i32,
-    day: i32,
-    iterations: u32,
-    is_reactor_built: bool,
-) -> (f64, u64) {
-    overflow_probability(
-        defense as f64,
-        tdg_interval,
-        min_def,
-        nb_drapo,
-        day,
-        iterations,
-        is_reactor_built,
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -244,11 +228,11 @@ mod tests {
         let mut sim = AttackSimulator::new();
 
         // Day 10: 10 targets
-        let result = sim.simulate_attack(10, 1000, 0);
+        let result = sim.simulate_attack(10, 1000, 0, 40);
         assert_eq!(result.len(), 10);
 
         // Day 12: 12 targets
-        let result = sim.simulate_attack(12, 1000, 0);
+        let result = sim.simulate_attack(12, 1000, 0, 40);
         assert_eq!(result.len(), 12);
     }
 
@@ -256,7 +240,7 @@ mod tests {
     fn test_simulate_attack_zero_attacking_returns_zeros() {
         // With 0 overflow zombies and no flags, every cell gets 0.
         let mut sim = AttackSimulator::new();
-        let result = sim.simulate_attack(1, 0, 0);
+        let result = sim.simulate_attack(1, 0, 0, 40);
         assert!(
             result.iter().all(|&x| x == 0),
             "with 0 attacking and no flags, all cells should be 0"
@@ -267,7 +251,7 @@ mod tests {
     fn test_simulate_attack_all_allocations_non_negative() {
         let mut sim = AttackSimulator::new();
         for _ in 0..20 {
-            let result = sim.simulate_attack(5, 500, 0);
+            let result = sim.simulate_attack(5, 500, 0, 40);
             assert!(
                 result.iter().all(|&x| x >= 0),
                 "zombie allocations must never be negative"
@@ -282,7 +266,7 @@ mod tests {
         let mut sim = AttackSimulator::new();
         for _ in 0..10 {
             let attacking = 100;
-            let result = sim.simulate_attack(1, attacking, 0);
+            let result = sim.simulate_attack(1, attacking, 0, 40);
             let sum: i32 = result.iter().sum();
             assert!(sum >= attacking, "sum {} should be >= attacking {}", sum, attacking);
         }
@@ -295,14 +279,14 @@ mod tests {
     #[test]
     fn test_debordo_zero_attacking_gives_zero_probability() {
         // 0 overflow zombies → no cell can exceed any threshold → 0% death.
-        let prob = debordo_sequential(1, 0, 1, 0, 100, false);
+        let prob = debordo_sequential(1, 0, 1, 0, 100, false, 40);
         assert_eq!(prob, 0.0, "with 0 overflow zombies, death probability must be 0");
     }
 
     #[test]
     fn test_debordo_overwhelming_attack_near_full_probability() {
         // 10 000 zombies among 10 citizens, min threshold of 1 → always at least one death.
-        let prob = debordo_sequential(1, 10_000, 1, 0, 500, false);
+        let prob = debordo_sequential(1, 10_000, 1, 0, 500, false, 40);
         assert!(prob > 0.99, "expected probability > 0.99, got {}", prob);
     }
 
@@ -311,8 +295,8 @@ mod tests {
         // With reactor built: real_attacking = attacking + 100..=250.
         // A non-zero base attack with reactor should yield higher (or equal) probability
         // than without reactor for the same inputs when the threshold is moderate.
-        let prob_no_reactor = debordo_sequential(1, 50, 30, 0, 500, false);
-        let prob_reactor = debordo_sequential(1, 50, 30, 0, 500, true);
+        let prob_no_reactor = debordo_sequential(1, 50, 30, 0, 500, false, 40);
+        let prob_reactor = debordo_sequential(1, 50, 30, 0, 500, true, 40);
         assert!(
             prob_reactor >= prob_no_reactor,
             "reactor should increase attack power: no_reactor={} reactor={}",
@@ -327,14 +311,14 @@ mod tests {
 
     #[test]
     fn test_calculate_defense_probs_returns_probability() {
-        let (prob, _) = calculate_defense_probabilities(150, (50, 60), 10, 0, 1, 100, false);
+        let (prob, _) = overflow_probability(150.0, (50, 60), 10, 0, 1, 100, false, 40);
         assert!(prob >= 0.0 && prob <= 100.0);
     }
 
     #[test]
     fn test_calculate_defense_probs_impenetrable_defense_is_zero() {
         // Defense >> max possible attack → no overflow → 0% probability.
-        let (prob, total_runs) = calculate_defense_probabilities(100_000, (50, 100), 10, 0, 1, 100, false);
+        let (prob, total_runs) = overflow_probability(100_000.0, (50, 100), 10, 0, 1, 100, false, 40);
         assert_eq!(prob, 0.0, "impenetrable defense should yield 0%");
         assert_eq!(total_runs, 0, "no overflow means no MC runs");
     }

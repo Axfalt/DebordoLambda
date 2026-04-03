@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::config::{format_results, SimConfig, SimulationJob};
 use crate::discord::api::send_followup;
-use crate::simulation::calculate_defense_probabilities;
+use crate::simulation::overflow_probability;
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 
@@ -45,19 +45,20 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
     let config = SimConfig::from_options(&job.options);
     info!("Processing simulation with config: {:?}", config);
 
-    let defense = config.defense;
+    let defense = config.defense as f64;
     let tdg_interval = config.tdg_interval();
     let min_def = config.min_def;
     let nb_drapo = config.nb_drapo;
     let day = config.day;
     let iterations = config.iterations;
     let is_reactor_built = config.is_reactor_built;
+    let nb_hab = config.nb_hab;
 
     let start = Instant::now();
     let result = timeout(
         Duration::from_secs(SIMULATION_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            calculate_defense_probabilities(
+            overflow_probability(
                 defense,
                 tdg_interval,
                 min_def,
@@ -65,6 +66,7 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
                 day,
                 iterations,
                 is_reactor_built,
+                nb_hab,
             )
         }),
     )

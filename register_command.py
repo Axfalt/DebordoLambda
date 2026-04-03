@@ -74,6 +74,12 @@ command = {
             "description": "Le réacteur est-il construit? (défaut: false)",
             "type": 5,  # BOOLEAN
             "required": False
+        },
+        {
+            "name": "nb_habitant",
+            "description": "Nombre de personnes en ville (défaut: 40)",
+            "type": 4,  # INTEGER
+            "required": False
         }
     ]
 }

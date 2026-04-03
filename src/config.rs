@@ -24,6 +24,7 @@ pub struct SimConfig {
     pub day: i32,
     pub iterations: u32,
     pub is_reactor_built: bool,
+    pub nb_hab: i32,
 }
 
 impl SimConfig {
@@ -45,6 +46,7 @@ impl SimConfig {
                 "day" => config.day = opt.value.as_i64().unwrap_or(1) as i32,
                 "iterations" => config.iterations = (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS),
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
+                "nb_hab" => config.nb_hab = opt.value.as_i64().unwrap_or(40) as i32,
                 _ => {}
             }
         }
@@ -78,6 +80,8 @@ pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128, total_run
     output.push_str(&format!("• 🏠 Défense min: {}\n", config.min_def));
     output.push_str(&format!("• 📅 Jour: {}\n", config.day));
     output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
+    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n\n", config.nb_hab));
+
 
     output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
     output.push_str(&format!(
