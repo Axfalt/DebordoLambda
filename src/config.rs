@@ -74,14 +74,11 @@ pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128, total_run
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
     output.push_str(&format!("• 🛡️ Défense: {}\n", config.defense));
-    output.push_str(&format!(
-        "• 🔭 TDG: {} - {}\n",
-        config.tdg_min, config.tdg_max
-    ));
+    output.push_str(&format!("• 🔭 TDG: {} - {}\n", config.tdg_min, config.tdg_max));
+    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n", config.nb_hab));
     output.push_str(&format!("• 🏠 Défense min: {}\n", config.min_def));
     output.push_str(&format!("• 📅 Jour: {}\n", config.day));
-    output.push_str(&format!("• 🔁 Itérations: {}\n", config.iterations));
-    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n\n", config.nb_hab));
+    output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
 
 
     output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));

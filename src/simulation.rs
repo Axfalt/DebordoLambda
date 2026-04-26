@@ -158,7 +158,8 @@ pub fn overflow_probability(
 
     for (&attack, &base_prob) in &prob_dist {
         let overflow = attack as f64 - defense;
-        if overflow > 0.0 {
+        let max_reactor_damage = if is_reactor_built { 125.0 } else { 0.0 };
+        if overflow + max_reactor_damage > 0.0 {
             let overflow_int = overflow as i32;
             let success_prob = debordo_sequential(
                 day,
