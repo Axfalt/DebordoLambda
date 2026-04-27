@@ -120,22 +120,24 @@ fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64
     let mid_floor = mid.floor() as i32;
 
     let total_count = (tdg_max - tdg_min + 1) as f64;
-    let p = 1.0 / total_count;
+    let first_roll_p = 1.0 / total_count;
 
-    let n_high = if mid_floor < tdg_max {
-        (tdg_max - mid_floor) as f64
+    let high_start = (mid_floor + 1).max(tdg_min);
+    let n_high = if high_start <= tdg_max {
+        (tdg_max - high_start + 1) as f64
     } else {
         0.0
     };
-
-    let reroll_prob = n_high * p;
+    let reroll_trigger_prob = n_high * first_roll_p;
 
     let mut prob = HashMap::new();
     for i in tdg_min..=tdg_max {
         if i <= mid_floor {
-            prob.insert(i, p + reroll_prob * p);
+            // Kept on first roll + obtained on reroll when first roll was above midpoint.
+            prob.insert(i, first_roll_p + reroll_trigger_prob * first_roll_p);
         } else {
-            prob.insert(i, reroll_prob * p);
+            // Above midpoint can only occur from reroll result.
+            prob.insert(i, reroll_trigger_prob * first_roll_p);
         }
     }
 
@@ -160,10 +162,9 @@ pub fn overflow_probability(
         let overflow = attack as f64 - defense;
         let max_reactor_damage = if is_reactor_built { 125.0 } else { 0.0 };
         if overflow + max_reactor_damage > 0.0 {
-            let overflow_int = overflow as i32;
             let success_prob = debordo_sequential(
                 day,
-                overflow_int,
+                overflow as i32,
                 min_def,
                 nb_drapo,
                 iterations,
@@ -227,6 +228,36 @@ mod tests {
             dist[&40],
             dist[&45]
         );
+    }
+
+    #[test]
+    fn test_attack_distribution_midpoint_below_range_stays_normalized() {
+        // Day 1 midpoint is around 42, so [100,130] is entirely above midpoint.
+        // Reroll then applies to all values and distribution must remain normalized.
+        let dist = attack_distribution(100, 130, 1);
+        let sum: f64 = dist.values().sum();
+        assert!((sum - 1.0).abs() < 0.0001, "probabilities sum to {}, expected 1.0", sum);
+        assert!((dist[&100] - (1.0 / 31.0)).abs() < 0.0001);
+        assert!((dist[&130] - (1.0 / 31.0)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_attack_distribution_matches_one_reroll_mechanic() {
+        // Day 1 midpoint is around 42.
+        // In [40,45]:
+        // - first-roll keep zone = {40,41,42} (3 values)
+        // - reroll-trigger zone = {43,44,45} (3 values)
+        // So trigger prob = 3/6 = 1/2.
+        // Final probs:
+        //   <=42: 1/6 + (1/2)*(1/6) = 1/4
+        //   >42 : (1/2)*(1/6) = 1/12
+        let dist = attack_distribution(40, 45, 1);
+        for attack in 40..=42 {
+            assert!((dist[&attack] - 0.25).abs() < 0.0001);
+        }
+        for attack in 43..=45 {
+            assert!((dist[&attack] - (1.0 / 12.0)).abs() < 0.0001);
+        }
     }
 
     // =========================================================================
