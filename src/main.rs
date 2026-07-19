@@ -1,6 +1,7 @@
 //! DebordoLambda - Commande Discord slash pour simulations de débordements
 
 mod config;
+mod database;
 mod discord;
 
 use aws_lambda_events::apigw::{ApiGatewayV2httpRequest, ApiGatewayV2httpResponse};
@@ -24,6 +25,8 @@ async fn handler(
     event: LambdaEvent<ApiGatewayV2httpRequest>,
     sqs_client: aws_sdk_sqs::Client,
     queue_url: String,
+    kms_client: aws_sdk_kms::Client,
+    dynamodb_client: aws_sdk_dynamodb::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let public_key =
         std::env::var("DISCORD_PUBLIC_KEY").expect("DISCORD_PUBLIC_KEY must be set");
@@ -65,7 +68,20 @@ async fn handler(
     match interaction.interaction_type {
         interaction_types::PING => handle_ping(),
         interaction_types::APPLICATION_COMMAND => {
-            handle_command(interaction, &sqs_client, &queue_url).await
+            let cmd_name = interaction
+                .data
+                .as_ref()
+                .and_then(|d| d.name.as_deref())
+                .unwrap_or("");
+
+            if cmd_name == "register-key" {
+                handle_register_key_command()
+            } else {
+                handle_command(interaction, &sqs_client, &queue_url).await
+            }
+        }
+        interaction_types::MODAL_SUBMIT => {
+            handle_modal_submit(interaction, &kms_client, &dynamodb_client).await
         }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
@@ -79,6 +95,108 @@ fn handle_ping() -> Result<ApiGatewayV2httpResponse, Error> {
         data: None,
     };
     Ok(build_json_response(200, &response))
+}
+
+/// Affiche le formulaire modal pour enregistrer la clé API.
+fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Handling /register-key command, responding with Modal");
+    let response = DiscordResponse {
+        response_type: response_types::MODAL,
+        data: Some(serde_json::json!({
+            "title": "Enregistrer votre clé API",
+            "custom_id": "register_key_modal",
+            "components": [
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "api_key_input",
+                            "label": "Clé API MyHordes",
+                            "style": 1,
+                            "min_length": 1,
+                            "max_length": 100,
+                            "placeholder": "Entrez votre clé API...",
+                            "required": true
+                        }
+                    ]
+                }
+            ]
+        })),
+    };
+    Ok(build_json_response(200, &response))
+}
+
+/// Gère la soumission du formulaire modal et stocke la clé chiffrée.
+async fn handle_modal_submit(
+    interaction: DiscordInteraction,
+    kms_client: &aws_sdk_kms::Client,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    let custom_id = interaction
+        .data
+        .as_ref()
+        .and_then(|d| d.custom_id.as_deref())
+        .unwrap_or("");
+
+    if custom_id != "register_key_modal" {
+        error!("Received unknown modal custom_id: {}", custom_id);
+        return Ok(build_response(400, "Unknown modal custom_id"));
+    }
+
+    let user_id = match interaction.user_id() {
+        Some(uid) => uid,
+        None => {
+            error!("Could not extract user_id from modal submit");
+            let response = DiscordResponse {
+                response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+                data: Some(serde_json::json!({
+                    "content": "Erreur : Impossible de récupérer votre identifiant Discord.",
+                    "flags": 64
+                })),
+            };
+            return Ok(build_json_response(200, &response));
+        }
+    };
+
+    let api_key = match interaction.get_modal_value("api_key_input") {
+        Some(k) => k,
+        None => {
+            error!("Could not extract api_key_input from modal submit");
+            let response = DiscordResponse {
+                response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+                data: Some(serde_json::json!({
+                    "content": "Erreur : Le champ de la clé API est vide.",
+                    "flags": 64
+                })),
+            };
+            return Ok(build_json_response(200, &response));
+        }
+    };
+
+    match database::store_user_key(user_id, api_key, kms_client, dynamodb_client).await {
+        Ok(_) => {
+            let response = DiscordResponse {
+                response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+                data: Some(serde_json::json!({
+                    "content": "Votre clé API a été enregistrée de manière sécurisée.",
+                    "flags": 64
+                })),
+            };
+            Ok(build_json_response(200, &response))
+        }
+        Err(e) => {
+            error!("Failed to store user key: {}", e);
+            let response = DiscordResponse {
+                response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+                data: Some(serde_json::json!({
+                    "content": "Erreur lors de l'enregistrement de votre clé API. Veuillez réessayer.",
+                    "flags": 64
+                })),
+            };
+            Ok(build_json_response(200, &response))
+        }
+    }
 }
 
 /// Envoie un job de simulation sur SQS et répond immédiatement avec une réponse différée.
@@ -153,6 +271,8 @@ async fn main() -> Result<(), Error> {
 
     let aws_config = aws_config::load_from_env().await;
     let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
+    let kms_client = aws_sdk_kms::Client::new(&aws_config);
+    let dynamodb_client = aws_sdk_dynamodb::Client::new(&aws_config);
     let queue_url = std::env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set");
 
     info!("Starting DebordoLambda Discord handler");
@@ -160,7 +280,9 @@ async fn main() -> Result<(), Error> {
     lambda_runtime::run(service_fn(move |event| {
         let client = sqs_client.clone();
         let url = queue_url.clone();
-        async move { handler(event, client, url).await }
+        let kms = kms_client.clone();
+        let db = dynamodb_client.clone();
+        async move { handler(event, client, url, kms, db).await }
     }))
     .await
 }

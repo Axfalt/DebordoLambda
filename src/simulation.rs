@@ -1,8 +1,9 @@
 use std::cmp;
 use std::cmp::max;
 use rand::prelude::*;
-use rand::distributions::Uniform;
+use rand::distr::Uniform;
 use rand_mt::Mt64;
+use rand::RngExt;
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -39,10 +40,10 @@ impl AttackSimulator {
         }
 
         // Poids aléatoires
-        let mut repartition: Vec<f64> = (0..targets).map(|_| self.rng.r#gen::<f64>()).collect();
+        let mut repartition: Vec<f64> = (0..targets).map(|_| self.rng.random::<f64>()).collect();
 
         // Une cible reçoit un boost de +0.3
-        let unlucky_index = self.rng.gen_range(0..targets as usize);
+        let unlucky_index = self.rng.random_range(0..targets as usize);
         repartition[unlucky_index] += 0.3;
 
         // Normalisation
@@ -58,7 +59,7 @@ impl AttackSimulator {
         // Allocation des attaques restantes
         let mut attacking_cache = leftover - allocated.iter().sum::<i32>();
         while attacking_cache > 0 {
-            let idx = self.rng.gen_range(0..targets as usize);
+            let idx = self.rng.random_range(0..targets as usize);
             allocated[idx] += 1;
             attacking_cache -= 1;
         }
@@ -89,8 +90,8 @@ fn debordo_sequential(
     }
 
     let mut hits = 0;
-    let mut rng = rand::thread_rng();
-    let reactor_damage = Uniform::from(100..=250);
+    let mut rng = rand::rng();
+    let reactor_damage = Uniform::new_inclusive(100, 250).unwrap();
 
 
     for _ in 0..iterations {
