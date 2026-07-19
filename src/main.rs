@@ -25,8 +25,8 @@ async fn handler(
     event: LambdaEvent<ApiGatewayV2httpRequest>,
     sqs_client: aws_sdk_sqs::Client,
     queue_url: String,
-    kms_client: aws_sdk_kms::Client,
     dynamodb_client: aws_sdk_dynamodb::Client,
+    ssm_client: aws_sdk_ssm::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let public_key =
         std::env::var("DISCORD_PUBLIC_KEY").expect("DISCORD_PUBLIC_KEY must be set");
@@ -81,7 +81,7 @@ async fn handler(
             }
         }
         interaction_types::MODAL_SUBMIT => {
-            handle_modal_submit(interaction, &kms_client, &dynamodb_client).await
+            handle_modal_submit(interaction, &dynamodb_client, &ssm_client).await
         }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
@@ -130,8 +130,8 @@ fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
 /// Gère la soumission du formulaire modal et stocke la clé chiffrée.
 async fn handle_modal_submit(
     interaction: DiscordInteraction,
-    kms_client: &aws_sdk_kms::Client,
     dynamodb_client: &aws_sdk_dynamodb::Client,
+    ssm_client: &aws_sdk_ssm::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let custom_id = interaction
         .data
@@ -174,7 +174,7 @@ async fn handle_modal_submit(
         }
     };
 
-    match database::store_user_key(user_id, api_key, kms_client, dynamodb_client).await {
+    match database::store_user_key(user_id, api_key, dynamodb_client, ssm_client).await {
         Ok(_) => {
             let response = DiscordResponse {
                 response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
@@ -271,8 +271,8 @@ async fn main() -> Result<(), Error> {
 
     let aws_config = aws_config::load_from_env().await;
     let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
-    let kms_client = aws_sdk_kms::Client::new(&aws_config);
     let dynamodb_client = aws_sdk_dynamodb::Client::new(&aws_config);
+    let ssm_client = aws_sdk_ssm::Client::new(&aws_config);
     let queue_url = std::env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set");
 
     info!("Starting DebordoLambda Discord handler");
@@ -280,9 +280,9 @@ async fn main() -> Result<(), Error> {
     lambda_runtime::run(service_fn(move |event| {
         let client = sqs_client.clone();
         let url = queue_url.clone();
-        let kms = kms_client.clone();
         let db = dynamodb_client.clone();
-        async move { handler(event, client, url, kms, db).await }
+        let ssm = ssm_client.clone();
+        async move { handler(event, client, url, db, ssm).await }
     }))
     .await
 }
