@@ -25,8 +25,11 @@ pub async fn store_user_key(
         .send()
         .await
         .map_err(|e| {
-            error!("KMS encryption failed: {}", e);
-            lambda_runtime::Error::from(format!("Encryption failed: {}", e))
+            use aws_sdk_kms::error::ProvideErrorMetadata;
+            let code = e.code().unwrap_or("unknown");
+            let message = e.message().unwrap_or("no message");
+            error!("KMS encryption failed: Code={}, Message={}, Debug={:?}", code, message, e);
+            lambda_runtime::Error::from(format!("Encryption failed: {} ({})", message, code))
         })?;
 
     let ciphertext = encrypt_res
