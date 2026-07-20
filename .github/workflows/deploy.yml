@@ -11,6 +11,7 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production
 
     steps:
       - name: Checkout code
@@ -40,7 +41,7 @@ jobs:
             --region eu-west-3 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
-            DebordoLambda
+            ${{ vars.LAMBDA_RECEIVER_FUNCTION_NAME || 'DebordoLambda' }}
 
       - name: Deploy Worker Lambda
         run: |
@@ -49,5 +50,5 @@ jobs:
             --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --timeout 300 \
-            DebordoLambdaWorker
+            ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker' }}
 

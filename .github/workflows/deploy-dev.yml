@@ -11,6 +11,7 @@ env:
 jobs:
   build-and-deploy-dev:
     runs-on: ubuntu-latest
+    environment: development
 
     steps:
       - name: Checkout code
@@ -38,9 +39,9 @@ jobs:
             --binary-name bootstrap \
             --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
-            --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY_DEV }} \
-            --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL_DEV }} \
-            DebordoLambda-dev
+            --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
+            --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
+            ${{ vars.LAMBDA_RECEIVER_FUNCTION_NAME || 'DebordoLambda-dev' }}
 
       - name: Deploy Dev Worker Lambda
         run: |
@@ -49,4 +50,4 @@ jobs:
             --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --timeout 300 \
-            DebordoLambdaWorker-dev
+            ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker-dev' }}
