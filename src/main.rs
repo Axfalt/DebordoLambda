@@ -344,7 +344,7 @@ async fn handle_command(
         }
         Some(key) => {
             // Utilisateur enregistré: appeler l'API de MyHordes
-            match myhordes::fetch_mh_data(&key).await {
+            match myhordes::fetch_mh_data(&key, ssm_client).await {
                 Ok(mh_data) => {
                     if let Some(map) = mh_data.map {
                         let api_day = map.days;

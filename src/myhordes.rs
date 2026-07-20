@@ -48,8 +48,28 @@ pub struct MHCitizen {
 }
 
 /// Fetches current user map and city details from MyHordes JSON API.
-pub async fn fetch_mh_data(user_key: &str) -> Result<MHMeResponse, lambda_runtime::Error> {
-    let app_key = std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string());
+pub async fn fetch_mh_data(
+    user_key: &str,
+    ssm_client: &aws_sdk_ssm::Client,
+) -> Result<MHMeResponse, lambda_runtime::Error> {
+    let param_name = std::env::var("SSM_APP_KEY_PARAMETER").unwrap_or_else(|_| "MH_APP_KEY".to_string());
+    
+    let app_key = match ssm_client
+        .get_parameter()
+        .name(&param_name)
+        .with_decryption(true)
+        .send()
+        .await 
+    {
+        Ok(res) => res.parameter.and_then(|p| p.value).unwrap_or_else(|| {
+            std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
+        }),
+        Err(e) => {
+            info!("SSM lookup for app key parameter '{}' failed ({}). Falling back to environment variables.", param_name, e);
+            std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
+        }
+    };
+
     let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(dead,baseDef))";
 
     let url = "https://myhordes.eu/api/x/json/me";
