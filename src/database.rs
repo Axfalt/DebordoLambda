@@ -11,21 +11,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand::RngExt;
 use tracing::{info, error};
 
-/// Encrypts a plaintext key using local AES-256-GCM (with key fetched from AWS SSM Parameter Store)
-/// and stores it in the DynamoDB UserExternalIds table.
-pub async fn store_user_key(
-    user_id: &str,
-    plaintext_key: &str,
-    db_client: &aws_sdk_dynamodb::Client,
-    ssm_client: &aws_sdk_ssm::Client,
-) -> Result<(), lambda_runtime::Error> {
-    info!("Encrypting API key client-side for user {}", user_id);
-
-    // 1. Get SSM Parameter Name from environment
+/// Helper function to retrieve the encryption passphrase from SSM and derive a 32-byte key.
+async fn derive_key(ssm_client: &aws_sdk_ssm::Client) -> Result<[u8; 32], lambda_runtime::Error> {
     let param_name = std::env::var("SSM_PARAMETER_NAME").unwrap_or_else(|_| "MH_EID_ENCRYPTION_KEY".to_string());
     info!("Fetching encryption passphrase from SSM parameter: {}", param_name);
 
-    // 2. Fetch the passphrase from SSM Parameter Store (with decryption)
     let ssm_res = ssm_client
         .get_parameter()
         .name(param_name)
@@ -46,23 +36,38 @@ pub async fn store_user_key(
         return Err(lambda_runtime::Error::from("Server configuration error: SSM passphrase is empty"));
     }
 
-    // 3. Derive a 32-byte key from the passphrase using SHA-256
     let mut hasher = Sha256::new();
     hasher.update(passphrase.as_bytes());
-    let key_hash = hasher.finalize(); // 32 bytes
+    let mut key_hash = [0u8; 32];
+    key_hash.copy_from_slice(&hasher.finalize());
+    Ok(key_hash)
+}
 
-    // 4. Initialize AES-256-GCM cipher
+/// Encrypts a plaintext key using local AES-256-GCM (with key fetched from AWS SSM Parameter Store)
+/// and stores it in the DynamoDB UserExternalIds table.
+pub async fn store_user_key(
+    user_id: &str,
+    plaintext_key: &str,
+    db_client: &aws_sdk_dynamodb::Client,
+    ssm_client: &aws_sdk_ssm::Client,
+) -> Result<(), lambda_runtime::Error> {
+    info!("Encrypting API key client-side for user {}", user_id);
+
+    // 1. Derive key from SSM
+    let key_hash = derive_key(ssm_client).await?;
+
+    // 2. Initialize AES-256-GCM cipher
     let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_hash);
     let cipher = Aes256Gcm::new(key);
 
-    // 5. Generate a random 12-byte nonce
+    // 3. Generate a random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
     for byte in &mut nonce_bytes {
         *byte = rand::rng().random();
     }
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    // 6. Encrypt the plaintext key
+    // 4. Encrypt the plaintext key
     let ciphertext = cipher
         .encrypt(nonce, plaintext_key.as_bytes())
         .map_err(|e| {
@@ -70,15 +75,15 @@ pub async fn store_user_key(
             lambda_runtime::Error::from(format!("Encryption failed: {:?}", e))
         })?;
 
-    // 7. Prepend nonce to ciphertext to store them together
+    // 5. Prepend nonce to ciphertext to store them together
     let mut combined = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
-    // 8. Base64 encode the combined payload
+    // 6. Base64 encode the combined payload
     let encoded_key = STANDARD.encode(&combined);
 
-    // 9. Save to DynamoDB
+    // 7. Save to DynamoDB
     let table_name = std::env::var("USER_TABLE_NAME").unwrap_or_else(|_| "UserExternalIds".to_string());
     info!("Storing encrypted key client-side in DynamoDB table {}", table_name);
 
@@ -96,4 +101,75 @@ pub async fn store_user_key(
 
     info!("Successfully stored encrypted API key client-side for user {}", user_id);
     Ok(())
+}
+
+/// Retrieves and decrypts the API key for a user from DynamoDB.
+pub async fn get_user_key(
+    user_id: &str,
+    db_client: &aws_sdk_dynamodb::Client,
+    ssm_client: &aws_sdk_ssm::Client,
+) -> Result<Option<String>, lambda_runtime::Error> {
+    info!("Retrieving API key for user {}", user_id);
+
+    // 1. Fetch from DynamoDB
+    let table_name = std::env::var("USER_TABLE_NAME").unwrap_or_else(|_| "UserExternalIds".to_string());
+    let get_res = db_client
+        .get_item()
+        .table_name(table_name)
+        .key("discord_user_id", AttributeValue::S(user_id.to_string()))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("DynamoDB get_item failed: {}", e);
+            lambda_runtime::Error::from(format!("Database read failed: {}", e))
+        })?;
+
+    let item = match get_res.item {
+        Some(i) => i,
+        None => {
+            info!("No API key found in database for user {}", user_id);
+            return Ok(None);
+        }
+    };
+
+    let encoded_key = match item.get("encrypted_key").and_then(|v| v.as_s().ok()) {
+        Some(k) => k,
+        None => {
+            error!("DynamoDB record for user {} is missing 'encrypted_key' attribute", user_id);
+            return Err(lambda_runtime::Error::from("Database record is corrupt"));
+        }
+    };
+
+    // 2. Decode base64
+    let combined = STANDARD.decode(encoded_key).map_err(|e| {
+        error!("Base64 decoding failed for user {}: {}", user_id, e);
+        lambda_runtime::Error::from(format!("Decryption failed: invalid base64"))
+    })?;
+
+    if combined.len() < 12 {
+        error!("Decoded ciphertext is too short for user {}", user_id);
+        return Err(lambda_runtime::Error::from("Database record is corrupt"));
+    }
+
+    let (nonce_bytes, ciphertext) = combined.split_at(12);
+
+    // 3. Derive key from SSM
+    let key_hash = derive_key(ssm_client).await?;
+
+    // 4. Decrypt via AES-GCM
+    let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_hash);
+    let cipher = Aes256Gcm::new(key);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let decrypted = cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        error!("AES decryption failed for user {}: {:?}", user_id, e);
+        lambda_runtime::Error::from(format!("Decryption failed: {:?}", e))
+    })?;
+
+    let plaintext = String::from_utf8(decrypted).map_err(|e| {
+        error!("Decrypted key is not valid UTF-8 for user {}: {}", user_id, e);
+        lambda_runtime::Error::from(format!("Decrypted data is corrupt"))
+    })?;
+
+    Ok(Some(plaintext))
 }

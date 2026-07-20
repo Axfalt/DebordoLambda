@@ -25,6 +25,10 @@ pub struct SimConfig {
     pub iterations: u32,
     pub is_reactor_built: bool,
     pub nb_hab: i32,
+    pub b_level: Option<i32>,
+    pub population: Option<i32>,
+    pub is_chaos: bool,
+    pub is_devastated: bool,
 }
 
 impl SimConfig {
@@ -48,6 +52,10 @@ impl SimConfig {
                 "iterations" => config.iterations = (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS),
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 "nb_hab" => config.nb_hab = opt.value.as_i64().unwrap_or(40) as i32,
+                "b_level" => config.b_level = opt.value.as_i64().map(|v| v as i32),
+                "population" => config.population = opt.value.as_i64().map(|v| v as i32),
+                "is_chaos" => config.is_chaos = opt.value.as_bool().unwrap_or(false),
+                "is_devastated" => config.is_devastated = opt.value.as_bool().unwrap_or(false),
                 _ => {}
             }
         }

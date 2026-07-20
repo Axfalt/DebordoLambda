@@ -1,0 +1,52 @@
+name: Deploy to AWS Lambda (Dev)
+
+on:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-deploy-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-lambda
+        run: pip3 install cargo-lambda
+
+      - name: Build Lambda
+        run: cargo lambda build --release --arm64
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-3' }}
+
+      - name: Deploy Dev Receiver Lambda
+        run: |
+          cargo lambda deploy \
+            --binary-name bootstrap \
+            --role ${{ secrets.LAMBDA_ROLE_ARN }} \
+            --region eu-west-3 \
+            --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY_DEV }} \
+            --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL_DEV }} \
+            DebordoLambda-dev
+
+      - name: Deploy Dev Worker Lambda
+        run: |
+          cargo lambda deploy \
+            --binary-name worker \
+            --role ${{ secrets.LAMBDA_ROLE_ARN }} \
+            --region eu-west-3 \
+            --timeout 300 \
+            DebordoLambdaWorker-dev

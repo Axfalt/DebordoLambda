@@ -67,6 +67,10 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
                 iterations,
                 is_reactor_built,
                 nb_hab,
+                config.b_level,
+                config.population,
+                config.is_chaos,
+                config.is_devastated,
             )
         }),
     )
