@@ -283,7 +283,7 @@ async fn handle_command(
             min_def,
         );
 
-        if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+        if user_complete.unwrap_or(false) && user_defenses.is_none() {
             return respond_with_defenses_modal(
                 defense,
                 tdg_min,
@@ -374,7 +374,7 @@ async fn handle_command(
                 min_def,
             );
 
-            if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+            if user_complete.unwrap_or(false) && user_defenses.is_none() {
                 return respond_with_defenses_modal(
                     defense,
                     tdg_min,
@@ -560,7 +560,7 @@ async fn handle_command(
                             min_def,
                         );
 
-                        if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+                        if user_complete.unwrap_or(false) && user_defenses.is_none() {
                             return respond_with_defenses_modal(
                                 defense,
                                 tdg_min,
@@ -656,7 +656,7 @@ async fn handle_command(
                         min_def,
                     );
 
-                    if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+                    if user_complete.unwrap_or(false) && user_defenses.is_none() {
                         return respond_with_defenses_modal(
                             defense,
                             tdg_min,
