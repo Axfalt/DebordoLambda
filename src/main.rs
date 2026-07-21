@@ -83,7 +83,7 @@ async fn handler(
             }
         }
         interaction_types::MODAL_SUBMIT => {
-            handle_modal_submit(interaction, &dynamodb_client, &ssm_client).await
+            handle_modal_submit(interaction, &sqs_client, &queue_url, &dynamodb_client, &ssm_client).await
         }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
@@ -132,14 +132,20 @@ fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
 /// Gère la soumission du formulaire modal et stocke la clé chiffrée.
 async fn handle_modal_submit(
     interaction: DiscordInteraction,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
     dynamodb_client: &aws_sdk_dynamodb::Client,
     ssm_client: &aws_sdk_ssm::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let custom_id = interaction
         .data
         .as_ref()
-        .and_then(|d| d.custom_id.as_deref())
-        .unwrap_or("");
+        .and_then(|d| d.custom_id.clone())
+        .unwrap_or_default();
+
+    if custom_id.starts_with("dm:") {
+        return handle_debordo_modal_submit(interaction, &custom_id, sqs_client, queue_url).await;
+    }
 
     if custom_id != "register_key_modal" {
         error!("Received unknown modal custom_id: {}", custom_id);
@@ -277,6 +283,26 @@ async fn handle_command(
             min_def,
         );
 
+        if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+            return respond_with_defenses_modal(
+                defense,
+                tdg_min,
+                tdg_max,
+                min_def,
+                nb_drapo,
+                day,
+                iterations,
+                reactor,
+                nb_hab,
+                None,
+                None,
+                false,
+                false,
+                false,
+                &citizens,
+            );
+        }
+
         return enqueue_simulation(
             token,
             application_id,
@@ -347,6 +373,26 @@ async fn handle_command(
                 nb_hab,
                 min_def,
             );
+
+            if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+                return respond_with_defenses_modal(
+                    defense,
+                    tdg_min,
+                    tdg_max,
+                    min_def,
+                    nb_drapo,
+                    day,
+                    iterations,
+                    reactor,
+                    nb_hab,
+                    None,
+                    None,
+                    false,
+                    false,
+                    false,
+                    &citizens,
+                );
+            }
 
             enqueue_simulation(
                 token,
@@ -497,6 +543,26 @@ async fn handle_command(
                             min_def,
                         );
 
+                        if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+                            return respond_with_defenses_modal(
+                                defense,
+                                tdg_min,
+                                tdg_max,
+                                min_def,
+                                nb_drapo,
+                                day,
+                                iterations,
+                                reactor,
+                                nb_hab,
+                                Some(b_level),
+                                Some(population),
+                                api_chaos,
+                                api_devast,
+                                true, // is API
+                                &citizens,
+                            );
+                        }
+
                         enqueue_simulation(
                             token,
                             application_id,
@@ -572,6 +638,26 @@ async fn handle_command(
                         nb_hab,
                         min_def,
                     );
+
+                    if user_complete.unwrap_or(false) && user_defenses.is_none() && user_home_bonus.is_none() {
+                        return respond_with_defenses_modal(
+                            defense,
+                            tdg_min,
+                            tdg_max,
+                            min_def,
+                            nb_drapo,
+                            day,
+                            iterations,
+                            reactor,
+                            nb_hab,
+                            None,
+                            None,
+                            false,
+                            false,
+                            false,
+                            &citizens,
+                        );
+                    }
 
                     enqueue_simulation(
                         token,
@@ -850,6 +936,160 @@ fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayV2
     r.headers = headers;
     r.body = Some(aws_lambda_events::encodings::Body::Text(json_body));
     r
+}
+
+fn respond_with_defenses_modal(
+    defense: i32,
+    tdg_min: i32,
+    tdg_max: i32,
+    min_def: i32,
+    nb_drapo: i32,
+    day: i32,
+    iterations: i32,
+    reactor: bool,
+    nb_hab: i32,
+    b_level: Option<i32>,
+    population: Option<i32>,
+    is_chaos: bool,
+    is_devastated: bool,
+    is_api: bool,
+    citizens: &[SimulationCitizen],
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Responding with defenses edit modal");
+
+    let b_level_str = b_level.map(|v| v.to_string()).unwrap_or_else(|| "n".to_string());
+    let pop_str = population.map(|v| v.to_string()).unwrap_or_else(|| "n".to_string());
+
+    let custom_id = format!(
+        "dm:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        defense,
+        tdg_min,
+        tdg_max,
+        min_def,
+        nb_drapo,
+        day,
+        iterations,
+        if reactor { 1 } else { 0 },
+        nb_hab,
+        if is_chaos { 1 } else { 0 },
+        if is_devastated { 1 } else { 0 },
+        if is_api { 1 } else { 0 },
+        b_level_str,
+        pop_str
+    );
+
+    let citizens_str = citizens
+        .iter()
+        .map(|c| format!("{}:{}", c.name, c.defense))
+        .collect::<Vec<String>>()
+        .join(", ");
+
+    let response = DiscordResponse {
+        response_type: response_types::MODAL,
+        data: Some(serde_json::json!({
+            "title": "Éditer les défenses des citoyens",
+            "custom_id": custom_id,
+            "components": [
+                {
+                    "type": 1, // ACTION_ROW
+                    "components": [
+                        {
+                            "type": 4, // TEXT_INPUT
+                            "custom_id": "defenses_input",
+                            "label": "Défenses des citoyens (Nom:Défense, ...)",
+                            "style": 2, // PARAGRAPH
+                            "min_length": 1,
+                            "max_length": 4000,
+                            "placeholder": "Axfalt:12, Bob:8...",
+                            "value": citizens_str,
+                            "required": true
+                        }
+                    ]
+                }
+            ]
+        })),
+    };
+
+    Ok(build_json_response(200, &response))
+}
+
+async fn handle_debordo_modal_submit(
+    interaction: DiscordInteraction,
+    custom_id: &str,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Handling debordo custom defenses modal submission");
+
+    let parts: Vec<&str> = custom_id.split(':').collect();
+    if parts.len() < 15 {
+        error!("Invalid modal custom_id: {}", custom_id);
+        return Ok(build_response(400, "Invalid modal custom_id"));
+    }
+
+    let defense = parts[1].parse::<i32>().unwrap_or(0);
+    let tdg_min = parts[2].parse::<i32>().unwrap_or(0);
+    let tdg_max = parts[3].parse::<i32>().unwrap_or(0);
+    let min_def = parts[4].parse::<i32>().unwrap_or(0);
+    let nb_drapo = parts[5].parse::<i32>().unwrap_or(0);
+    let day = parts[6].parse::<i32>().unwrap_or(1);
+    let iterations = parts[7].parse::<i32>().unwrap_or(10000);
+    let reactor = parts[8] == "1";
+    let nb_hab = parts[9].parse::<i32>().unwrap_or(40);
+    let is_chaos = parts[10] == "1";
+    let is_devastated = parts[11] == "1";
+    let is_api = parts[12] == "1";
+    let b_level_str = parts[13];
+    let pop_str = parts[14];
+
+    let b_level = if b_level_str == "n" { None } else { b_level_str.parse::<i32>().ok() };
+    let population = if pop_str == "n" { None } else { pop_str.parse::<i32>().ok() };
+
+    let token = interaction.token.clone().unwrap_or_default();
+    let application_id = interaction.application_id.clone().unwrap_or_default();
+
+    let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
+    let citizens = resolve_citizens(
+        Some(defenses_val),
+        0,
+        None,
+        nb_hab,
+        min_def,
+    );
+
+    let mut api_pulled_fields = Vec::new();
+    if is_api {
+        api_pulled_fields.push("defense".to_string());
+        api_pulled_fields.push("tdg".to_string());
+        api_pulled_fields.push("nb_hab".to_string());
+        api_pulled_fields.push("min_def".to_string());
+    }
+
+    enqueue_simulation(
+        token,
+        application_id,
+        sqs_client,
+        queue_url,
+        defense,
+        tdg_min,
+        tdg_max,
+        min_def,
+        nb_drapo,
+        day,
+        iterations,
+        reactor,
+        nb_hab,
+        b_level,
+        population,
+        is_chaos,
+        is_devastated,
+        api_pulled_fields,
+        true, // complete
+        Some(defenses_val.to_string()),
+        0, // home_bonus (already baked in)
+        citizens,
+    )
+    .await
 }
 
 // ============================================================================
