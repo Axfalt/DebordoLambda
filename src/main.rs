@@ -217,6 +217,12 @@ async fn handle_command(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let token = interaction.token.clone().unwrap_or_default();
     let application_id = interaction.application_id.clone().unwrap_or_default();
+    let command_name = interaction
+        .data
+        .as_ref()
+        .and_then(|d| d.name.as_deref())
+        .unwrap_or("debordo");
+    let is_complete_cmd = command_name == "debordo-complete" || command_name == "debordo_complete";
 
     // 1. Parser les options saisies par l'utilisateur
     let mut user_defense: Option<i32> = None;
@@ -257,6 +263,8 @@ async fn handle_command(
         }
     }
 
+    let is_complete = is_complete_cmd || user_complete.unwrap_or(false);
+
     // 2. Vérifier si on a tous les paramètres requis manuellement
     let has_all_critical = user_defense.is_some()
         && user_tdg_min.is_some()
@@ -283,7 +291,7 @@ async fn handle_command(
             min_def,
         );
 
-        if user_complete.unwrap_or(false) && user_defenses.is_none() {
+        if is_complete && user_defenses.is_none() {
             return respond_with_defenses_modal(
                 defense,
                 tdg_min,
@@ -322,7 +330,7 @@ async fn handle_command(
             false,
             false,
             Vec::new(),
-            user_complete.unwrap_or(false),
+            is_complete,
             user_defenses.clone(),
             user_home_bonus.unwrap_or(0),
             citizens,
@@ -374,7 +382,7 @@ async fn handle_command(
                 min_def,
             );
 
-            if user_complete.unwrap_or(false) && user_defenses.is_none() {
+            if is_complete && user_defenses.is_none() {
                 return respond_with_defenses_modal(
                     defense,
                     tdg_min,
@@ -413,7 +421,7 @@ async fn handle_command(
                 false,
                 false,
                 Vec::new(),
-                user_complete.unwrap_or(false),
+                is_complete,
                 user_defenses.clone(),
                 user_home_bonus.unwrap_or(0),
                 citizens,
@@ -560,7 +568,7 @@ async fn handle_command(
                             min_def,
                         );
 
-                        if user_complete.unwrap_or(false) && user_defenses.is_none() {
+                        if is_complete && user_defenses.is_none() {
                             return respond_with_defenses_modal(
                                 defense,
                                 tdg_min,
@@ -599,7 +607,7 @@ async fn handle_command(
                             api_chaos,
                             api_devast,
                             api_pulled_fields,
-                            user_complete.unwrap_or(false),
+                            is_complete,
                             user_defenses.clone(),
                             home_bonus,
                             citizens,
@@ -656,7 +664,7 @@ async fn handle_command(
                         min_def,
                     );
 
-                    if user_complete.unwrap_or(false) && user_defenses.is_none() {
+                    if is_complete && user_defenses.is_none() {
                         return respond_with_defenses_modal(
                             defense,
                             tdg_min,
@@ -695,7 +703,7 @@ async fn handle_command(
                         false,
                         false,
                         Vec::new(),
-                        user_complete.unwrap_or(false),
+                        is_complete,
                         user_defenses.clone(),
                         user_home_bonus.unwrap_or(0),
                         citizens,
