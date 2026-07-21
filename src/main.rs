@@ -450,7 +450,19 @@ async fn handle_command(
                             .map(|c| {
                                 c.buildings
                                     .iter()
-                                    .any(|b| b.name.to_lowercase().contains("réacteur"))
+                                    .any(|b| {
+                                        let name = b.name.to_lowercase();
+                                        name.contains("réacteur") || name.contains("reactor")
+                                    })
+                            })
+                            .unwrap_or(false);
+                        let api_fortifications = map
+                            .city
+                            .as_ref()
+                            .map(|c| {
+                                c.buildings
+                                    .iter()
+                                    .any(|b| b.name.to_lowercase().contains("fortification"))
                             })
                             .unwrap_or(false);
                         let api_nb_hab = map.citizens.iter().filter(|c| !c.dead).count() as i32;
@@ -535,9 +547,11 @@ async fn handle_command(
                             return Ok(build_json_response(200, &response));
                         }
 
+                        let home_bonus = user_home_bonus.unwrap_or(0) + if api_fortifications { 4 } else { 0 };
+
                         let citizens = resolve_citizens(
                             user_defenses.as_deref(),
-                            user_home_bonus.unwrap_or(0),
+                            home_bonus,
                             Some(&map.citizens),
                             nb_hab,
                             min_def,
@@ -584,7 +598,7 @@ async fn handle_command(
                             api_pulled_fields,
                             user_complete.unwrap_or(false),
                             user_defenses.clone(),
-                            user_home_bonus.unwrap_or(0),
+                            home_bonus,
                             citizens,
                         )
                         .await
@@ -820,7 +834,7 @@ async fn enqueue_simulation(
 
 fn parse_custom_defenses(defenses_str: &str) -> std::collections::HashMap<String, i32> {
     let mut map = std::collections::HashMap::new();
-    for part in defenses_str.split(',') {
+    for part in defenses_str.split(|c| c == ',' || c == '\n' || c == '\r') {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -870,7 +884,7 @@ fn resolve_citizens(
         
         // 1. Add explicitly nominated citizens from defenses string
         if let Some(s) = custom_defenses_str {
-            for part in s.split(',') {
+            for part in s.split(|c| c == ',' || c == '\n' || c == '\r') {
                 let part = part.trim();
                 if part.is_empty() {
                     continue;
@@ -978,11 +992,14 @@ fn respond_with_defenses_modal(
         pop_str
     );
 
-    let citizens_str = citizens
+    let mut citizens_sorted = citizens.to_vec();
+    citizens_sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    let citizens_str = citizens_sorted
         .iter()
         .map(|c| format!("{}:{}", c.name, c.defense))
         .collect::<Vec<String>>()
-        .join(", ");
+        .join("\n");
 
     let response = DiscordResponse {
         response_type: response_types::MODAL,

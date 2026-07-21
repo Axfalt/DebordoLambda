@@ -126,6 +126,7 @@ mod tests {
                   "defense": { "total": 125 },
                   "buildings": [
                     { "name": "Réacteur chimique" },
+                    { "name": "Fortifications de fortune" },
                     { "name": "Wassergraben" }
                   ],
                   "estimations": { "min": 250, "max": 400 }
@@ -148,8 +149,15 @@ mod tests {
         assert_eq!(city.defense.unwrap().total, 125);
 
         // Test reactor check
-        let has_reactor = city.buildings.iter().any(|b| b.name.to_lowercase().contains("réacteur"));
+        let has_reactor = city.buildings.iter().any(|b| {
+            let name = b.name.to_lowercase();
+            name.contains("réacteur") || name.contains("reactor")
+        });
         assert!(has_reactor);
+
+        // Test fortifications check
+        let has_fortifications = city.buildings.iter().any(|b| b.name.to_lowercase().contains("fortification"));
+        assert!(has_fortifications);
 
         let estimations = city.estimations.unwrap();
         assert_eq!(estimations.min, 250);
