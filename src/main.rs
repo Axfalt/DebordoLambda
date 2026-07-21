@@ -870,11 +870,11 @@ fn resolve_citizens(
                 let defense = if let Some(&custom_def) = custom_map.get(&name_lower) {
                     custom_def
                 } else {
-                    let job_id = citizen.job.as_ref().map(|j| j.id.as_str()).unwrap_or("");
+                    let job_id = citizen.job.as_ref().map(|j| j.id).unwrap_or(0);
                     let job_bonus = match job_id {
-                        "job_basic" | "" => 0,
-                        "job_guardian" => 3,
-                        _ => 2,
+                        0 => 0, // Resident
+                        3 => 3, // Guardian
+                        _ => 2, // Other Hero
                     };
                     citizen.base_def + home_bonus + job_bonus
                 };

@@ -43,7 +43,7 @@ pub struct MHEstimation {
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct MHJob {
     #[serde(default)]
-    pub id: String,
+    pub id: i32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -141,9 +141,9 @@ mod tests {
                   "estimations": { "min": 250, "max": 400 }
                 },
                 "citizens": [
-                  { "name": "Axfalt", "dead": false, "baseDef": 12, "job": { "id": "job_guardian" } },
-                  { "name": "Bob", "dead": true, "baseDef": 8, "job": { "id": "job_basic" } },
-                  { "name": "Charlie", "dead": false, "baseDef": 15, "job": { "id": "job_tech" } }
+                  { "name": "Axfalt", "dead": false, "baseDef": 12, "job": { "id": 3 } },
+                  { "name": "Bob", "dead": true, "baseDef": 8, "job": { "id": 0 } },
+                  { "name": "Charlie", "dead": false, "baseDef": 15, "job": { "id": 6 } }
                 ]
             }
         });
@@ -184,9 +184,9 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(min_def, 12);
 
-        assert_eq!(map.citizens[0].job.as_ref().map(|j| j.id.as_str()), Some("job_guardian"));
-        assert_eq!(map.citizens[1].job.as_ref().map(|j| j.id.as_str()), Some("job_basic"));
-        assert_eq!(map.citizens[2].job.as_ref().map(|j| j.id.as_str()), Some("job_tech"));
+        assert_eq!(map.citizens[0].job.as_ref().map(|j| j.id), Some(3));
+        assert_eq!(map.citizens[1].job.as_ref().map(|j| j.id), Some(0));
+        assert_eq!(map.citizens[2].job.as_ref().map(|j| j.id), Some(6));
     }
 }
 
