@@ -166,13 +166,7 @@ mod tests {
         assert!(has_reactor);
 
         // Test fortifications check
-        let has_fortifications = city.buildings.iter().any(|b| {
-            let name = b.name.to_lowercase();
-            name.contains("habitations fortifi")
-                || name.contains("fortified habitation")
-                || name.contains("befestigte behausungen")
-                || name.contains("habitaciones fortificadas")
-        });
+        let has_fortifications = city.buildings.iter().any(|b| b.name.to_lowercase().contains("habitations fortifi"));
         assert!(has_fortifications);
 
         let estimations = city.estimations.unwrap();
