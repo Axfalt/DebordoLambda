@@ -52,3 +52,11 @@ jobs:
             --region eu-west-3 \
             --timeout 300 \
             ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker-dev' }}
+
+      - name: Register Discord commands (Dev)
+        run: |
+          pip3 install requests
+          python register_command.py
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID || vars.DISCORD_APPLICATION_ID }}
