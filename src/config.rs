@@ -128,7 +128,9 @@ pub fn format_results(
     output.push_str(&fmt_line("🛡️ Défense", "defense", config.defense));
     output.push_str(&tdg_line);
     output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", "nb_hab", config.nb_hab));
-    output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+    if !config.is_complete {
+        output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+    }
     output.push_str(&fmt_line("📅 Jour", "day", config.day));
     output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
