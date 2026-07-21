@@ -143,12 +143,15 @@ fn debordo_sequential(
     population: Option<i32>,
     is_chaos: bool,
     is_devastated: bool,
-) -> f64 {
+    citizens: &[crate::config::SimulationCitizen],
+    is_complete: bool,
+) -> (f64, Vec<f64>) {
     if iterations == 0 || nb_hab <= 0 {
-        return 0.0;
+        return (0.0, vec![0.0; citizens.len()]);
     }
 
-    let mut hits = 0;
+    let mut town_hits = 0;
+    let mut citizen_hits = vec![0u64; citizens.len()];
     let mut rng = rand::rng();
     let reactor_damage = Uniform::new_inclusive(100, 250).unwrap();
 
@@ -163,6 +166,7 @@ fn debordo_sequential(
     );
 
     let mut simulator = AttackSimulator::new();
+    let mut indices: Vec<usize> = (0..citizens.len()).collect();
 
     for _ in 0..iterations {
         let real_attacking = if is_reactor_built {
@@ -180,12 +184,33 @@ fn debordo_sequential(
             is_chaos,
             is_devastated,
         );
+        
+        // Check overall town breach
         if allocated.iter().any(|&x| x > threshold) {
-            hits += 1;
+            town_hits += 1;
+        }
+
+        // Check individual citizen breach
+        if is_complete && !citizens.is_empty() {
+            use rand::seq::SliceRandom;
+            indices.shuffle(&mut rng);
+            let targets = allocated.len().min(citizens.len());
+            for j in 0..targets {
+                let idx = indices[j];
+                let zombies = allocated[j];
+                if zombies > citizens[idx].defense {
+                    citizen_hits[idx] += 1;
+                }
+            }
         }
     }
 
-    hits as f64 / iterations as f64
+    let town_prob = town_hits as f64 / iterations as f64;
+    let citizen_probs = citizen_hits.iter()
+        .map(|&hits| hits as f64 / iterations as f64)
+        .collect();
+
+    (town_prob, citizen_probs)
 }
 
 fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64> {
@@ -236,16 +261,19 @@ pub fn overflow_probability(
     population: Option<i32>,
     is_chaos: bool,
     is_devastated: bool,
-) -> (f64, u64) {
+    citizens: &[crate::config::SimulationCitizen],
+    is_complete: bool,
+) -> (f64, u64, Vec<f64>) {
     let prob_dist = attack_distribution(tdg_interval.0, tdg_interval.1, day);
     let mut overflow_prob = 0.0;
     let mut total_runs: u64 = 0;
+    let mut citizen_probs = vec![0.0; citizens.len()];
 
     for (&attack, &base_prob) in &prob_dist {
         let overflow = attack as f64 - defense;
         let max_reactor_damage = if is_reactor_built { 250.0 } else { 0.0 };
         if overflow + max_reactor_damage > 0.0 {
-            let success_prob = debordo_sequential(
+            let (success_prob, citizen_p) = debordo_sequential(
                 day,
                 overflow as i32,
                 min_def,
@@ -257,13 +285,23 @@ pub fn overflow_probability(
                 population,
                 is_chaos,
                 is_devastated,
+                citizens,
+                is_complete,
             );
             overflow_prob += base_prob * success_prob;
             total_runs += iterations as u64;
+
+            if is_complete {
+                for i in 0..citizens.len() {
+                    citizen_probs[i] += base_prob * citizen_p[i];
+                }
+            }
         }
     }
 
-    (overflow_prob * 100.0, total_runs)
+    let citizen_percentages = citizen_probs.iter().map(|&p| p * 100.0).collect();
+
+    (overflow_prob * 100.0, total_runs, citizen_percentages)
 }
 
 
@@ -408,14 +446,14 @@ mod tests {
     #[test]
     fn test_debordo_zero_attacking_gives_zero_probability() {
         // 0 overflow zombies → no cell can exceed any threshold → 0% death.
-        let prob = debordo_sequential(1, 0, 1, 0, 100, false, 40, None, None, false, false);
+        let (prob, _) = debordo_sequential(1, 0, 1, 0, 100, false, 40, None, None, false, false, &[], false);
         assert_eq!(prob, 0.0, "with 0 overflow zombies, death probability must be 0");
     }
 
     #[test]
     fn test_debordo_overwhelming_attack_near_full_probability() {
         // 10 000 zombies among 10 citizens, min threshold of 1, high b_level to avoid capping
-        let prob = debordo_sequential(1, 10_000, 1, 0, 500, false, 40, Some(10), Some(10), false, false);
+        let (prob, _) = debordo_sequential(1, 10_000, 1, 0, 500, false, 40, Some(10), Some(10), false, false, &[], false);
         assert!(prob > 0.99, "expected probability > 0.99, got {}", prob);
     }
 
@@ -424,8 +462,8 @@ mod tests {
         // With reactor built: real_attacking = attacking + 100..=250.
         // A non-zero base attack with reactor should yield higher (or equal) probability
         // than without reactor for the same inputs when the threshold is moderate.
-        let prob_no_reactor = debordo_sequential(1, 50, 30, 0, 500, false, 40, None, None, false, false);
-        let prob_reactor = debordo_sequential(1, 50, 30, 0, 500, true, 40, None, None, false, false);
+        let (prob_no_reactor, _) = debordo_sequential(1, 50, 30, 0, 500, false, 40, None, None, false, false, &[], false);
+        let (prob_reactor, _) = debordo_sequential(1, 50, 30, 0, 500, true, 40, None, None, false, false, &[], false);
         assert!(
             prob_reactor >= prob_no_reactor,
             "reactor should increase attack power: no_reactor={} reactor={}",
@@ -440,14 +478,14 @@ mod tests {
 
     #[test]
     fn test_calculate_defense_probs_returns_probability() {
-        let (prob, _) = overflow_probability(150.0, (50, 60), 10, 0, 1, 100, false, 40, None, None, false, false);
+        let (prob, _, _) = overflow_probability(150.0, (50, 60), 10, 0, 1, 100, false, 40, None, None, false, false, &[], false);
         assert!(prob >= 0.0 && prob <= 100.0);
     }
 
     #[test]
     fn test_calculate_defense_probs_impenetrable_defense_is_zero() {
         // Defense >> max possible attack → no overflow → 0% probability.
-        let (prob, total_runs) = overflow_probability(100_000.0, (50, 100), 10, 0, 1, 100, false, 40, None, None, false, false);
+        let (prob, total_runs, _) = overflow_probability(100_000.0, (50, 100), 10, 0, 1, 100, false, 40, None, None, false, false, &[], false);
         assert_eq!(prob, 0.0, "impenetrable defense should yield 0%");
         assert_eq!(total_runs, 0, "no overflow means no MC runs");
     }
@@ -494,8 +532,8 @@ mod tests {
     fn test_debordo_nb_hab_affects_distribution() {
         // Fewer people means zombies are more concentrated → higher death probability.
         // With 1000 zombies among 40 people vs 5 people, 5 people should have higher prob.
-        let prob_40_hab = debordo_sequential(10, 1000, 50, 0, 500, false, 40, None, None, false, false);
-        let prob_5_hab = debordo_sequential(10, 1000, 50, 0, 500, false, 5, None, None, false, false);
+        let (prob_40_hab, _) = debordo_sequential(10, 1000, 50, 0, 500, false, 40, None, None, false, false, &[], false);
+        let (prob_5_hab, _) = debordo_sequential(10, 1000, 50, 0, 500, false, 5, None, None, false, false, &[], false);
         assert!(
             prob_5_hab >= prob_40_hab,
             "fewer habitants should concentrate zombies → higher death prob: 40hab={} 5hab={}",
@@ -507,7 +545,7 @@ mod tests {
     #[test]
     fn test_overflow_probability_with_small_nb_hab() {
         // With very few people, overflow should be more deadly.
-        let (prob, _) = overflow_probability(50.0, (60, 70), 2, 0, 5, 100, false, 3, None, None, false, false);
+        let (prob, _, _) = overflow_probability(50.0, (60, 70), 2, 0, 5, 100, false, 3, None, None, false, false, &[], false);
         assert!(prob > 0.0, "with small nb_hab and overflow, death probability should be > 0");
     }
 
@@ -515,21 +553,21 @@ mod tests {
     fn test_overflow_probability_with_nb_hab_12() {
         // Regression test for the "cannot sample empty range" panic with nb_hab=12.
         // This should not panic regardless of the input parameters.
-        let (prob, _) = overflow_probability(100.0, (150, 200), 10, 0, 10, 100, false, 12, None, None, false, false);
+        let (prob, _, _) = overflow_probability(100.0, (150, 200), 10, 0, 10, 100, false, 12, None, None, false, false, &[], false);
         assert!(prob >= 0.0 && prob <= 100.0, "probability should be in valid range");
     }
 
     #[test]
     fn test_debordo_with_nb_hab_zero_returns_zero() {
         // Edge case: nb_hab=0 should return 0.0 without panicking.
-        let prob = debordo_sequential(10, 100, 10, 0, 100, false, 0, None, None, false, false);
+        let (prob, _) = debordo_sequential(10, 100, 10, 0, 100, false, 0, None, None, false, false, &[], false);
         assert_eq!(prob, 0.0, "nb_hab=0 should return 0.0");
     }
 
     #[test]
     fn test_debordo_with_iterations_zero_returns_zero() {
         // Edge case: iterations=0 should return 0.0 without panicking.
-        let prob = debordo_sequential(10, 100, 10, 0, 0, false, 40, None, None, false, false);
+        let (prob, _) = debordo_sequential(10, 100, 10, 0, 0, false, 40, None, None, false, false, &[], false);
         assert_eq!(prob, 0.0, "iterations=0 should return 0.0");
     }
 
@@ -602,6 +640,43 @@ mod tests {
         let case2 = simulate_repartition_with_weights(100, 5, 3, vec![0.12, 0.88, 0.45, 0.22, 0.09]);
         // PHP output for case 2: [6, 43, 22, 25, 4]
         assert_eq!(case2, vec![6, 43, 22, 25, 4]);
+    }
+
+    #[test]
+    fn test_nominative_defense_survival() {
+        use crate::config::SimulationCitizen;
+        
+        let citizens = vec![
+            SimulationCitizen {
+                name: "Axfalt".to_string(),
+                defense: 1000,
+            },
+            SimulationCitizen {
+                name: "Bob".to_string(),
+                defense: 0,
+            },
+        ];
+
+        let (_town_prob, _total_runs, citizen_probs) = overflow_probability(
+            50.0,
+            (60, 60),
+            0,
+            0,
+            1,
+            500,
+            false,
+            2,
+            None,
+            None,
+            false,
+            false,
+            &citizens,
+            true,
+        );
+
+        assert_eq!(citizen_probs.len(), 2);
+        assert_eq!(citizen_probs[0], 0.0, "Axfalt (1000 defense) should have 0% death rate");
+        assert!(citizen_probs[1] > 0.0, "Bob (0 defense) should have a positive death rate");
     }
 }
 

@@ -54,6 +54,9 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
     let is_reactor_built = config.is_reactor_built;
     let nb_hab = config.nb_hab;
 
+    let citizens = job.citizens.clone();
+    let is_complete = config.is_complete;
+
     let start = Instant::now();
     let result = timeout(
         Duration::from_secs(SIMULATION_TIMEOUT_SECS),
@@ -71,6 +74,8 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
                 config.population,
                 config.is_chaos,
                 config.is_devastated,
+                &citizens,
+                is_complete,
             )
         }),
     )
@@ -86,7 +91,15 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
             error!("Simulation panicked: {}", e);
             "❌ La simulation a échoué. Veuillez réessayer.".to_string()
         }
-        Ok(Ok((prob, total_runs))) => format_results(&config, prob, start.elapsed().as_millis(), total_runs, &job.api_pulled_fields),
+        Ok(Ok((prob, total_runs, citizen_percentages))) => format_results(
+            &config,
+            prob,
+            start.elapsed().as_millis(),
+            total_runs,
+            &job.api_pulled_fields,
+            &job.citizens,
+            &citizen_percentages,
+        ),
     };
 
     send_followup(&job.application_id, &job.token, &content).await?;

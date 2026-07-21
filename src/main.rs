@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::cmp;
 use tracing::{error, info};
 
-use crate::config::SimulationJob;
+use crate::config::{SimulationJob, SimulationCitizen};
 use crate::discord::{
     interaction_types, response_types, verify_discord_signature, DiscordInteraction,
     DiscordResponse,
@@ -222,6 +222,9 @@ async fn handle_command(
     let mut user_iterations: Option<i32> = None;
     let mut user_reactor: Option<bool> = None;
     let mut user_nb_hab: Option<i32> = None;
+    let mut user_complete: Option<bool> = None;
+    let mut user_defenses: Option<String> = None;
+    let mut user_home_bonus: Option<i32> = None;
 
     let options = interaction
         .data
@@ -241,6 +244,9 @@ async fn handle_command(
             "iterations" => user_iterations = opt.value.as_i64().map(|v| v as i32),
             "reactor" => user_reactor = opt.value.as_bool(),
             "nb_hab" => user_nb_hab = opt.value.as_i64().map(|v| v as i32),
+            "complete" => user_complete = opt.value.as_bool(),
+            "defenses" => user_defenses = opt.value.as_str().map(|s| s.to_string()),
+            "home_bonus" => user_home_bonus = opt.value.as_i64().map(|v| v as i32),
             _ => {}
         }
     }
@@ -263,6 +269,14 @@ async fn handle_command(
         let nb_drapo = user_nb_drapo.unwrap_or(0);
         let iterations = user_iterations.unwrap_or(10000);
 
+        let citizens = resolve_citizens(
+            user_defenses.as_deref(),
+            user_home_bonus.unwrap_or(0),
+            None,
+            nb_hab,
+            min_def,
+        );
+
         return enqueue_simulation(
             token,
             application_id,
@@ -282,6 +296,10 @@ async fn handle_command(
             false,
             false,
             Vec::new(),
+            user_complete.unwrap_or(false),
+            user_defenses.clone(),
+            user_home_bonus.unwrap_or(0),
+            citizens,
         )
         .await;
     }
@@ -322,6 +340,14 @@ async fn handle_command(
             let nb_drapo = user_nb_drapo.unwrap_or(0);
             let iterations = user_iterations.unwrap_or(10000);
 
+            let citizens = resolve_citizens(
+                user_defenses.as_deref(),
+                user_home_bonus.unwrap_or(0),
+                None,
+                nb_hab,
+                min_def,
+            );
+
             enqueue_simulation(
                 token,
                 application_id,
@@ -341,6 +367,10 @@ async fn handle_command(
                 false,
                 false,
                 Vec::new(),
+                user_complete.unwrap_or(false),
+                user_defenses.clone(),
+                user_home_bonus.unwrap_or(0),
+                citizens,
             )
             .await
         }
@@ -459,6 +489,14 @@ async fn handle_command(
                             return Ok(build_json_response(200, &response));
                         }
 
+                        let citizens = resolve_citizens(
+                            user_defenses.as_deref(),
+                            user_home_bonus.unwrap_or(0),
+                            Some(&map.citizens),
+                            nb_hab,
+                            min_def,
+                        );
+
                         enqueue_simulation(
                             token,
                             application_id,
@@ -478,6 +516,10 @@ async fn handle_command(
                             api_chaos,
                             api_devast,
                             api_pulled_fields,
+                            user_complete.unwrap_or(false),
+                            user_defenses.clone(),
+                            user_home_bonus.unwrap_or(0),
+                            citizens,
                         )
                         .await
                     } else {
@@ -523,6 +565,14 @@ async fn handle_command(
                     let nb_drapo = user_nb_drapo.unwrap_or(0);
                     let iterations = user_iterations.unwrap_or(10000);
 
+                    let citizens = resolve_citizens(
+                        user_defenses.as_deref(),
+                        user_home_bonus.unwrap_or(0),
+                        None,
+                        nb_hab,
+                        min_def,
+                    );
+
                     enqueue_simulation(
                         token,
                         application_id,
@@ -542,6 +592,10 @@ async fn handle_command(
                         false,
                         false,
                         Vec::new(),
+                        user_complete.unwrap_or(false),
+                        user_defenses.clone(),
+                        user_home_bonus.unwrap_or(0),
+                        citizens,
                     )
                     .await
                 }
@@ -570,6 +624,10 @@ async fn enqueue_simulation(
     is_chaos: bool,
     is_devastated: bool,
     api_pulled_fields: Vec<String>,
+    is_complete: bool,
+    custom_defenses: Option<String>,
+    home_bonus: i32,
+    citizens: Vec<SimulationCitizen>,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     use crate::config::CommandOption;
 
@@ -618,7 +676,22 @@ async fn enqueue_simulation(
             name: "is_devastated".to_string(),
             value: serde_json::json!(is_devastated),
         },
+        CommandOption {
+            name: "complete".to_string(),
+            value: serde_json::json!(is_complete),
+        },
+        CommandOption {
+            name: "home_bonus".to_string(),
+            value: serde_json::json!(home_bonus),
+        },
     ];
+
+    if let Some(ref cd) = custom_defenses {
+        finalized_options.push(CommandOption {
+            name: "defenses".to_string(),
+            value: serde_json::json!(cd),
+        });
+    }
 
     if let Some(bl) = b_level {
         finalized_options.push(CommandOption {
@@ -639,6 +712,7 @@ async fn enqueue_simulation(
         application_id,
         options: finalized_options,
         api_pulled_fields,
+        citizens,
     };
     let job_json = serde_json::to_string(&job)?;
 
@@ -656,6 +730,101 @@ async fn enqueue_simulation(
         data: None,
     };
     Ok(build_json_response(200, &response))
+}
+
+fn parse_custom_defenses(defenses_str: &str) -> std::collections::HashMap<String, i32> {
+    let mut map = std::collections::HashMap::new();
+    for part in defenses_str.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(pos) = part.rfind(':') {
+            let name = part[..pos].trim().to_lowercase();
+            let def_str = part[pos+1..].trim();
+            if let Ok(def) = def_str.parse::<i32>() {
+                map.insert(name, def);
+            }
+        }
+    }
+    map
+}
+
+fn resolve_citizens(
+    custom_defenses_str: Option<&str>,
+    home_bonus: i32,
+    api_citizens: Option<&[crate::myhordes::MHCitizen]>,
+    nb_hab: i32,
+    min_def: i32,
+) -> Vec<SimulationCitizen> {
+    let mut citizens = Vec::new();
+    let custom_map = custom_defenses_str
+        .map(parse_custom_defenses)
+        .unwrap_or_default();
+
+    if let Some(api_list) = api_citizens {
+        // Mode API: Iterate through alive API citizens
+        for citizen in api_list {
+            if !citizen.dead {
+                let name_lower = citizen.name.to_lowercase();
+                let defense = if let Some(&custom_def) = custom_map.get(&name_lower) {
+                    custom_def
+                } else {
+                    citizen.base_def + home_bonus
+                };
+                citizens.push(SimulationCitizen {
+                    name: citizen.name.clone(),
+                    defense,
+                });
+            }
+        }
+    } else {
+        // Mode Manuel: Build based on custom map first, then fill remainder
+        let mut added_names = std::collections::HashSet::new();
+        
+        // 1. Add explicitly nominated citizens from defenses string
+        if let Some(s) = custom_defenses_str {
+            for part in s.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                if let Some(pos) = part.rfind(':') {
+                    let name = part[..pos].trim();
+                    let name_lower = name.to_lowercase();
+                    if added_names.contains(&name_lower) {
+                        continue;
+                    }
+                    let def_str = part[pos+1..].trim();
+                    if let Ok(def) = def_str.parse::<i32>() {
+                        citizens.push(SimulationCitizen {
+                            name: name.to_string(),
+                            defense: def,
+                        });
+                        added_names.insert(name_lower);
+                    }
+                }
+            }
+        }
+
+        // 2. Fill the remainder up to nb_hab
+        let mut count = 1;
+        while citizens.len() < nb_hab as usize {
+            let gen_name = format!("Citoyen {}", count);
+            let gen_name_lower = gen_name.to_lowercase();
+            if !added_names.contains(&gen_name_lower) {
+                citizens.push(SimulationCitizen {
+                    name: gen_name,
+                    defense: min_def + home_bonus,
+                });
+            }
+            count += 1;
+        }
+
+        citizens.truncate(nb_hab as usize);
+    }
+
+    citizens
 }
 
 // ============================================================================

@@ -81,6 +81,24 @@ commands = [
                 "description": "Nombre de personnes en ville (défaut: 40)",
                 "type": 4,  # INTEGER
                 "required": False
+            },
+            {
+                "name": "complete",
+                "description": "Affiche la probabilité de mort individuelle par citoyen (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            },
+            {
+                "name": "defenses",
+                "description": "Défenses nominatives (ex: 'Axfalt:15, Bob:8')",
+                "type": 3,  # STRING
+                "required": False
+            },
+            {
+                "name": "home_bonus",
+                "description": "Bonus de défense fixe appliqué à chaque maison (ex: 4)",
+                "type": 4,  # INTEGER
+                "required": False
             }
         ]
     },

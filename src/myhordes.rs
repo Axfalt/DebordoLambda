@@ -42,6 +42,7 @@ pub struct MHEstimation {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHCitizen {
+    pub name: String,
     pub dead: bool,
     #[serde(rename = "baseDef")]
     pub base_def: i32,
@@ -70,7 +71,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(dead,baseDef))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -130,9 +131,9 @@ mod tests {
                   "estimations": { "min": 250, "max": 400 }
                 },
                 "citizens": [
-                  { "dead": false, "baseDef": 12 },
-                  { "dead": true, "baseDef": 8 },
-                  { "dead": false, "baseDef": 15 }
+                  { "name": "Axfalt", "dead": false, "baseDef": 12 },
+                  { "name": "Bob", "dead": true, "baseDef": 8 },
+                  { "name": "Charlie", "dead": false, "baseDef": 15 }
                 ]
             }
         });

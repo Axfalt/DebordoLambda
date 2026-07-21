@@ -29,6 +29,9 @@ pub struct SimConfig {
     pub population: Option<i32>,
     pub is_chaos: bool,
     pub is_devastated: bool,
+    pub is_complete: bool,
+    pub custom_defenses: Option<String>,
+    pub home_bonus: i32,
 }
 
 impl SimConfig {
@@ -56,6 +59,9 @@ impl SimConfig {
                 "population" => config.population = opt.value.as_i64().map(|v| v as i32),
                 "is_chaos" => config.is_chaos = opt.value.as_bool().unwrap_or(false),
                 "is_devastated" => config.is_devastated = opt.value.as_bool().unwrap_or(false),
+                "complete" => config.is_complete = opt.value.as_bool().unwrap_or(false),
+                "defenses" => config.custom_defenses = opt.value.as_str().map(|s| s.to_string()),
+                "home_bonus" => config.home_bonus = opt.value.as_i64().unwrap_or(0) as i32,
                 _ => {}
             }
         }
@@ -68,6 +74,13 @@ impl SimConfig {
     }
 }
 
+/// Citoyen modélisé pour la simulation de survie détaillée.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SimulationCitizen {
+    pub name: String,
+    pub defense: i32,
+}
+
 /// Payload envoyé via SQS au worker Lambda pour exécuter une simulation.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimulationJob {
@@ -76,6 +89,8 @@ pub struct SimulationJob {
     pub options: Vec<CommandOption>,
     #[serde(default)]
     pub api_pulled_fields: Vec<String>,
+    #[serde(default)]
+    pub citizens: Vec<SimulationCitizen>,
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
@@ -85,6 +100,8 @@ pub fn format_results(
     elapsed_ms: u128,
     total_runs: u64,
     api_pulled_fields: &[String],
+    citizens: &[SimulationCitizen],
+    citizen_percentages: &[f64],
 ) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
@@ -116,7 +133,29 @@ pub fn format_results(
     output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
 
-    output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
+    output.push_str(&format!("💀 **Probabilité de mort (ville): {:.3}%**\n\n", prob));
+
+    if config.is_complete && !citizens.is_empty() {
+        output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
+        let mut list: Vec<(&SimulationCitizen, f64)> = citizens.iter().zip(citizen_percentages.iter().copied()).collect();
+        // Sort descending by probability, then alphabetical by name
+        list.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.name.cmp(&b.0.name))
+        });
+
+        let display_limit = 25;
+        for &(citizen, c_prob) in list.iter().take(display_limit) {
+            output.push_str(&format!("• **{}**: {} 🛡️ — **{:.3}%** de risque\n", citizen.name, citizen.defense, c_prob));
+        }
+
+        if list.len() > display_limit {
+            let remaining = list.len() - display_limit;
+            output.push_str(&format!("-# ... et {} autres citoyens\n", remaining));
+        }
+        output.push('\n');
+    }
+
     output.push_str(&format!(
         "-# ⏱️ {} simulations en {}ms",
         total_runs, elapsed_ms
