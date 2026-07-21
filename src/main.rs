@@ -450,7 +450,10 @@ async fn handle_command(
                             .map(|c| {
                                 c.buildings
                                     .iter()
-                                    .any(|b| b.name.to_lowercase().contains("reactor"))
+                                    .any(|b| {
+                                        let name = b.name.to_lowercase();
+                                        name.contains("réacteur") || name.contains("reactor")
+                                    })
                             })
                             .unwrap_or(false);
                         let api_fortifications = map
@@ -459,7 +462,10 @@ async fn handle_command(
                             .map(|c| {
                                 c.buildings
                                     .iter()
-                                    .any(|b| b.name.to_lowercase() == "fortifications")
+                                    .any(|b| {
+                                        let name = b.name.to_lowercase();
+                                        name == "habitations fortifiées" || name == "habitations fortifiees"
+                                    })
                             })
                             .unwrap_or(false);
                         let api_nb_hab = map.citizens.iter().filter(|c| !c.dead).count() as i32;

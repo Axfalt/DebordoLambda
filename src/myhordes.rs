@@ -89,7 +89,6 @@ pub async fn fetch_mh_data(
         .query(&[
             ("userkey", user_key),
             ("appkey", &app_key),
-            ("languages", "en"),
             ("fields", fields_param),
         ])
         .send()
@@ -134,9 +133,9 @@ mod tests {
                 "city": {
                   "defense": { "total": 125 },
                   "buildings": [
-                    { "name": "Chemical Reactor" },
+                    { "name": "Réacteur chimique" },
                     { "name": "Fortifications de fortune" },
-                    { "name": "Fortifications" },
+                    { "name": "Habitations fortifiées" },
                     { "name": "Wassergraben" }
                   ],
                   "estimations": { "min": 250, "max": 400 }
@@ -159,11 +158,17 @@ mod tests {
         assert_eq!(city.defense.unwrap().total, 125);
 
         // Test reactor check
-        let has_reactor = city.buildings.iter().any(|b| b.name.to_lowercase().contains("reactor"));
+        let has_reactor = city.buildings.iter().any(|b| {
+            let name = b.name.to_lowercase();
+            name.contains("réacteur") || name.contains("reactor")
+        });
         assert!(has_reactor);
-
+ 
         // Test fortifications check
-        let has_fortifications = city.buildings.iter().any(|b| b.name.to_lowercase() == "fortifications");
+        let has_fortifications = city.buildings.iter().any(|b| {
+            let name = b.name.to_lowercase();
+            name == "habitations fortifiées" || name == "habitations fortifiees"
+        });
         assert!(has_fortifications);
 
         let estimations = city.estimations.unwrap();
