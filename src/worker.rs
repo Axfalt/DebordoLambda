@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::config::{format_results, SimConfig, SimulationJob};
 use crate::discord::api::send_followup;
-use crate::simulation::overflow_probability;
+use crate::simulation::{overflow_probability, complete_overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 
@@ -61,22 +61,40 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
     let result = timeout(
         Duration::from_secs(SIMULATION_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            overflow_probability(
-                defense,
-                tdg_interval,
-                min_def,
-                nb_drapo,
-                day,
-                iterations,
-                is_reactor_built,
-                nb_hab,
-                config.b_level,
-                config.population,
-                config.is_chaos,
-                config.is_devastated,
-                &citizens,
-                is_complete,
-            )
+            if is_complete {
+                let (prob, total_runs, citizen_percentages) = complete_overflow_probability(
+                    defense,
+                    tdg_interval,
+                    min_def,
+                    nb_drapo,
+                    day,
+                    iterations,
+                    is_reactor_built,
+                    nb_hab,
+                    config.b_level,
+                    config.population,
+                    config.is_chaos,
+                    config.is_devastated,
+                    &citizens,
+                );
+                (prob, total_runs, citizen_percentages)
+            } else {
+                let (prob, total_runs) = overflow_probability(
+                    defense,
+                    tdg_interval,
+                    min_def,
+                    nb_drapo,
+                    day,
+                    iterations,
+                    is_reactor_built,
+                    nb_hab,
+                    config.b_level,
+                    config.population,
+                    config.is_chaos,
+                    config.is_devastated,
+                );
+                (prob, total_runs, Vec::new())
+            }
         }),
     )
     .await;
