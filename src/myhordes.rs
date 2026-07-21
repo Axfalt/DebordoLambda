@@ -43,9 +43,7 @@ pub struct MHEstimation {
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct MHJob {
     #[serde(default)]
-    pub id: i32,
-    #[serde(default)]
-    pub name: String,
+    pub uid: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -80,7 +78,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(id,name)))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -188,10 +186,6 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert_eq!(min_def, 12);
-
-        assert_eq!(map.citizens[0].job.as_ref().map(|j| j.id), Some(3));
-        assert_eq!(map.citizens[1].job.as_ref().map(|j| j.id), Some(0));
-        assert_eq!(map.citizens[2].job.as_ref().map(|j| j.id), Some(6));
     }
 }
 

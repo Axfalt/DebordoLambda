@@ -881,18 +881,18 @@ fn resolve_citizens(
                 let defense = if let Some(&custom_def) = custom_map.get(&name_lower) {
                     custom_def
                 } else {
-                    let job_name = citizen
+                    let job_uid = citizen
                         .job
                         .as_ref()
-                        .map(|j| j.name.to_lowercase())
+                        .map(|j| j.uid.to_lowercase())
                         .unwrap_or_default();
 
-                    let job_bonus = if  job_name.contains("guardian")
-                    {
+                    let is_guardian = job_uid == "shield";
+                    let is_resident = job_uid == "basic";
+
+                    let job_bonus = if is_guardian {
                         3 // Guardian (+3)
-                    } else if job_name.contains("habitant")
-                        || job_name.contains("resident")
-                    {
+                    } else if is_resident {
                         0 // Resident (+0)
                     } else {
                         2 // Other Hero professions (+2)
