@@ -90,19 +90,29 @@ pub fn format_results(
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
 
-    let has = |field: &str| -> String {
-        if api_pulled_fields.iter().any(|f| f == field) {
-            " 🔌 *(API)*".to_string()
+    let is_api = |field: &str| -> bool {
+        api_pulled_fields.iter().any(|f| f == field)
+    };
+
+    let fmt_val = |field: &str, val: i32| -> String {
+        if is_api(field) {
+            format!("*{}*", val)
         } else {
-            "".to_string()
+            val.to_string()
         }
     };
 
-    output.push_str(&format!("• 🛡️ Défense: {}{}\n", config.defense, has("defense")));
-    output.push_str(&format!("• 🔭 TDG: {} - {}{}\n", config.tdg_min, config.tdg_max, has("tdg")));
-    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}{}\n", config.nb_hab, has("nb_hab")));
-    output.push_str(&format!("• 🏠 Défense min: {}{}\n", config.min_def, has("min_def")));
-    output.push_str(&format!("• 📅 Jour: {}{}\n", config.day, has("day")));
+    let tdg_str = if is_api("tdg") {
+        format!("*{} - {}*", config.tdg_min, config.tdg_max)
+    } else {
+        format!("{} - {}", config.tdg_min, config.tdg_max)
+    };
+
+    output.push_str(&format!("• 🛡️ Défense: {}\n", fmt_val("defense", config.defense)));
+    output.push_str(&format!("• 🔭 TDG: {}\n", tdg_str));
+    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n", fmt_val("nb_hab", config.nb_hab)));
+    output.push_str(&format!("• 🏠 Défense min: {}\n", fmt_val("min_def", config.min_def)));
+    output.push_str(&format!("• 📅 Jour: {}\n", fmt_val("day", config.day)));
     output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
 
 
