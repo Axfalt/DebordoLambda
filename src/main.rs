@@ -459,7 +459,10 @@ async fn handle_command(
                             .map(|c| {
                                 c.buildings
                                     .iter()
-                                    .any(|b| b.name.to_lowercase().contains("fortified habitation"))
+                                    .any(|b| {
+                                        let name = b.name.to_lowercase();
+                                        name.contains("fortified home") || name.contains("fortified housing")
+                                    })
                             })
                             .unwrap_or(false);
                         let api_nb_hab = map.citizens.iter().filter(|c| !c.dead).count() as i32;
@@ -1079,13 +1082,13 @@ fn respond_with_defenses_modal(
     defense: i32,
     tdg_min: i32,
     tdg_max: i32,
-    min_def: i32,
+    _min_def: i32,
     nb_drapo: i32,
     day: i32,
     iterations: i32,
     reactor: bool,
     nb_hab: i32,
-    b_level: Option<i32>,
+    _b_level: Option<i32>,
     population: Option<i32>,
     is_chaos: bool,
     is_devastated: bool,
@@ -1096,7 +1099,6 @@ fn respond_with_defenses_modal(
 
     let custom_id = if is_api { "dm:api" } else { "dm:manual" };
 
-    let b_level_str = b_level.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
     let pop_str = population.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
 
     let mut citizens_sorted = citizens.to_vec();
@@ -1105,13 +1107,11 @@ fn respond_with_defenses_modal(
     let mut config_lines = vec![
         format!("defense: {}", defense),
         format!("tdg: {}-{}", tdg_min, tdg_max),
-        format!("min_def: {}", min_def),
         format!("nb_drapo: {}", nb_drapo),
         format!("day: {}", day),
         format!("iterations: {}", iterations),
         format!("reactor: {}", reactor),
         format!("nb_hab: {}", nb_hab),
-        format!("b_level: {}", b_level_str),
         format!("population: {}", pop_str),
         format!("chaos: {}", is_chaos),
         format!("devastated: {}", is_devastated),

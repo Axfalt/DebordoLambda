@@ -191,12 +191,10 @@ fn debordo_sequential(
 fn complete_debordo_sequential(
     day: i32,
     attacking: i32,
-    threshold: i32,
     nb_drapo: i32,
     iterations: u32,
     is_reactor_built: bool,
     nb_hab: i32,
-    b_level: Option<i32>,
     population: Option<i32>,
     is_chaos: bool,
     is_devastated: bool,
@@ -206,19 +204,18 @@ fn complete_debordo_sequential(
         return (0.0, vec![0.0; citizens.len()]);
     }
 
+    let threshold = citizens.iter().map(|c| c.defense).min().unwrap_or(0);
+    let b_level_resolved = match threshold {
+        0..=2 => 1,
+        3..=6 => 2,
+        7..=10 => 3,
+        _ => 4,
+    };
+
     let mut town_hits = 0;
     let mut citizen_hits = vec![0u64; citizens.len()];
     let mut rng = rand::rng();
     let reactor_damage = Uniform::new_inclusive(100, 250).unwrap();
-
-    let b_level_resolved = b_level.unwrap_or(
-        match threshold {
-            0..=2 => 1,
-            3..=6 => 2,
-            7..=10 => 3,
-            _ => 4,
-        }
-    );
 
     let mut simulator = AttackSimulator::new();
     let mut indices: Vec<usize> = (0..citizens.len()).collect();
@@ -347,13 +344,11 @@ pub fn overflow_probability(
 pub fn complete_overflow_probability(
     defense: f64,
     tdg_interval: (i32, i32),
-    min_def: i32,
     nb_drapo: i32,
     day: i32,
     iterations: u32,
     is_reactor_built: bool,
     nb_hab: i32,
-    b_level: Option<i32>,
     population: Option<i32>,
     is_chaos: bool,
     is_devastated: bool,
@@ -371,12 +366,10 @@ pub fn complete_overflow_probability(
             let (success_prob, citizen_p) = complete_debordo_sequential(
                 day,
                 overflow as i32,
-                min_def,
                 nb_drapo,
                 iterations,
                 is_reactor_built,
                 nb_hab,
-                b_level,
                 population,
                 is_chaos,
                 is_devastated,
@@ -753,12 +746,10 @@ mod tests {
             50.0,
             (60, 60),
             0,
-            0,
             1,
             500,
             false,
             2,
-            None,
             None,
             false,
             false,
