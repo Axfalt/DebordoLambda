@@ -40,14 +40,19 @@ pub struct MHEstimation {
     pub max: i32,
 }
 
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct MHJob {
+    #[serde(default)]
+    pub id: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHCitizen {
     pub name: String,
     pub dead: bool,
     #[serde(rename = "baseDef")]
     pub base_def: i32,
-    #[serde(default)]
-    pub job: String,
+    pub job: Option<MHJob>,
 }
 
 /// Fetches current user map and city details from MyHordes JSON API.
@@ -73,7 +78,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(id)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -91,7 +96,7 @@ pub async fn fetch_mh_data(
         .await
         .map_err(|e| {
             error!("Failed to connect to MyHordes API: {}", e);
-            lambda_runtime::Error::from(format!("Failed to connect to MyHordes API: {}", e))
+            lambda_runtime::Error::from("Failed to connect to MyHordes API")
         })?;
 
     if !resp.status().is_success() {
@@ -104,13 +109,15 @@ pub async fn fetch_mh_data(
         )));
     }
 
-    let data: MHMeResponse = resp
-        .json()
-        .await
-        .map_err(|e| {
-            error!("Failed to parse MyHordes response JSON: {}", e);
-            lambda_runtime::Error::from(format!("Failed to parse MyHordes response JSON: {}", e))
-        })?;
+    let body = resp.text().await.map_err(|e| {
+        error!("Failed to read MyHordes response body: {}", e);
+        lambda_runtime::Error::from("Failed to read MyHordes response body")
+    })?;
+
+    let data: MHMeResponse = serde_json::from_str(&body).map_err(|e| {
+        error!("Failed to parse MyHordes response JSON: {}", e);
+        lambda_runtime::Error::from(format!("Failed to parse MyHordes response JSON: {}", e))
+    })?;
 
     Ok(data)
 }
@@ -134,9 +141,9 @@ mod tests {
                   "estimations": { "min": 250, "max": 400 }
                 },
                 "citizens": [
-                  { "name": "Axfalt", "dead": false, "baseDef": 12, "job": "job_guardian" },
-                  { "name": "Bob", "dead": true, "baseDef": 8, "job": "job_basic" },
-                  { "name": "Charlie", "dead": false, "baseDef": 15, "job": "job_tech" }
+                  { "name": "Axfalt", "dead": false, "baseDef": 12, "job": { "id": "job_guardian" } },
+                  { "name": "Bob", "dead": true, "baseDef": 8, "job": { "id": "job_basic" } },
+                  { "name": "Charlie", "dead": false, "baseDef": 15, "job": { "id": "job_tech" } }
                 ]
             }
         });
@@ -177,9 +184,9 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(min_def, 12);
 
-        assert_eq!(map.citizens[0].job, "job_guardian");
-        assert_eq!(map.citizens[1].job, "job_basic");
-        assert_eq!(map.citizens[2].job, "job_tech");
+        assert_eq!(map.citizens[0].job.as_ref().map(|j| j.id.as_str()), Some("job_guardian"));
+        assert_eq!(map.citizens[1].job.as_ref().map(|j| j.id.as_str()), Some("job_basic"));
+        assert_eq!(map.citizens[2].job.as_ref().map(|j| j.id.as_str()), Some("job_tech"));
     }
 }
 
