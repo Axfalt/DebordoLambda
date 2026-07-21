@@ -957,6 +957,126 @@ fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayV2
     r
 }
 
+fn parse_complete_modal_text(text: &str) -> (
+    i32, // defense
+    i32, // tdg_min
+    i32, // tdg_max
+    i32, // min_def
+    i32, // day
+    i32, // iterations
+    bool, // reactor
+    i32, // nb_hab
+    Option<i32>, // b_level
+    Option<i32>, // population
+    bool, // is_chaos
+    bool, // is_devastated
+    Vec<SimulationCitizen>,
+) {
+    let mut defense = 0;
+    let mut tdg_min = 0;
+    let mut tdg_max = 0;
+    let mut min_def = 0;
+    let mut day = 1;
+    let mut iterations = 10000;
+    let mut reactor = false;
+    let mut nb_hab = 40;
+    let mut b_level = None;
+    let mut population = None;
+    let mut is_chaos = false;
+    let mut is_devastated = false;
+    let mut citizens = Vec::new();
+
+    for line in text.split(|c| c == '\n' || c == '\r') {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+            continue;
+        }
+
+        if let Some(pos) = line.find(':') {
+            let key = line[..pos].trim().to_lowercase();
+            let val_str = line[pos + 1..].trim();
+
+            match key.as_str() {
+                "defense" | "défense" => {
+                    if let Ok(v) = val_str.parse::<i32>() { defense = v; }
+                }
+                "tdg" | "estimations" => {
+                    if let Some(dash_pos) = val_str.find('-') {
+                        if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() { tdg_min = mn; }
+                        if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() { tdg_max = mx; }
+                    } else if let Ok(v) = val_str.parse::<i32>() {
+                        tdg_min = v;
+                        tdg_max = v;
+                    }
+                }
+                "tdg_min" => {
+                    if let Ok(v) = val_str.parse::<i32>() { tdg_min = v; }
+                }
+                "tdg_max" => {
+                    if let Ok(v) = val_str.parse::<i32>() { tdg_max = v; }
+                }
+                "min_def" | "defense_minimale" | "défense_minimale" => {
+                    if let Ok(v) = val_str.parse::<i32>() { min_def = v; }
+                }
+                "day" | "jour" => {
+                    if let Ok(v) = val_str.parse::<i32>() { day = v; }
+                }
+                "iterations" | "itérations" => {
+                    if let Ok(v) = val_str.parse::<i32>() { iterations = v; }
+                }
+                "reactor" | "réacteur" => {
+                    let lower = val_str.to_lowercase();
+                    reactor = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                }
+                "nb_hab" | "citoyens_max" => {
+                    if let Ok(v) = val_str.parse::<i32>() { nb_hab = v; }
+                }
+                "b_level" | "tercile" => {
+                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" {
+                        if let Ok(v) = val_str.parse::<i32>() { b_level = Some(v); }
+                    }
+                }
+                "population" => {
+                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" {
+                        if let Ok(v) = val_str.parse::<i32>() { population = Some(v); }
+                    }
+                }
+                "chaos" => {
+                    let lower = val_str.to_lowercase();
+                    is_chaos = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                }
+                "devastated" | "dévastée" | "devast" => {
+                    let lower = val_str.to_lowercase();
+                    is_devastated = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                }
+                "nb_drapo" => {} // Handled separately to avoid citizen parsing
+                _ => {
+                    if let Ok(def) = val_str.parse::<i32>() {
+                        let name = line[..pos].trim().to_string();
+                        citizens.push(SimulationCitizen { name, defense: def });
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        defense,
+        tdg_min,
+        tdg_max,
+        min_def,
+        day,
+        iterations,
+        reactor,
+        nb_hab,
+        b_level,
+        population,
+        is_chaos,
+        is_devastated,
+        citizens,
+    )
+}
+
 fn respond_with_defenses_modal(
     defense: i32,
     tdg_min: i32,
@@ -976,40 +1096,40 @@ fn respond_with_defenses_modal(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Responding with defenses edit modal");
 
-    let b_level_str = b_level.map(|v| v.to_string()).unwrap_or_else(|| "n".to_string());
-    let pop_str = population.map(|v| v.to_string()).unwrap_or_else(|| "n".to_string());
+    let custom_id = if is_api { "dm:api" } else { "dm:manual" };
 
-    let custom_id = format!(
-        "dm:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-        defense,
-        tdg_min,
-        tdg_max,
-        min_def,
-        nb_drapo,
-        day,
-        iterations,
-        if reactor { 1 } else { 0 },
-        nb_hab,
-        if is_chaos { 1 } else { 0 },
-        if is_devastated { 1 } else { 0 },
-        if is_api { 1 } else { 0 },
-        b_level_str,
-        pop_str
-    );
+    let b_level_str = b_level.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
+    let pop_str = population.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
 
     let mut citizens_sorted = citizens.to_vec();
     citizens_sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    let citizens_str = citizens_sorted
-        .iter()
-        .map(|c| format!("{}:{}", c.name, c.defense))
-        .collect::<Vec<String>>()
-        .join("\n");
+    let mut config_lines = vec![
+        format!("defense: {}", defense),
+        format!("tdg: {}-{}", tdg_min, tdg_max),
+        format!("min_def: {}", min_def),
+        format!("nb_drapo: {}", nb_drapo),
+        format!("day: {}", day),
+        format!("iterations: {}", iterations),
+        format!("reactor: {}", reactor),
+        format!("nb_hab: {}", nb_hab),
+        format!("b_level: {}", b_level_str),
+        format!("population: {}", pop_str),
+        format!("chaos: {}", is_chaos),
+        format!("devastated: {}", is_devastated),
+        "---".to_string(),
+    ];
+
+    for c in &citizens_sorted {
+        config_lines.push(format!("{}: {}", c.name, c.defense));
+    }
+
+    let citizens_str = config_lines.join("\n");
 
     let response = DiscordResponse {
         response_type: response_types::MODAL,
         data: Some(serde_json::json!({
-            "title": "Éditer les défenses des citoyens",
+            "title": "Configuration & Défenses",
             "custom_id": custom_id,
             "components": [
                 {
@@ -1018,11 +1138,10 @@ fn respond_with_defenses_modal(
                         {
                             "type": 4, // TEXT_INPUT
                             "custom_id": "defenses_input",
-                            "label": "Défenses des citoyens (Nom:Défense, ...)",
+                            "label": "Configuration et défenses",
                             "style": 2, // PARAGRAPH
                             "min_length": 1,
                             "max_length": 4000,
-                            "placeholder": "Axfalt:12, Bob:8...",
                             "value": citizens_str,
                             "required": true
                         }
@@ -1041,43 +1160,43 @@ async fn handle_debordo_modal_submit(
     sqs_client: &aws_sdk_sqs::Client,
     queue_url: &str,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
-    info!("Handling debordo custom defenses modal submission");
+    info!("Handling debordo configuration modal submission");
 
-    let parts: Vec<&str> = custom_id.split(':').collect();
-    if parts.len() < 15 {
-        error!("Invalid modal custom_id: {}", custom_id);
-        return Ok(build_response(400, "Invalid modal custom_id"));
-    }
-
-    let defense = parts[1].parse::<i32>().unwrap_or(0);
-    let tdg_min = parts[2].parse::<i32>().unwrap_or(0);
-    let tdg_max = parts[3].parse::<i32>().unwrap_or(0);
-    let min_def = parts[4].parse::<i32>().unwrap_or(0);
-    let nb_drapo = parts[5].parse::<i32>().unwrap_or(0);
-    let day = parts[6].parse::<i32>().unwrap_or(1);
-    let iterations = parts[7].parse::<i32>().unwrap_or(10000);
-    let reactor = parts[8] == "1";
-    let nb_hab = parts[9].parse::<i32>().unwrap_or(40);
-    let is_chaos = parts[10] == "1";
-    let is_devastated = parts[11] == "1";
-    let is_api = parts[12] == "1";
-    let b_level_str = parts[13];
-    let pop_str = parts[14];
-
-    let b_level = if b_level_str == "n" { None } else { b_level_str.parse::<i32>().ok() };
-    let population = if pop_str == "n" { None } else { pop_str.parse::<i32>().ok() };
+    let is_api = custom_id == "dm:api";
 
     let token = interaction.token.clone().unwrap_or_default();
     let application_id = interaction.application_id.clone().unwrap_or_default();
 
     let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
-    let citizens = resolve_citizens(
-        Some(defenses_val),
-        0,
-        None,
-        nb_hab,
+    
+    let (
+        defense,
+        tdg_min,
+        tdg_max,
         min_def,
-    );
+        day,
+        iterations,
+        reactor,
+        nb_hab,
+        b_level,
+        population,
+        is_chaos,
+        is_devastated,
+        citizens,
+    ) = parse_complete_modal_text(defenses_val);
+
+    let mut nb_drapo = 0;
+    for line in defenses_val.split(|c| c == '\n' || c == '\r') {
+        let line = line.trim();
+        if let Some(pos) = line.find(':') {
+            let key = line[..pos].trim().to_lowercase();
+            if key == "nb_drapo" {
+                if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                    nb_drapo = v;
+                }
+            }
+        }
+    }
 
     let mut api_pulled_fields = Vec::new();
     if is_api {
@@ -1108,7 +1227,7 @@ async fn handle_debordo_modal_submit(
         api_pulled_fields,
         true, // complete
         Some(defenses_val.to_string()),
-        0, // home_bonus (already baked in)
+        0, // home_bonus
         citizens,
     )
     .await
