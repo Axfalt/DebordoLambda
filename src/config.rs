@@ -146,14 +146,8 @@ pub fn format_results(
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
 
-        let display_limit = 25;
-        for &(citizen, c_prob) in list.iter().take(display_limit) {
-            output.push_str(&format!("• **{}**: {} 🛡️ — **{:.3}%** de risque\n", citizen.name, citizen.defense, c_prob));
-        }
-
-        if list.len() > display_limit {
-            let remaining = list.len() - display_limit;
-            output.push_str(&format!("-# ... et {} autres citoyens\n", remaining));
+        for &(citizen, c_prob) in &list {
+            output.push_str(&format!("• **{}**: {} 🛡️ — **{:.3}%**\n", citizen.name, citizen.defense, c_prob));
         }
         output.push('\n');
     }
