@@ -281,6 +281,7 @@ async fn handle_command(
             None,
             false,
             false,
+            Vec::new(),
         )
         .await;
     }
@@ -339,6 +340,7 @@ async fn handle_command(
                 None,
                 false,
                 false,
+                Vec::new(),
             )
             .await
         }
@@ -437,6 +439,13 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000);
 
+                        let mut api_pulled_fields = Vec::new();
+                        if user_day.is_none() { api_pulled_fields.push("day".to_string()); }
+                        if user_defense.is_none() { api_pulled_fields.push("defense".to_string()); }
+                        if user_tdg_min.is_none() || user_tdg_max.is_none() { api_pulled_fields.push("tdg".to_string()); }
+                        if user_nb_hab.is_none() { api_pulled_fields.push("nb_hab".to_string()); }
+                        if user_min_def.is_none() { api_pulled_fields.push("min_def".to_string()); }
+
                         // Si après la fusion, des paramètres critiques restent à 0, renvoyer une erreur
                         if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
                             let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
@@ -468,6 +477,7 @@ async fn handle_command(
                             Some(population),
                             api_chaos,
                             api_devast,
+                            api_pulled_fields,
                         )
                         .await
                     } else {
@@ -531,6 +541,7 @@ async fn handle_command(
                         None,
                         false,
                         false,
+                        Vec::new(),
                     )
                     .await
                 }
@@ -558,6 +569,7 @@ async fn enqueue_simulation(
     population: Option<i32>,
     is_chaos: bool,
     is_devastated: bool,
+    api_pulled_fields: Vec<String>,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     use crate::config::CommandOption;
 
@@ -626,6 +638,7 @@ async fn enqueue_simulation(
         token,
         application_id,
         options: finalized_options,
+        api_pulled_fields,
     };
     let job_json = serde_json::to_string(&job)?;
 

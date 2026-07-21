@@ -74,18 +74,35 @@ pub struct SimulationJob {
     pub token: String,
     pub application_id: String,
     pub options: Vec<CommandOption>,
+    #[serde(default)]
+    pub api_pulled_fields: Vec<String>,
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
-pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128, total_runs: u64) -> String {
+pub fn format_results(
+    config: &SimConfig,
+    prob: f64,
+    elapsed_ms: u128,
+    total_runs: u64,
+    api_pulled_fields: &[String],
+) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
-    output.push_str(&format!("• 🛡️ Défense: {}\n", config.defense));
-    output.push_str(&format!("• 🔭 TDG: {} - {}\n", config.tdg_min, config.tdg_max));
-    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n", config.nb_hab));
-    output.push_str(&format!("• 🏠 Défense min: {}\n", config.min_def));
-    output.push_str(&format!("• 📅 Jour: {}\n", config.day));
+
+    let has = |field: &str| -> String {
+        if api_pulled_fields.iter().any(|f| f == field) {
+            " 🔌 *(API)*".to_string()
+        } else {
+            "".to_string()
+        }
+    };
+
+    output.push_str(&format!("• 🛡️ Défense: {}{}\n", config.defense, has("defense")));
+    output.push_str(&format!("• 🔭 TDG: {} - {}{}\n", config.tdg_min, config.tdg_max, has("tdg")));
+    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}{}\n", config.nb_hab, has("nb_hab")));
+    output.push_str(&format!("• 🏠 Défense min: {}{}\n", config.min_def, has("min_def")));
+    output.push_str(&format!("• 📅 Jour: {}{}\n", config.day, has("day")));
     output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
 
 
