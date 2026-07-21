@@ -870,7 +870,12 @@ fn resolve_citizens(
                 let defense = if let Some(&custom_def) = custom_map.get(&name_lower) {
                     custom_def
                 } else {
-                    citizen.base_def + home_bonus
+                    let job_bonus = match citizen.job.as_str() {
+                        "job_basic" | "" => 0,
+                        "job_guardian" => 3,
+                        _ => 2,
+                    };
+                    citizen.base_def + home_bonus + job_bonus
                 };
                 citizens.push(SimulationCitizen {
                     name: citizen.name.clone(),

@@ -46,6 +46,8 @@ pub struct MHCitizen {
     pub dead: bool,
     #[serde(rename = "baseDef")]
     pub base_def: i32,
+    #[serde(default)]
+    pub job: String,
 }
 
 /// Fetches current user map and city details from MyHordes JSON API.
@@ -60,7 +62,7 @@ pub async fn fetch_mh_data(
         .name(&param_name)
         .with_decryption(true)
         .send()
-        .await 
+        .await
     {
         Ok(res) => res.parameter.and_then(|p| p.value).unwrap_or_else(|| {
             std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
@@ -71,7 +73,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -132,9 +134,9 @@ mod tests {
                   "estimations": { "min": 250, "max": 400 }
                 },
                 "citizens": [
-                  { "name": "Axfalt", "dead": false, "baseDef": 12 },
-                  { "name": "Bob", "dead": true, "baseDef": 8 },
-                  { "name": "Charlie", "dead": false, "baseDef": 15 }
+                  { "name": "Axfalt", "dead": false, "baseDef": 12, "job": "job_guardian" },
+                  { "name": "Bob", "dead": true, "baseDef": 8, "job": "job_basic" },
+                  { "name": "Charlie", "dead": false, "baseDef": 15, "job": "job_tech" }
                 ]
             }
         });
@@ -174,6 +176,10 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert_eq!(min_def, 12);
+
+        assert_eq!(map.citizens[0].job, "job_guardian");
+        assert_eq!(map.citizens[1].job, "job_basic");
+        assert_eq!(map.citizens[2].job, "job_tech");
     }
 }
 
