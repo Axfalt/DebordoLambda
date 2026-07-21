@@ -462,7 +462,13 @@ async fn handle_command(
                             .map(|c| {
                                 c.buildings
                                     .iter()
-                                    .any(|b| b.name.to_lowercase().contains("fortification"))
+                                    .any(|b| {
+                                        let name = b.name.to_lowercase();
+                                        name.contains("habitations fortifi")
+                                            || name.contains("fortified habitation")
+                                            || name.contains("befestigte behausungen")
+                                            || name.contains("habitaciones fortificadas")
+                                    })
                             })
                             .unwrap_or(false);
                         let api_nb_hab = map.citizens.iter().filter(|c| !c.dead).count() as i32;
