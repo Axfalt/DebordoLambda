@@ -140,10 +140,9 @@ pub fn format_results(
     if config.is_complete && !citizens.is_empty() {
         output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
         let mut list: Vec<(&SimulationCitizen, f64)> = citizens.iter().zip(citizen_percentages.iter().copied()).collect();
-        // Sort descending by probability, then alphabetical by name
+        // Sort alphabetically by name (case-insensitive)
         list.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.name.cmp(&b.0.name))
+            a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase())
         });
 
         for &(citizen, c_prob) in &list {
