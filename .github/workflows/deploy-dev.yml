@@ -41,6 +41,7 @@ jobs:
             --region eu-west-3 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
+            --env-var USER_TABLE_NAME=UserExternalIds-dev \
             ${{ vars.LAMBDA_RECEIVER_FUNCTION_NAME || 'DebordoLambda-dev' }}
 
       - name: Deploy Dev Worker Lambda
