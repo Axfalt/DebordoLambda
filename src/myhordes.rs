@@ -136,7 +136,7 @@ mod tests {
                   "buildings": [
                     { "name": "Chemical Reactor" },
                     { "name": "Fortifications de fortune" },
-                    { "name": "Fortified Homes" },
+                    { "name": "Fortifications" },
                     { "name": "Wassergraben" }
                   ],
                   "estimations": { "min": 250, "max": 400 }
@@ -163,10 +163,7 @@ mod tests {
         assert!(has_reactor);
 
         // Test fortifications check
-        let has_fortifications = city.buildings.iter().any(|b| {
-            let name = b.name.to_lowercase();
-            name.contains("fortified home") || name.contains("fortified housing")
-        });
+        let has_fortifications = city.buildings.iter().any(|b| b.name.to_lowercase() == "fortifications");
         assert!(has_fortifications);
 
         let estimations = city.estimations.unwrap();
