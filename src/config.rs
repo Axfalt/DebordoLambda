@@ -94,26 +94,26 @@ pub fn format_results(
         api_pulled_fields.iter().any(|f| f == field)
     };
 
-    let fmt_val = |field: &str, val: i32| -> String {
+    let fmt_line = |emoji_label: &str, field: &str, val: i32| -> String {
         if is_api(field) {
-            format!("*{}*", val)
+            format!("• **{}**: {} *(api)*\n", emoji_label, val)
         } else {
-            val.to_string()
+            format!("• **{}**: {}\n", emoji_label, val)
         }
     };
 
-    let tdg_str = if is_api("tdg") {
-        format!("*{} - {}*", config.tdg_min, config.tdg_max)
+    let tdg_line = if is_api("tdg") {
+        format!("• **🔭 TDG**: {} - {} *(api)*\n", config.tdg_min, config.tdg_max)
     } else {
-        format!("{} - {}", config.tdg_min, config.tdg_max)
+        format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max)
     };
 
-    output.push_str(&format!("• 🛡️ Défense: {}\n", fmt_val("defense", config.defense)));
-    output.push_str(&format!("• 🔭 TDG: {}\n", tdg_str));
-    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n", fmt_val("nb_hab", config.nb_hab)));
-    output.push_str(&format!("• 🏠 Défense min: {}\n", fmt_val("min_def", config.min_def)));
-    output.push_str(&format!("• 📅 Jour: {}\n", fmt_val("day", config.day)));
-    output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
+    output.push_str(&fmt_line("🛡️ Défense", "defense", config.defense));
+    output.push_str(&tdg_line);
+    output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", "nb_hab", config.nb_hab));
+    output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+    output.push_str(&fmt_line("📅 Jour", "day", config.day));
+    output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
 
     output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
