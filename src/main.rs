@@ -388,7 +388,7 @@ async fn handle_command(
                         let api_devast = map.city.as_ref().and_then(|c| c.devast).unwrap_or(false);
 
                         // Calculer population et b_level (tercile)
-                        let mut b_levels = vec![0; 30];
+                        let mut b_levels = [0; 30];
                         let mut targets = 0;
                         let mut max_b_level = -1;
                         for citizen in &map.citizens {

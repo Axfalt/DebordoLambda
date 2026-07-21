@@ -143,7 +143,7 @@ pub async fn get_user_key(
     // 2. Decode base64
     let combined = STANDARD.decode(encoded_key).map_err(|e| {
         error!("Base64 decoding failed for user {}: {}", user_id, e);
-        lambda_runtime::Error::from(format!("Decryption failed: invalid base64"))
+        lambda_runtime::Error::from("Decryption failed: invalid base64".to_string())
     })?;
 
     if combined.len() < 12 {
@@ -168,7 +168,7 @@ pub async fn get_user_key(
 
     let plaintext = String::from_utf8(decrypted).map_err(|e| {
         error!("Decrypted key is not valid UTF-8 for user {}: {}", user_id, e);
-        lambda_runtime::Error::from(format!("Decrypted data is corrupt"))
+        lambda_runtime::Error::from("Decrypted data is corrupt".to_string())
     })?;
 
     Ok(Some(plaintext))

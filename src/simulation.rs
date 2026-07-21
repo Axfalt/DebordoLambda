@@ -9,6 +9,8 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct AttackSimulator {
     rng: Mt64,
+    repartition_buf: Vec<f64>,
+    allocated_buf: Vec<i32>,
 }
 
 impl AttackSimulator {
@@ -16,6 +18,8 @@ impl AttackSimulator {
     pub fn new() -> Self {
         Self {
             rng: Mt64::new(rand::random()),
+            repartition_buf: Vec::with_capacity(40),
+            allocated_buf: Vec::with_capacity(40),
         }
     }
     
@@ -29,12 +33,13 @@ impl AttackSimulator {
         population: Option<i32>,
         is_chaos: bool,
         is_devastated: bool,
-    ) -> Vec<i32> {
+    ) -> &[i32] {
         // Calcul des cibles et suppression de l'influence des drapeaux
         let targets = cmp::min(10 + 2 * ((day - 10).max(0) / 2), nb_hab);
 
         if targets <= 0 {
-            return Vec::new();
+            self.allocated_buf.clear();
+            return &self.allocated_buf;
         }
 
         let mut leftover = attacking;
@@ -46,7 +51,9 @@ impl AttackSimulator {
 
         let flag_bonus = (attacking as f64 * 0.025).round() as i32;
         if leftover <= 0 {
-            return vec![flag_bonus; targets as usize];
+            self.allocated_buf.clear();
+            self.allocated_buf.resize(targets as usize, flag_bonus);
+            return &self.allocated_buf;
         }
 
         // Active zombie capping (PHP alignement)
@@ -66,49 +73,55 @@ impl AttackSimulator {
             level += 10.0;
         }
 
-        let active_factor = (level / 100.0).max(0.0).min(1.0);
+        let active_factor = (level / 100.0).clamp(0.0, 1.0);
         let max_active = (leftover as f64 * active_factor).round() as i32;
         leftover = leftover.min(max_active);
 
         if leftover <= 0 {
-            return vec![flag_bonus; targets as usize];
+            self.allocated_buf.clear();
+            self.allocated_buf.resize(targets as usize, flag_bonus);
+            return &self.allocated_buf;
         }
 
         // Poids aléatoires in [0, 1.0] (PHP alignement)
-        let mut repartition: Vec<f64> = (0..targets).map(|_| self.rng.random::<f64>()).collect();
-
-        // Une cible reçoit un boost de +0.3
-        if !repartition.is_empty() {
-            let unlucky_idx = self.rng.random_range(0..repartition.len());
-            repartition[unlucky_idx] += 0.3;
+        self.repartition_buf.clear();
+        for _ in 0..targets {
+            self.repartition_buf.push(self.rng.random::<f64>());
         }
 
-        let sum: f64 = repartition.iter().sum();
+        // Une cible reçoit un boost de +0.3
+        if !self.repartition_buf.is_empty() {
+            let unlucky_idx = self.rng.random_range(0..self.repartition_buf.len());
+            self.repartition_buf[unlucky_idx] += 0.3;
+        }
+
+        let sum: f64 = self.repartition_buf.iter().sum();
 
         // Allocation des attaques avec contrainte de somme exacte (PHP alignement)
-        let mut allocated = vec![0; targets as usize];
+        self.allocated_buf.clear();
+        self.allocated_buf.resize(targets as usize, 0);
         let mut attacking_cache = leftover;
 
         if sum > 0.0 {
             for i in 0..targets as usize {
-                let norm = repartition[i] / sum;
+                let norm = self.repartition_buf[i] / sum;
                 let share = (norm * leftover as f64).round() as i32;
                 let val = 0.max(attacking_cache.min(share));
-                allocated[i] = val;
+                self.allocated_buf[i] = val;
                 attacking_cache -= val;
             }
         }
 
         // Distribution du reliquat aux cibles aléatoires
-        while attacking_cache > 0 && !allocated.is_empty() {
-            let idx = self.rng.random_range(0..allocated.len());
-            allocated[idx] += 1;
+        while attacking_cache > 0 && !self.allocated_buf.is_empty() {
+            let idx = self.rng.random_range(0..self.allocated_buf.len());
+            self.allocated_buf[idx] += 1;
             attacking_cache -= 1;
         }
 
         // Ajout de l'influence des drapeaux
-        allocated.iter_mut().for_each(|x| *x += flag_bonus);
-        allocated
+        self.allocated_buf.iter_mut().for_each(|x| *x += flag_bonus);
+        &self.allocated_buf
     }
 }
 
@@ -140,14 +153,16 @@ fn debordo_sequential(
     let reactor_damage = Uniform::new_inclusive(100, 250).unwrap();
 
     // Map default b_level if none was provided
-    let b_level_resolved = b_level.unwrap_or_else(|| {
+    let b_level_resolved = b_level.unwrap_or(
         match threshold {
             0..=2 => 1,
             3..=6 => 2,
             7..=10 => 3,
             _ => 4,
         }
-    });
+    );
+
+    let mut simulator = AttackSimulator::new();
 
     for _ in 0..iterations {
         let real_attacking = if is_reactor_built {
@@ -155,7 +170,6 @@ fn debordo_sequential(
         } else {
             attacking
         };
-        let mut simulator = AttackSimulator::new();
         let allocated = simulator.simulate_attack(
             day,
             real_attacking,
@@ -178,7 +192,7 @@ fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64
     if tdg_min > tdg_max {
         return HashMap::new();
     }
-    let ratio = if day <= 3 { 0.75 } else { 1.1 } as f64;
+    let ratio = if day <= 3 { 0.75 } else { 1.1 };
     let lo = (ratio * (max(1, day - 1) as f64 * 0.75 + 2.5).powi(3)).round() as i32;
     let hi = (ratio * (day as f64 * 0.75 + 3.5).powi(3)).round() as i32;
     let mid = lo as f64 + 0.5 * (hi - lo) as f64;
