@@ -886,17 +886,12 @@ fn resolve_citizens(
                         .as_ref()
                         .map(|j| j.name.to_lowercase())
                         .unwrap_or_default();
-                    let job_id = citizen.job.as_ref().map(|j| j.id).unwrap_or(0);
 
-                    let job_bonus = if job_name.contains("gardien")
-                        || job_name.contains("guardian")
-                        || job_id == 3
+                    let job_bonus = if  job_name.contains("guardian")
                     {
                         3 // Guardian (+3)
                     } else if job_name.contains("habitant")
                         || job_name.contains("resident")
-                        || job_id == 0
-                        || (job_name.is_empty() && job_id == 0)
                     {
                         0 // Resident (+0)
                     } else {
