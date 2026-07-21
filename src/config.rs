@@ -25,6 +25,10 @@ pub struct SimConfig {
     pub iterations: u32,
     pub is_reactor_built: bool,
     pub nb_hab: i32,
+    pub b_level: Option<i32>,
+    pub population: Option<i32>,
+    pub is_chaos: bool,
+    pub is_devastated: bool,
 }
 
 impl SimConfig {
@@ -48,6 +52,10 @@ impl SimConfig {
                 "iterations" => config.iterations = (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS),
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 "nb_hab" => config.nb_hab = opt.value.as_i64().unwrap_or(40) as i32,
+                "b_level" => config.b_level = opt.value.as_i64().map(|v| v as i32),
+                "population" => config.population = opt.value.as_i64().map(|v| v as i32),
+                "is_chaos" => config.is_chaos = opt.value.as_bool().unwrap_or(false),
+                "is_devastated" => config.is_devastated = opt.value.as_bool().unwrap_or(false),
                 _ => {}
             }
         }
@@ -66,19 +74,46 @@ pub struct SimulationJob {
     pub token: String,
     pub application_id: String,
     pub options: Vec<CommandOption>,
+    #[serde(default)]
+    pub api_pulled_fields: Vec<String>,
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
-pub fn format_results(config: &SimConfig, prob: f64, elapsed_ms: u128, total_runs: u64) -> String {
+pub fn format_results(
+    config: &SimConfig,
+    prob: f64,
+    elapsed_ms: u128,
+    total_runs: u64,
+    api_pulled_fields: &[String],
+) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
-    output.push_str(&format!("• 🛡️ Défense: {}\n", config.defense));
-    output.push_str(&format!("• 🔭 TDG: {} - {}\n", config.tdg_min, config.tdg_max));
-    output.push_str(&format!("• 🧑‍🤝‍🧑 Personnes en ville: {}\n", config.nb_hab));
-    output.push_str(&format!("• 🏠 Défense min: {}\n", config.min_def));
-    output.push_str(&format!("• 📅 Jour: {}\n", config.day));
-    output.push_str(&format!("• 🔁 Itérations: {}\n\n", config.iterations));
+
+    let is_api = |field: &str| -> bool {
+        api_pulled_fields.iter().any(|f| f == field)
+    };
+
+    let fmt_line = |emoji_label: &str, field: &str, val: i32| -> String {
+        if is_api(field) {
+            format!("• **{}**: {} *(api)*\n", emoji_label, val)
+        } else {
+            format!("• **{}**: {}\n", emoji_label, val)
+        }
+    };
+
+    let tdg_line = if is_api("tdg") {
+        format!("• **🔭 TDG**: {} - {} *(api)*\n", config.tdg_min, config.tdg_max)
+    } else {
+        format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max)
+    };
+
+    output.push_str(&fmt_line("🛡️ Défense", "defense", config.defense));
+    output.push_str(&tdg_line);
+    output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", "nb_hab", config.nb_hab));
+    output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+    output.push_str(&fmt_line("📅 Jour", "day", config.day));
+    output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
 
     output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));

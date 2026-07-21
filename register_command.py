@@ -32,25 +32,25 @@ commands = [
                 "name": "defense",
                 "description": "Valeur de défense de la ville",
                 "type": 4,  # INTEGER
-                "required": True
+                "required": False
             },
             {
                 "name": "tdg_min",
                 "description": "Estimation minimale de la TDG",
                 "type": 4,  # INTEGER
-                "required": True
+                "required": False
             },
             {
                 "name": "tdg_max",
                 "description": "Estimation maximale de la TDG",
                 "type": 4,  # INTEGER
-                "required": True
+                "required": False
             },
             {
                 "name": "min_def",
                 "description": "Défense minimale en maison",
                 "type": 4,  # INTEGER
-                "required": True
+                "required": False
             },
             {
                 "name": "nb_drapo",

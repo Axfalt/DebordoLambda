@@ -1,7 +1,7 @@
-name: Deploy to AWS Lambda
+name: Deploy to AWS Lambda (Dev)
 
 on:
-  push:
+  pull_request:
     branches: [main, master]
   workflow_dispatch:
 
@@ -9,9 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-deploy:
+  build-and-deploy-dev:
     runs-on: ubuntu-latest
-    environment: production
+    environment: development
 
     steps:
       - name: Checkout code
@@ -31,9 +31,9 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-3' }}
 
-      - name: Deploy Receiver Lambda
+      - name: Deploy Dev Receiver Lambda
         run: |
           cargo lambda deploy \
             --binary-name bootstrap \
@@ -41,14 +41,14 @@ jobs:
             --region eu-west-3 \
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
-            ${{ vars.LAMBDA_RECEIVER_FUNCTION_NAME || 'DebordoLambda' }}
+            --env-var USER_TABLE_NAME=UserExternalIds-dev \
+            ${{ vars.LAMBDA_RECEIVER_FUNCTION_NAME || 'DebordoLambda-dev' }}
 
-      - name: Deploy Worker Lambda
+      - name: Deploy Dev Worker Lambda
         run: |
           cargo lambda deploy \
             --binary-name worker \
             --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --timeout 300 \
-            ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker' }}
-
+            ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker-dev' }}

@@ -33,7 +33,7 @@ base64 = "0.22"
 sha2 = "0.10"
 
 # HTTP client pour Discord webhooks
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
 
 # Discord signature verification
 ed25519-dalek = "3.0"
