@@ -23,7 +23,6 @@ pub struct SimConfig {
     pub is_reactor_built: bool,
     pub nb_hab: i32,
     pub b_level: Option<i32>,
-    pub population: Option<i32>,
     pub is_chaos: bool,
     pub is_devastated: bool,
     pub is_complete: bool,
@@ -57,7 +56,6 @@ impl SimConfig {
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 "nb_hab" => config.nb_hab = opt.value.as_i64().unwrap_or(40) as i32,
                 "b_level" => config.b_level = opt.value.as_i64().map(|v| v as i32),
-                "population" => config.population = opt.value.as_i64().map(|v| v as i32),
                 "is_chaos" => config.is_chaos = opt.value.as_bool().unwrap_or(false),
                 "is_devastated" => config.is_devastated = opt.value.as_bool().unwrap_or(false),
                 "complete" => config.is_complete = opt.value.as_bool().unwrap_or(false),
@@ -90,8 +88,6 @@ pub struct SimulationJob {
     pub application_id: String,
     pub config: SimConfig,
     #[serde(default)]
-    pub api_pulled_fields: Vec<String>,
-    #[serde(default)]
     pub citizens: Vec<SimulationCitizen>,
 }
 
@@ -101,7 +97,7 @@ pub fn format_results(
     prob: f64,
     elapsed_ms: u128,
     total_runs: u64,
-    api_pulled_fields: &[String],
+    avg_max_active: Option<f64>,
     citizens: &[SimulationCitizen],
     citizen_percentages: &[f64],
 ) -> String {
@@ -109,38 +105,28 @@ pub fn format_results(
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
 
-    let is_api = |field: &str| -> bool { api_pulled_fields.iter().any(|f| f == field) };
+    let fmt_line =
+        |emoji_label: &str, val: i32| -> String { format!("• **{}**: {}\n", emoji_label, val) };
 
-    let fmt_line = |emoji_label: &str, field: &str, val: i32| -> String {
-        if is_api(field) {
-            format!("• **{}**: {} *(api)*\n", emoji_label, val)
-        } else {
-            format!("• **{}**: {}\n", emoji_label, val)
-        }
-    };
+    let tdg_line = format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max);
 
-    let tdg_line = if is_api("tdg") {
-        format!(
-            "• **🔭 TDG**: {} - {} *(api)*\n",
-            config.tdg_min, config.tdg_max
-        )
-    } else {
-        format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max)
-    };
-
-    output.push_str(&fmt_line("🛡️ Défense", "defense", config.defense));
+    output.push_str(&fmt_line("🛡️ Défense", config.defense));
     output.push_str(&tdg_line);
-    output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", "nb_hab", config.nb_hab));
+    output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", config.nb_hab));
     if !config.is_complete {
-        output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+        output.push_str(&fmt_line("🏠 Défense min", config.min_def));
     }
-    output.push_str(&fmt_line("📅 Jour", "day", config.day));
-    output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
+    output.push_str(&fmt_line("📅 Jour", config.day));
+    output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
+    if let Some(avg_active) = avg_max_active {
+        output.push_str(&format!(
+            "• **🧟 Max zombies actifs (moyenne)**: {:.1}\n",
+            avg_active
+        ));
+    }
+    output.push('\n');
 
-    output.push_str(&format!(
-        "💀 **Probabilité de mort (ville): {:.3}%**\n\n",
-        prob
-    ));
+    output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
 
     if config.is_complete && !citizens.is_empty() {
         output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
@@ -256,5 +242,36 @@ mod tests {
         let options = vec![make_opt("interactive", json!(true))];
         let config = SimConfig::from_options(&options);
         assert!(config.is_interactive);
+    }
+
+    #[test]
+    fn test_format_results_visibility_matrix() {
+        let config_std = SimConfig {
+            defense: 100,
+            tdg_min: 50,
+            tdg_max: 60,
+            min_def: 15,
+            home_bonus: 4,
+            is_complete: false,
+            ..Default::default()
+        };
+        let res_std = format_results(&config_std, 5.0, 10, 1000, Some(25.0), &[], &[]);
+        assert!(res_std.contains("Défense min"));
+        assert!(!res_std.contains("Bonus maison"));
+        assert!(res_std.contains("Max zombies actifs (moyenne)"));
+
+        let config_comp = SimConfig {
+            defense: 100,
+            tdg_min: 50,
+            tdg_max: 60,
+            min_def: 15,
+            home_bonus: 4,
+            is_complete: true,
+            ..Default::default()
+        };
+        let res_comp = format_results(&config_comp, 5.0, 10, 1000, None, &[], &[]);
+        assert!(!res_comp.contains("Défense min"));
+        assert!(!res_comp.contains("Bonus maison"));
+        assert!(!res_comp.contains("Max zombies actifs (moyenne)"));
     }
 }

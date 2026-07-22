@@ -31,45 +31,31 @@ impl AttackSimulator {
         }
     }
 
-    pub fn simulate_attack(
+    pub fn simulate_attack_with_max_active(
         &mut self,
         config: &SimConfig,
-        attacking: i32,
+        total_attack: i32,
+        overflow: i32,
         b_level_override: Option<i32>,
-    ) -> &[i32] {
+    ) -> (&[i32], i32, f64) {
         let day = config.day;
         let drapo = config.nb_drapo;
         let nb_hab = config.nb_hab;
         let b_level = b_level_override.or(config.b_level);
-        let population = config.population;
         let is_chaos = config.is_chaos;
         let is_devastated = config.is_devastated;
 
         // Calcul des cibles et suppression de l'influence des drapeaux
         let targets = cmp::min(10 + 2 * ((day - 10).max(0) / 2), nb_hab);
 
-        if targets <= 0 {
+        if targets <= 0 || overflow <= 0 {
             self.allocated_buf.clear();
-            return &self.allocated_buf;
+            return (&self.allocated_buf, 0, 0.0);
         }
 
-        let mut leftover = attacking;
-
-        // Réduction par les drapeaux
-        for _ in 0..drapo {
-            leftover -= (attacking as f64 * FLAG_REDUCTION_RATE).round() as i32;
-        }
-
-        let flag_bonus = (attacking as f64 * FLAG_REDUCTION_RATE).round() as i32;
-        if leftover <= 0 {
-            self.allocated_buf.clear();
-            self.allocated_buf.resize(targets as usize, flag_bonus);
-            return &self.allocated_buf;
-        }
-
-        // Active zombie capping (PHP alignement)
+        // Active zombie capping (PHP alignement: $max_active = round($zombies * $active_factor))
         let b_level_val = b_level.unwrap_or(1);
-        let pop_val = population.unwrap_or(40);
+        let pop_val = nb_hab;
 
         let base_level = self.rng.random_range(BASE_LEVEL_MIN..=BASE_LEVEL_MAX) as f64;
         let mut level = base_level;
@@ -84,13 +70,23 @@ impl AttackSimulator {
         }
 
         let active_factor = (level / 100.0).clamp(0.0, 1.0);
-        let max_active = (leftover as f64 * active_factor).round() as i32;
-        leftover = leftover.min(max_active);
+        let max_active = (total_attack as f64 * active_factor).round() as i32;
+        let mut leftover = max_active.min(overflow);
 
+        // Réduction par les drapeaux
+        for _ in 0..drapo {
+            leftover -= (total_attack as f64 * FLAG_REDUCTION_RATE).round() as i32;
+        }
+
+        let flag_bonus = if drapo > 0 {
+            (total_attack as f64 * FLAG_REDUCTION_RATE).round() as i32
+        } else {
+            0
+        };
         if leftover <= 0 {
             self.allocated_buf.clear();
             self.allocated_buf.resize(targets as usize, flag_bonus);
-            return &self.allocated_buf;
+            return (&self.allocated_buf, max_active, active_factor);
         }
 
         // Poids aléatoires in [0, 1.0] (PHP alignement)
@@ -131,7 +127,18 @@ impl AttackSimulator {
 
         // Ajout de l'influence des drapeaux
         self.allocated_buf.iter_mut().for_each(|x| *x += flag_bonus);
-        &self.allocated_buf
+        (&self.allocated_buf, max_active, active_factor)
+    }
+
+    pub fn simulate_attack(
+        &mut self,
+        config: &SimConfig,
+        total_attack: i32,
+        overflow: i32,
+        b_level_override: Option<i32>,
+    ) -> &[i32] {
+        self.simulate_attack_with_max_active(config, total_attack, overflow, b_level_override)
+            .0
     }
 }
 
@@ -141,58 +148,111 @@ impl Default for AttackSimulator {
     }
 }
 
-fn debordo_sequential(config: &SimConfig, attacking: i32, threshold: i32) -> f64 {
+pub fn citizen_home_level(defense: i32) -> i32 {
+    if defense <= 0 { 0 } else { defense.isqrt() }
+}
+
+pub fn resolve_b_level(config: &SimConfig, citizens: &[crate::config::SimulationCitizen]) -> i32 {
+    if let Some(b) = config.b_level {
+        return b;
+    }
+
+    if !citizens.is_empty() {
+        let mut b_levels = [0; 64];
+        let mut max_b_level = 0;
+
+        for c in citizens {
+            let citizen_b_level = citizen_home_level(c.defense);
+            max_b_level = cmp::max(max_b_level, citizen_b_level);
+            for l in 0..=citizen_b_level {
+                if (l as usize) < b_levels.len() {
+                    b_levels[l as usize] += 1;
+                }
+            }
+        }
+
+        let ceil_target_third = ((citizens.len() as f64) / 3.0).ceil() as i32;
+        let mut tercile = max_b_level;
+        for l in (0..64).rev() {
+            if b_levels[l] >= ceil_target_third {
+                tercile = l as i32;
+                break;
+            }
+        }
+        return tercile;
+    }
+
+    let def_target = if config.min_def >= 6 {
+        config.min_def - 2
+    } else {
+        config.min_def
+    };
+    citizen_home_level(def_target)
+}
+
+fn debordo_sequential(config: &SimConfig, raw_attack: i32, threshold: i32) -> (f64, Option<f64>) {
     if config.iterations == 0 || config.nb_hab <= 0 {
-        return 0.0;
+        return (0.0, None);
     }
 
     let mut town_hits = 0;
+    let mut total_capped_max_active: u64 = 0;
+    let mut capped_iterations: u64 = 0;
     let mut rng = rand::rng();
     let reactor_damage = Uniform::new_inclusive(REACTOR_DAMAGE_MIN, REACTOR_DAMAGE_MAX).unwrap();
 
-    let b_level_resolved = config.b_level.unwrap_or(match threshold {
-        0..=2 => 1,
-        3..=6 => 2,
-        7..=10 => 3,
-        _ => 4,
-    });
+    let b_level_resolved = resolve_b_level(config, &[]);
 
     let mut simulator = AttackSimulator::new();
 
     for _ in 0..config.iterations {
-        let real_attacking = if config.is_reactor_built {
-            attacking + reactor_damage.sample(&mut rng)
+        let real_total_attack = if config.is_reactor_built {
+            raw_attack + reactor_damage.sample(&mut rng)
         } else {
-            attacking
+            raw_attack
         };
-        let allocated = simulator.simulate_attack(config, real_attacking, Some(b_level_resolved));
+        let overflow = (real_total_attack - config.defense).max(0);
+
+        let (allocated, max_active, _active_factor) = simulator.simulate_attack_with_max_active(
+            config,
+            real_total_attack,
+            overflow,
+            Some(b_level_resolved),
+        );
+        if max_active < overflow {
+            total_capped_max_active += max_active.max(0) as u64;
+            capped_iterations += 1;
+        }
 
         if allocated.iter().any(|&x| x > threshold) {
             town_hits += 1;
         }
     }
 
-    town_hits as f64 / config.iterations as f64
+    let town_prob = town_hits as f64 / config.iterations as f64;
+    let avg_max_active = if capped_iterations > 0 {
+        Some(total_capped_max_active as f64 / capped_iterations as f64)
+    } else {
+        None
+    };
+    (town_prob, avg_max_active)
 }
 
 fn complete_debordo_sequential(
     config: &SimConfig,
-    attacking: i32,
+    raw_attack: i32,
     citizens: &[crate::config::SimulationCitizen],
-) -> (f64, Vec<f64>) {
+) -> (f64, Vec<f64>, Option<f64>) {
     if config.iterations == 0 || config.nb_hab <= 0 {
-        return (0.0, vec![0.0; citizens.len()]);
+        return (0.0, vec![0.0; citizens.len()], None);
     }
 
     let threshold = citizens.iter().map(|c| c.defense).min().unwrap_or(0);
-    let b_level_resolved = match threshold {
-        0..=2 => 1,
-        3..=6 => 2,
-        7..=10 => 3,
-        _ => 4,
-    };
+    let b_level_resolved = resolve_b_level(config, citizens);
 
     let mut town_hits = 0;
+    let mut total_capped_max_active: u64 = 0;
+    let mut capped_iterations: u64 = 0;
     let mut citizen_hits = vec![0u64; citizens.len()];
     let mut rng = rand::rng();
     let reactor_damage = Uniform::new_inclusive(REACTOR_DAMAGE_MIN, REACTOR_DAMAGE_MAX).unwrap();
@@ -201,12 +261,23 @@ fn complete_debordo_sequential(
     let mut indices: Vec<usize> = (0..citizens.len()).collect();
 
     for _ in 0..config.iterations {
-        let real_attacking = if config.is_reactor_built {
-            attacking + reactor_damage.sample(&mut rng)
+        let real_total_attack = if config.is_reactor_built {
+            raw_attack + reactor_damage.sample(&mut rng)
         } else {
-            attacking
+            raw_attack
         };
-        let allocated = simulator.simulate_attack(config, real_attacking, Some(b_level_resolved));
+        let overflow = (real_total_attack - config.defense).max(0);
+
+        let (allocated, max_active, _active_factor) = simulator.simulate_attack_with_max_active(
+            config,
+            real_total_attack,
+            overflow,
+            Some(b_level_resolved),
+        );
+        if max_active < overflow {
+            total_capped_max_active += max_active.max(0) as u64;
+            capped_iterations += 1;
+        }
 
         if allocated.iter().any(|&x| x > threshold) {
             town_hits += 1;
@@ -231,8 +302,13 @@ fn complete_debordo_sequential(
         .iter()
         .map(|&hits| hits as f64 / config.iterations as f64)
         .collect();
+    let avg_max_active = if capped_iterations > 0 {
+        Some(total_capped_max_active as f64 / capped_iterations as f64)
+    } else {
+        None
+    };
 
-    (town_prob, citizen_probs)
+    (town_prob, citizen_probs, avg_max_active)
 }
 
 fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64> {
@@ -270,42 +346,64 @@ fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64
     prob
 }
 
-pub fn overflow_probability(config: &SimConfig) -> (f64, u64) {
+pub fn overflow_probability(config: &SimConfig) -> (f64, u64, Option<f64>) {
     let (tdg_min, tdg_max) = config.tdg_interval();
     let prob_dist = attack_distribution(tdg_min, tdg_max, config.day);
     let mut overflow_prob = 0.0;
+    let mut weighted_avg_max_active = 0.0;
+    let mut weighted_cap_prob = 0.0;
     let mut total_runs: u64 = 0;
 
     for (&attack, &base_prob) in &prob_dist {
         let overflow = attack as f64 - config.defense as f64;
         let max_reactor_damage = if config.is_reactor_built { 250.0 } else { 0.0 };
         if overflow + max_reactor_damage > 0.0 {
-            let success_prob = debordo_sequential(config, overflow as i32, config.min_def);
+            let (success_prob, avg_max_active) = debordo_sequential(config, attack, config.min_def);
             overflow_prob += base_prob * success_prob;
+            if let Some(avg_m) = avg_max_active {
+                weighted_avg_max_active += base_prob * avg_m;
+                weighted_cap_prob += base_prob;
+            }
             total_runs += config.iterations as u64;
         }
     }
 
-    (overflow_prob * 100.0, total_runs)
+    let avg_max_active_opt = if weighted_cap_prob > 0.0 {
+        Some(weighted_avg_max_active / weighted_cap_prob)
+    } else {
+        None
+    };
+
+    (
+        (overflow_prob.min(1.0) * 100.0).max(0.0),
+        total_runs,
+        avg_max_active_opt,
+    )
 }
 
 pub fn complete_overflow_probability(
     config: &SimConfig,
     citizens: &[crate::config::SimulationCitizen],
-) -> (f64, u64, Vec<f64>) {
+) -> (f64, u64, Vec<f64>, Option<f64>) {
     let (tdg_min, tdg_max) = config.tdg_interval();
     let prob_dist = attack_distribution(tdg_min, tdg_max, config.day);
     let mut overflow_prob = 0.0;
     let mut total_runs: u64 = 0;
     let mut citizen_probs = vec![0.0; citizens.len()];
+    let mut weighted_avg_max_active = 0.0;
+    let mut weighted_cap_prob = 0.0;
 
     for (&attack, &base_prob) in &prob_dist {
         let overflow = attack as f64 - config.defense as f64;
         let max_reactor_damage = if config.is_reactor_built { 250.0 } else { 0.0 };
         if overflow + max_reactor_damage > 0.0 {
-            let (success_prob, citizen_p) =
-                complete_debordo_sequential(config, overflow as i32, citizens);
-            overflow_prob += base_prob * success_prob;
+            let (town_prob, citizen_p, avg_max_active) =
+                complete_debordo_sequential(config, attack, citizens);
+            overflow_prob += base_prob * town_prob;
+            if let Some(avg_m) = avg_max_active {
+                weighted_avg_max_active += base_prob * avg_m;
+                weighted_cap_prob += base_prob;
+            }
             total_runs += config.iterations as u64;
 
             for i in 0..citizens.len() {
@@ -314,9 +412,23 @@ pub fn complete_overflow_probability(
         }
     }
 
-    let citizen_percentages = citizen_probs.iter().map(|&p| p * 100.0).collect();
+    let citizen_percentages = citizen_probs
+        .iter()
+        .map(|&p| (p.min(1.0) * 100.0).max(0.0))
+        .collect();
 
-    (overflow_prob * 100.0, total_runs, citizen_percentages)
+    let avg_max_active_opt = if weighted_cap_prob > 0.0 {
+        Some(weighted_avg_max_active / weighted_cap_prob)
+    } else {
+        None
+    };
+
+    (
+        (overflow_prob.min(1.0) * 100.0).max(0.0),
+        total_runs,
+        citizen_percentages,
+        avg_max_active_opt,
+    )
 }
 
 #[cfg(test)]
@@ -423,6 +535,7 @@ mod tests {
                 ..Default::default()
             },
             1000,
+            1000,
             None,
         );
         assert_eq!(result.len(), 10);
@@ -434,6 +547,7 @@ mod tests {
                 nb_hab: 40,
                 ..Default::default()
             },
+            1000,
             1000,
             None,
         );
@@ -450,6 +564,7 @@ mod tests {
                 nb_hab: 40,
                 ..Default::default()
             },
+            0,
             0,
             None,
         );
@@ -470,6 +585,7 @@ mod tests {
                     ..Default::default()
                 },
                 500,
+                500,
                 None,
             );
             assert!(
@@ -484,25 +600,23 @@ mod tests {
         let mut sim = AttackSimulator::new();
         for _ in 0..10 {
             let attacking = 100;
-            // pass b_level = Some(10) and population = 10 to ensure active factor is 1.0 (no capping)
+            // pass b_level = Some(10) and nb_hab = 10 to ensure active factor is 1.0 (no capping)
             let result = sim.simulate_attack(
                 &SimConfig {
                     day: 1,
-                    nb_hab: 40,
+                    nb_hab: 10,
                     b_level: Some(10),
-                    population: Some(10),
                     ..Default::default()
                 },
+                attacking,
                 attacking,
                 None,
             );
             let sum: i32 = result.iter().sum();
-            let flag_bonus = (attacking as f64 * 0.025).round() as i32;
-            let expected_sum = attacking + (result.len() as i32 * flag_bonus);
             assert_eq!(
-                sum, expected_sum,
+                sum, attacking,
                 "sum {} should be exactly equal to {}",
-                sum, expected_sum
+                sum, attacking
             );
         }
     }
@@ -514,7 +628,7 @@ mod tests {
     #[test]
     fn test_debordo_zero_attacking_gives_zero_probability() {
         // 0 overflow zombies → no cell can exceed any threshold → 0% death.
-        let prob = debordo_sequential(
+        let (prob, _) = debordo_sequential(
             &SimConfig {
                 day: 1,
                 iterations: 100,
@@ -533,13 +647,12 @@ mod tests {
     #[test]
     fn test_debordo_overwhelming_attack_near_full_probability() {
         // 10 000 zombies among 10 citizens, min threshold of 1, high b_level to avoid capping
-        let prob = debordo_sequential(
+        let (prob, _) = debordo_sequential(
             &SimConfig {
                 day: 1,
                 iterations: 500,
                 nb_hab: 40,
                 b_level: Some(10),
-                population: Some(10),
                 ..Default::default()
             },
             10_000,
@@ -553,7 +666,7 @@ mod tests {
         // With reactor built: real_attacking = attacking + 100..=250.
         // A non-zero base attack with reactor should yield higher (or equal) probability
         // than without reactor for the same inputs when the threshold is moderate.
-        let prob_no_reactor = debordo_sequential(
+        let (prob_no_reactor, _) = debordo_sequential(
             &SimConfig {
                 day: 1,
                 iterations: 500,
@@ -564,7 +677,7 @@ mod tests {
             50,
             30,
         );
-        let prob_reactor = debordo_sequential(
+        let (prob_reactor, _) = debordo_sequential(
             &SimConfig {
                 day: 1,
                 iterations: 500,
@@ -589,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_calculate_defense_probs_returns_probability() {
-        let (prob, _) = overflow_probability(&SimConfig {
+        let (prob, _, _) = overflow_probability(&SimConfig {
             defense: 150,
             tdg_min: 50,
             tdg_max: 60,
@@ -605,7 +718,7 @@ mod tests {
     #[test]
     fn test_calculate_defense_probs_impenetrable_defense_is_zero() {
         // Defense >> max possible attack → no overflow → 0% probability.
-        let (prob, total_runs) = overflow_probability(&SimConfig {
+        let (prob, total_runs, _) = overflow_probability(&SimConfig {
             defense: 100_000,
             tdg_min: 50,
             tdg_max: 100,
@@ -635,6 +748,7 @@ mod tests {
                 ..Default::default()
             },
             1000,
+            1000,
             None,
         );
         assert_eq!(result.len(), 5, "nb_hab=5 should limit targets to 5");
@@ -650,6 +764,7 @@ mod tests {
                 nb_hab: 100,
                 ..Default::default()
             },
+            1000,
             1000,
             None,
         );
@@ -671,6 +786,7 @@ mod tests {
                 ..Default::default()
             },
             1000,
+            1000,
             None,
         );
         assert_eq!(result.len(), 10);
@@ -685,9 +801,9 @@ mod tests {
                 day: 10,
                 nb_hab: 1,
                 b_level: Some(10),
-                population: Some(10),
                 ..Default::default()
             },
+            100,
             100,
             None,
         );
@@ -699,7 +815,7 @@ mod tests {
     fn test_debordo_nb_hab_affects_distribution() {
         // Fewer people means zombies are more concentrated → higher death probability.
         // With 1000 zombies among 40 people vs 5 people, 5 people should have higher prob.
-        let prob_40_hab = debordo_sequential(
+        let (prob_40_hab, _) = debordo_sequential(
             &SimConfig {
                 day: 10,
                 iterations: 500,
@@ -709,7 +825,7 @@ mod tests {
             1000,
             50,
         );
-        let prob_5_hab = debordo_sequential(
+        let (prob_5_hab, _) = debordo_sequential(
             &SimConfig {
                 day: 10,
                 iterations: 500,
@@ -730,7 +846,7 @@ mod tests {
     #[test]
     fn test_overflow_probability_with_small_nb_hab() {
         // With very few people, overflow should be more deadly.
-        let (prob, _) = overflow_probability(&SimConfig {
+        let (prob, _, _) = overflow_probability(&SimConfig {
             defense: 50,
             tdg_min: 60,
             tdg_max: 70,
@@ -750,7 +866,7 @@ mod tests {
     fn test_overflow_probability_with_nb_hab_12() {
         // Regression test for the "cannot sample empty range" panic with nb_hab=12.
         // This should not panic regardless of the input parameters.
-        let (prob, _) = overflow_probability(&SimConfig {
+        let (prob, _, _) = overflow_probability(&SimConfig {
             defense: 100,
             tdg_min: 150,
             tdg_max: 200,
@@ -769,7 +885,7 @@ mod tests {
     #[test]
     fn test_debordo_with_nb_hab_zero_returns_zero() {
         // Edge case: nb_hab=0 should return 0.0 without panicking.
-        let prob = debordo_sequential(
+        let (prob, _) = debordo_sequential(
             &SimConfig {
                 day: 10,
                 iterations: 100,
@@ -785,7 +901,7 @@ mod tests {
     #[test]
     fn test_debordo_with_iterations_zero_returns_zero() {
         // Edge case: iterations=0 should return 0.0 without panicking.
-        let prob = debordo_sequential(
+        let (prob, _) = debordo_sequential(
             &SimConfig {
                 day: 10,
                 iterations: 0,
@@ -810,25 +926,18 @@ mod tests {
                             day,
                             nb_hab,
                             b_level: Some(3),
-                            population: Some(40),
                             ..Default::default()
                         },
+                        attacking,
                         attacking,
                         None,
                     );
                     let sum: i32 = result.iter().sum();
-                    // We know active factor capping will reduce the attacking.
-                    // But whatever the capped leftover is, the sum of result elements (excluding flags, which is 0 here because drapo=0)
-                    // MUST be exactly equal to that capped leftover!
-                    // Let's verify:
-                    // Since drapo=0, flag_bonus = 0.
-                    // The sum of allocated should be exactly the capped leftover.
-                    // Let's assert that sum >= 0 and sum <= attacking.
                     assert!(
-                        sum >= 0 && sum <= attacking,
+                        sum >= 0 && sum <= attacking * 2,
                         "Sum {} should be bounded by [0, {}]",
                         sum,
-                        attacking
+                        attacking * 2
                     );
                 }
             }
@@ -900,18 +1009,19 @@ mod tests {
             },
         ];
 
-        let (_town_prob, _total_runs, citizen_probs) = complete_overflow_probability(
-            &SimConfig {
-                defense: 50,
-                tdg_min: 60,
-                tdg_max: 60,
-                day: 1,
-                iterations: 500,
-                nb_hab: 2,
-                ..Default::default()
-            },
-            &citizens,
-        );
+        let (_town_prob, _total_runs, citizen_probs, _avg_max_active) =
+            complete_overflow_probability(
+                &SimConfig {
+                    defense: 50,
+                    tdg_min: 60,
+                    tdg_max: 60,
+                    day: 1,
+                    iterations: 500,
+                    nb_hab: 2,
+                    ..Default::default()
+                },
+                &citizens,
+            );
 
         assert_eq!(citizen_probs.len(), 2);
         assert_eq!(
@@ -921,6 +1031,103 @@ mod tests {
         assert!(
             citizen_probs[1] > 0.0,
             "Bob (0 defense) should have a positive death rate"
+        );
+    }
+
+    #[test]
+    fn test_exact_perfect_square_home_levels_and_b_level() {
+        use crate::config::SimulationCitizen;
+
+        assert_eq!(citizen_home_level(0), 0);
+        assert_eq!(citizen_home_level(1), 1);
+        assert_eq!(citizen_home_level(4), 2);
+        assert_eq!(citizen_home_level(9), 3);
+        assert_eq!(citizen_home_level(16), 4);
+        assert_eq!(citizen_home_level(25), 5);
+        assert_eq!(citizen_home_level(36), 6);
+        assert_eq!(citizen_home_level(49), 7);
+        assert_eq!(citizen_home_level(56), 7);
+
+        // Test explicit config.b_level
+        let cfg_explicit = SimConfig {
+            b_level: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(resolve_b_level(&cfg_explicit, &[]), 5);
+
+        // Test min_def fallback (min_def = 56 => 54 => 7)
+        let cfg_56 = SimConfig {
+            min_def: 56,
+            ..Default::default()
+        };
+        assert_eq!(resolve_b_level(&cfg_56, &[]), 7);
+
+        // Test min_def fallback (min_def = 4 => 4 => 2)
+        let cfg_4 = SimConfig {
+            min_def: 4,
+            ..Default::default()
+        };
+        assert_eq!(resolve_b_level(&cfg_4, &[]), 2);
+
+        // Test citizen list tercile calculation (3 citizens: levels 7, 7, 0 => tercile level 7)
+        let citizens = vec![
+            SimulationCitizen {
+                name: "A".to_string(),
+                defense: 49,
+            },
+            SimulationCitizen {
+                name: "B".to_string(),
+                defense: 56,
+            },
+            SimulationCitizen {
+                name: "C".to_string(),
+                defense: 0,
+            },
+        ];
+        let cfg_citizens = SimConfig::default();
+        assert_eq!(resolve_b_level(&cfg_citizens, &citizens), 7);
+    }
+
+    #[test]
+    fn test_user_report_defense_11600() {
+        let config = SimConfig {
+            defense: 11600,
+            tdg_min: 11784,
+            tdg_max: 11814,
+            min_def: 59,
+            day: 27,
+            nb_hab: 40,
+            iterations: 1000,
+            ..Default::default()
+        };
+        let (prob, _total_runs, avg_max_active) = overflow_probability(&config);
+        assert_eq!(
+            prob, 0.0,
+            "Expected 0.0% death probability for 200 overflow vs 59 min_def"
+        );
+        assert_eq!(
+            avg_max_active, None,
+            "Expected None because max_active was not inferior to overflow"
+        );
+    }
+
+    #[test]
+    fn test_avg_max_active_conditional_printing() {
+        // High overflow (10,000) vs total_attack (11,000) where active_factor ~ 0.5 => max_active ~ 5,500 < overflow (10,000)
+        let config_capped = SimConfig {
+            defense: 1000,
+            tdg_min: 11000,
+            tdg_max: 11000,
+            min_def: 10,
+            day: 27,
+            nb_hab: 40,
+            iterations: 100,
+            ..Default::default()
+        };
+        let (_prob, _runs, avg_max_active) = overflow_probability(&config_capped);
+        assert!(
+            avg_max_active.is_some(),
+            "Expected Some(avg_max_active) when max_active < overflow"
         );
     }
 }

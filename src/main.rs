@@ -274,7 +274,7 @@ async fn handle_command(
     }
 
     let is_complete = is_complete_cmd || user_complete.unwrap_or(false);
-    let is_interactive = user_interactive.unwrap_or(false);
+    let is_interactive = is_complete_cmd || user_interactive.unwrap_or(false);
 
     // 2. Vérifier si on a tous les paramètres requis manuellement
     let has_all_critical = user_defense.is_some()
@@ -313,7 +313,6 @@ async fn handle_command(
             token,
             application_id,
             config,
-            api_pulled_fields: Vec::new(),
             citizens,
         };
 
@@ -378,7 +377,6 @@ async fn handle_command(
                 token,
                 application_id,
                 config,
-                api_pulled_fields: Vec::new(),
                 citizens,
             };
 
@@ -448,14 +446,8 @@ async fn handle_command(
                         for citizen in &map.citizens {
                             if !citizen.dead {
                                 let base_def = citizen.base_def;
-                                let citizen_b_level = match base_def {
-                                    0..=1 => 0,
-                                    2..=5 => 1,
-                                    6..=9 => 2,
-                                    10..=13 => 3,
-                                    14..=17 => 4,
-                                    _ => 5,
-                                };
+                                let citizen_b_level =
+                                    debordo_lib::simulation::citizen_home_level(base_def);
                                 max_b_level = cmp::max(max_b_level, citizen_b_level);
                                 for l in 0..=citizen_b_level {
                                     if l < 30 {
@@ -478,9 +470,6 @@ async fn handle_command(
                             b_level = tercile;
                         }
 
-                        let population = map.citizens.len() as i32;
-
-                        // Fusionner les valeurs: Input > API > Default
                         let day = user_day.unwrap_or(api_day);
                         let defense = user_defense.unwrap_or(api_defense);
                         let tdg_min = user_tdg_min.unwrap_or(api_tdg_min);
@@ -490,23 +479,6 @@ async fn handle_command(
                         let min_def = user_min_def.unwrap_or(api_min_def);
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
-
-                        let mut api_pulled_fields = Vec::new();
-                        if user_day.is_none() {
-                            api_pulled_fields.push("day".to_string());
-                        }
-                        if user_defense.is_none() {
-                            api_pulled_fields.push("defense".to_string());
-                        }
-                        if user_tdg_min.is_none() || user_tdg_max.is_none() {
-                            api_pulled_fields.push("tdg".to_string());
-                        }
-                        if user_nb_hab.is_none() {
-                            api_pulled_fields.push("nb_hab".to_string());
-                        }
-                        if user_min_def.is_none() {
-                            api_pulled_fields.push("min_def".to_string());
-                        }
 
                         // Si après la fusion, des paramètres critiques restent à 0, renvoyer une erreur
                         if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
@@ -543,7 +515,6 @@ async fn handle_command(
                             is_reactor_built: reactor,
                             nb_hab,
                             b_level: Some(b_level),
-                            population: Some(population),
                             is_chaos: api_chaos,
                             is_devastated: api_devast,
                             is_complete,
@@ -556,7 +527,6 @@ async fn handle_command(
                             token,
                             application_id,
                             config,
-                            api_pulled_fields,
                             citizens,
                         };
 
@@ -626,7 +596,6 @@ async fn handle_command(
                         token,
                         application_id,
                         config,
-                        api_pulled_fields: Vec::new(),
                         citizens,
                     };
 
@@ -712,7 +681,7 @@ fn resolve_citizens(
             if !citizen.dead {
                 let name_lower = citizen.name.to_lowercase();
                 let defense = if let Some(&custom_def) = custom_map.get(&name_lower) {
-                    custom_def
+                    custom_def + home_bonus
                 } else {
                     let job_uid = citizen
                         .job
@@ -759,7 +728,7 @@ fn resolve_citizens(
                     if let Ok(def) = def_str.parse::<i32>() {
                         citizens.push(SimulationCitizen {
                             name: name.to_string(),
-                            defense: def,
+                            defense: def + home_bonus,
                         });
                         added_names.insert(name_lower);
                     }
@@ -883,25 +852,20 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
                         || lower == "yes"
                         || lower == "y";
                 }
-                "nb_hab" | "citoyens_max" => {
-                    if let Ok(v) = val_str.parse::<i32>() {
+                "nb_hab" => {
+                    if val_str.to_lowercase() != "none"
+                        && val_str.to_lowercase() != "n"
+                        && let Ok(v) = val_str.parse::<i32>()
+                    {
                         config.nb_hab = v;
                     }
                 }
-                "b_level" | "tercile" => {
+                "b_level" => {
                     if val_str.to_lowercase() != "none"
                         && val_str.to_lowercase() != "n"
                         && let Ok(v) = val_str.parse::<i32>()
                     {
                         config.b_level = Some(v);
-                    }
-                }
-                "population" => {
-                    if val_str.to_lowercase() != "none"
-                        && val_str.to_lowercase() != "n"
-                        && let Ok(v) = val_str.parse::<i32>()
-                    {
-                        config.population = Some(v);
                     }
                 }
                 "chaos" => {
@@ -923,6 +887,11 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
                 "nb_drapo" => {
                     if let Ok(v) = val_str.parse::<i32>() {
                         config.nb_drapo = v;
+                    }
+                }
+                "home_bonus" | "bonus_maison" => {
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.home_bonus = v;
                     }
                 }
                 _ => {
@@ -952,26 +921,27 @@ fn respond_with_defenses_modal(
         format!("dm:manual:{}", mode_tag)
     };
 
-    let pop_str = config
-        .population
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "none".to_string());
-
     let mut citizens_sorted = citizens.to_vec();
     citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
 
     let mut config_lines = vec![
         format!("defense: {}", config.defense),
         format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
+    ];
+
+    if !config.is_complete {
+        config_lines.push(format!("min_def: {}", config.min_def));
+    }
+
+    config_lines.extend(vec![
         format!("nb_drapo: {}", config.nb_drapo),
         format!("day: {}", config.day),
         format!("iterations: {}", config.iterations),
         format!("reactor: {}", config.is_reactor_built),
         format!("nb_hab: {}", config.nb_hab),
-        format!("population: {}", pop_str),
         format!("chaos: {}", config.is_chaos),
         format!("devastated: {}", config.is_devastated),
-    ];
+    ]);
 
     if config.is_complete {
         config_lines.push("---".to_string());
@@ -1018,7 +988,6 @@ async fn handle_debordo_modal_submit(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Handling debordo configuration modal submission");
 
-    let is_api = custom_id.contains("api");
     let was_complete = custom_id.contains("comp");
 
     let token = interaction.token.clone().unwrap_or_default();
@@ -1027,22 +996,13 @@ async fn handle_debordo_modal_submit(
     let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
 
     let (mut config, citizens) = parse_complete_modal_text(defenses_val);
-    config.is_complete = was_complete || !citizens.is_empty();
+    config.is_complete = was_complete;
     config.custom_defenses = Some(defenses_val.to_string());
-
-    let mut api_pulled_fields = Vec::new();
-    if is_api {
-        api_pulled_fields.push("defense".to_string());
-        api_pulled_fields.push("tdg".to_string());
-        api_pulled_fields.push("nb_hab".to_string());
-        api_pulled_fields.push("min_def".to_string());
-    }
 
     let job = SimulationJob {
         token,
         application_id,
         config,
-        api_pulled_fields,
         citizens,
     };
 
@@ -1081,4 +1041,19 @@ async fn main() -> Result<(), Error> {
         async move { handler(event, client, url, db, ssm, &http, &pkey).await }
     }))
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_citizens_applies_home_bonus() {
+        let citizens = resolve_citizens(Some("Axfalt:10"), 4, None, 2, 5);
+        assert_eq!(citizens.len(), 2);
+        assert_eq!(citizens[0].name, "Axfalt");
+        assert_eq!(citizens[0].defense, 14); // 10 + 4
+        assert_eq!(citizens[1].name, "Citoyen 1");
+        assert_eq!(citizens[1].defense, 9); // 5 (min_def) + 4
+    }
 }
