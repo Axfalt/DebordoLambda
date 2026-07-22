@@ -99,6 +99,7 @@ pub fn format_results(
     prob: f64,
     elapsed_ms: u128,
     total_runs: u64,
+    avg_max_active: f64,
     citizens: &[SimulationCitizen],
     citizen_percentages: &[f64],
 ) -> String {
@@ -118,7 +119,11 @@ pub fn format_results(
         output.push_str(&fmt_line("🏠 Défense min", config.min_def));
     }
     output.push_str(&fmt_line("📅 Jour", config.day));
-    output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
+    output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
+    output.push_str(&format!(
+        "🧟 **Max zombies actifs (moyenne)**: {:.1}\n\n",
+        avg_max_active
+    ));
 
     output.push_str(&format!(
         "💀 **Probabilité de mort (ville): {:.3}%**\n\n",
@@ -252,9 +257,10 @@ mod tests {
             is_complete: false,
             ..Default::default()
         };
-        let res_std = format_results(&config_std, 5.0, 10, 1000, &[], &[]);
+        let res_std = format_results(&config_std, 5.0, 10, 1000, 25.0, &[], &[]);
         assert!(res_std.contains("Défense min"));
         assert!(!res_std.contains("Bonus maison"));
+        assert!(res_std.contains("Max zombies actifs (moyenne)"));
 
         let config_comp = SimConfig {
             defense: 100,
@@ -265,7 +271,7 @@ mod tests {
             is_complete: true,
             ..Default::default()
         };
-        let res_comp = format_results(&config_comp, 5.0, 10, 1000, &[], &[]);
+        let res_comp = format_results(&config_comp, 5.0, 10, 1000, 25.0, &[], &[]);
         assert!(!res_comp.contains("Défense min"));
         assert!(!res_comp.contains("Bonus maison"));
     }
