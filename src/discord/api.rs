@@ -10,7 +10,23 @@ pub async fn send_followup(
     );
 
     let body = serde_json::json!({
-        "content": content
+        "content": content,
+        "components": [
+            {
+                "type": 1, // ACTION_ROW
+                "components": [
+                    {
+                        "type": 2, // BUTTON
+                        "style": 2, // SECONDARY (grey)
+                        "label": "Voir la configuration",
+                        "custom_id": "vconf",
+                        "emoji": {
+                            "name": "⚙️"
+                        }
+                    }
+                ]
+            }
+        ]
     });
 
     client

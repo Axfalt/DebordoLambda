@@ -7,7 +7,9 @@ use serde::Serialize;
 use std::cmp;
 use tracing::{error, info};
 
-use debordo_lib::config::{SimConfig, SimulationCitizen, SimulationJob};
+use debordo_lib::config::{
+    format_conf, parse_result_message_content, SimConfig, SimulationCitizen, SimulationJob,
+};
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
     verify_discord_signature,
@@ -95,8 +97,33 @@ async fn handler(
             )
             .await
         }
+        interaction_types::MESSAGE_COMPONENT => handle_component_interaction(interaction),
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
+}
+
+/// Gère le clic sur un bouton Discord.
+fn handle_component_interaction(
+    interaction: DiscordInteraction,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    let custom_id = interaction
+        .data
+        .as_ref()
+        .and_then(|d| d.custom_id.as_deref())
+        .unwrap_or_default();
+
+    if custom_id == "vconf" || custom_id.starts_with("vconf:") {
+        let msg_content = interaction
+            .message
+            .as_ref()
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or_default();
+
+        let (config, citizens) = parse_result_message_content(msg_content);
+        return respond_with_defenses_modal(&config, false, &citizens);
+    }
+
+    Ok(build_response(400, "Unknown component interaction"))
 }
 
 /// Répond au PING de validation Discord.
@@ -921,36 +948,7 @@ fn respond_with_defenses_modal(
         format!("dm:manual:{}", mode_tag)
     };
 
-    let mut citizens_sorted = citizens.to_vec();
-    citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
-
-    let mut config_lines = vec![
-        format!("defense: {}", config.defense),
-        format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
-    ];
-
-    if !config.is_complete {
-        config_lines.push(format!("min_def: {}", config.min_def));
-    }
-
-    config_lines.extend(vec![
-        format!("nb_drapo: {}", config.nb_drapo),
-        format!("day: {}", config.day),
-        format!("iterations: {}", config.iterations),
-        format!("reactor: {}", config.is_reactor_built),
-        format!("nb_hab: {}", config.nb_hab),
-        format!("chaos: {}", config.is_chaos),
-        format!("devastated: {}", config.is_devastated),
-    ]);
-
-    if config.is_complete {
-        config_lines.push("---".to_string());
-        for c in &citizens_sorted {
-            config_lines.push(format!("{}: {}", c.name, c.defense));
-        }
-    }
-
-    let citizens_str = config_lines.join("\n");
+    let citizens_str = format_conf(config, citizens);
 
     let response = DiscordResponse {
         response_type: response_types::MODAL,

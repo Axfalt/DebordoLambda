@@ -12,6 +12,12 @@ pub struct DiscordInteraction {
     pub data: Option<InteractionData>,
     pub member: Option<Member>,
     pub user: Option<User>,
+    pub message: Option<DiscordMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscordMessage {
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
