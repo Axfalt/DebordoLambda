@@ -91,6 +91,40 @@ pub struct SimulationJob {
     pub citizens: Vec<SimulationCitizen>,
 }
 
+/// Formate la configuration sous forme textuelle clé: valeur, réutilisable pour le copier/coller en mode interactif.
+pub fn format_conf(config: &SimConfig, citizens: &[SimulationCitizen]) -> String {
+    let mut citizens_sorted = citizens.to_vec();
+    citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
+
+    let mut config_lines = vec![
+        format!("defense: {}", config.defense),
+        format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
+    ];
+
+    if !config.is_complete {
+        config_lines.push(format!("min_def: {}", config.min_def));
+    }
+
+    config_lines.extend(vec![
+        format!("nb_drapo: {}", config.nb_drapo),
+        format!("day: {}", config.day),
+        format!("iterations: {}", config.iterations),
+        format!("reactor: {}", config.is_reactor_built),
+        format!("nb_hab: {}", config.nb_hab),
+        format!("chaos: {}", config.is_chaos),
+        format!("devastated: {}", config.is_devastated),
+    ]);
+
+    if config.is_complete {
+        config_lines.push("---".to_string());
+        for c in &citizens_sorted {
+            config_lines.push(format!("{}: {}", c.name, c.defense));
+        }
+    }
+
+    config_lines.join("\n")
+}
+
 /// Formate les résultats de simulation pour l'affichage Discord.
 pub fn format_results(
     config: &SimConfig,
@@ -152,6 +186,99 @@ pub fn format_results(
     ));
 
     output
+}
+
+/// Extrait la configuration SimConfig et les citoyens à partir du texte d'un message de résultats Discord.
+pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<SimulationCitizen>) {
+
+    let mut config = SimConfig {
+        iterations: 10000,
+        day: 1,
+        nb_hab: 40,
+        ..Default::default()
+    };
+    let mut citizens = Vec::new();
+    let is_complete = content.contains("Risque de mort par citoyen");
+    config.is_complete = is_complete;
+
+    let mut in_citizens_section = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        if line.contains("Risque de mort par citoyen") {
+            in_citizens_section = true;
+            continue;
+        }
+
+        if in_citizens_section {
+            if line.starts_with("-#") || line.is_empty() {
+                in_citizens_section = false;
+                continue;
+            }
+            // Format: • **Name**: 25 🛡️ — **5.000%**
+            if line.starts_with("• **") {
+                if let Some(colon_pos) = line.find(':') {
+                    let name = line[4..colon_pos].trim_matches('*').trim();
+                    let rest = line[colon_pos + 1..].trim();
+                    if let Some(def_str) = rest.split_whitespace().next() {
+                        if let Ok(def) = def_str.parse::<i32>() {
+                            citizens.push(SimulationCitizen {
+                                name: name.to_string(),
+                                defense: def,
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            if line.contains("Défense min") {
+                if let Some(pos) = line.rfind(':') {
+                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                        config.min_def = v;
+                    }
+                }
+            } else if line.contains("Défense") && line.contains("•") {
+                if let Some(pos) = line.rfind(':') {
+                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                        config.defense = v;
+                    }
+                }
+            } else if line.contains("TDG") {
+                if let Some(pos) = line.rfind(':') {
+                    let val_str = line[pos + 1..].trim();
+                    if let Some(dash_pos) = val_str.find('-') {
+                        if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() {
+                            config.tdg_min = mn;
+                        }
+                        if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() {
+                            config.tdg_max = mx;
+                        }
+                    }
+                }
+            } else if line.contains("Personnes en ville") {
+                if let Some(pos) = line.rfind(':') {
+                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                        config.nb_hab = v;
+                    }
+                }
+            } else if line.contains("Jour") {
+                if let Some(pos) = line.rfind(':') {
+                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                        config.day = v;
+                    }
+                }
+            } else if line.contains("Itérations") {
+                if let Some(pos) = line.rfind(':') {
+                    if let Ok(v) = line[pos + 1..].trim().parse::<u32>() {
+                        config.iterations = v;
+                    }
+                }
+            }
+        }
+    }
+
+    (config, citizens)
 }
 
 #[cfg(test)]
@@ -273,5 +400,88 @@ mod tests {
         assert!(!res_comp.contains("Défense min"));
         assert!(!res_comp.contains("Bonus maison"));
         assert!(!res_comp.contains("Max zombies actifs (moyenne)"));
+    }
+
+    #[test]
+    fn test_format_conf_standard_and_complete() {
+        let config = SimConfig {
+            defense: 150,
+            tdg_min: 50,
+            tdg_max: 80,
+            min_def: 20,
+            nb_drapo: 2,
+            day: 5,
+            iterations: 10000,
+            is_reactor_built: false,
+            nb_hab: 40,
+            is_chaos: false,
+            is_devastated: false,
+            is_complete: false,
+            ..Default::default()
+        };
+        let conf_std = format_conf(&config, &[]);
+        assert!(conf_std.contains("defense: 150"));
+        assert!(conf_std.contains("tdg: 50-80"));
+        assert!(conf_std.contains("min_def: 20"));
+        assert!(conf_std.contains("day: 5"));
+
+        let config_complete = SimConfig {
+            is_complete: true,
+            ..config
+        };
+        let citizens = vec![
+            SimulationCitizen {
+                name: "Bob".to_string(),
+                defense: 30,
+            },
+            SimulationCitizen {
+                name: "Alice".to_string(),
+                defense: 25,
+            },
+        ];
+        let conf_comp = format_conf(&config_complete, &citizens);
+        assert!(!conf_comp.contains("min_def:"));
+        assert!(conf_comp.contains("---\nAlice: 25\nBob: 30"));
+    }
+
+    #[test]
+    fn test_parse_result_message_content_roundtrip() {
+        let config = SimConfig {
+            defense: 200,
+            tdg_min: 60,
+            tdg_max: 90,
+            min_def: 25,
+            day: 3,
+            iterations: 1000,
+            nb_hab: 35,
+            is_complete: true,
+            ..Default::default()
+        };
+        let citizens = vec![
+            SimulationCitizen {
+                name: "Alice".to_string(),
+                defense: 30,
+            },
+            SimulationCitizen {
+                name: "Bob".to_string(),
+                defense: 25,
+            },
+        ];
+        let percentages = vec![5.0, 10.0];
+        let result_text = format_results(&config, 12.5, 42, 1000, None, &citizens, &percentages);
+
+        let (parsed_config, parsed_citizens) = parse_result_message_content(&result_text);
+        assert_eq!(parsed_config.defense, 200);
+        assert_eq!(parsed_config.tdg_min, 60);
+        assert_eq!(parsed_config.tdg_max, 90);
+        assert_eq!(parsed_config.nb_hab, 35);
+        assert_eq!(parsed_config.day, 3);
+        assert_eq!(parsed_config.iterations, 1000);
+        assert!(parsed_config.is_complete);
+        assert_eq!(parsed_citizens.len(), 2);
+        assert_eq!(parsed_citizens[0].name, "Alice");
+        assert_eq!(parsed_citizens[0].defense, 30);
+        assert_eq!(parsed_citizens[1].name, "Bob");
+        assert_eq!(parsed_citizens[1].defense, 25);
     }
 }
