@@ -446,14 +446,8 @@ async fn handle_command(
                         for citizen in &map.citizens {
                             if !citizen.dead {
                                 let base_def = citizen.base_def;
-                                let citizen_b_level = match base_def {
-                                    0..=1 => 0,
-                                    2..=5 => 1,
-                                    6..=9 => 2,
-                                    10..=13 => 3,
-                                    14..=17 => 4,
-                                    _ => 5,
-                                };
+                                let citizen_b_level =
+                                    debordo_lib::simulation::citizen_home_level(base_def);
                                 max_b_level = cmp::max(max_b_level, citizen_b_level);
                                 for l in 0..=citizen_b_level {
                                     if l < 30 {

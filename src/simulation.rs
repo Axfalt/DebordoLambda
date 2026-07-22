@@ -151,6 +151,48 @@ impl Default for AttackSimulator {
     }
 }
 
+pub fn citizen_home_level(defense: i32) -> i32 {
+    if defense <= 0 { 0 } else { defense.isqrt() }
+}
+
+pub fn resolve_b_level(config: &SimConfig, citizens: &[crate::config::SimulationCitizen]) -> i32 {
+    if let Some(b) = config.b_level {
+        return b;
+    }
+
+    if !citizens.is_empty() {
+        let mut b_levels = [0; 64];
+        let mut max_b_level = 0;
+
+        for c in citizens {
+            let citizen_b_level = citizen_home_level(c.defense);
+            max_b_level = cmp::max(max_b_level, citizen_b_level);
+            for l in 0..=citizen_b_level {
+                if (l as usize) < b_levels.len() {
+                    b_levels[l as usize] += 1;
+                }
+            }
+        }
+
+        let ceil_target_third = ((citizens.len() as f64) / 3.0).ceil() as i32;
+        let mut tercile = max_b_level;
+        for l in (0..64).rev() {
+            if b_levels[l] >= ceil_target_third {
+                tercile = l as i32;
+                break;
+            }
+        }
+        return tercile;
+    }
+
+    let def_target = if config.min_def >= 6 {
+        config.min_def - 2
+    } else {
+        config.min_def
+    };
+    citizen_home_level(def_target)
+}
+
 fn debordo_sequential(config: &SimConfig, attacking: i32, threshold: i32) -> (f64, f64) {
     if config.iterations == 0 || config.nb_hab <= 0 {
         return (0.0, 0.0);
@@ -161,12 +203,7 @@ fn debordo_sequential(config: &SimConfig, attacking: i32, threshold: i32) -> (f6
     let mut rng = rand::rng();
     let reactor_damage = Uniform::new_inclusive(REACTOR_DAMAGE_MIN, REACTOR_DAMAGE_MAX).unwrap();
 
-    let b_level_resolved = config.b_level.unwrap_or(match threshold {
-        0..=2 => 1,
-        3..=6 => 2,
-        7..=10 => 3,
-        _ => 4,
-    });
+    let b_level_resolved = resolve_b_level(config, &[]);
 
     let mut simulator = AttackSimulator::new();
 
@@ -203,12 +240,7 @@ fn complete_debordo_sequential(
     }
 
     let threshold = citizens.iter().map(|c| c.defense).min().unwrap_or(0);
-    let b_level_resolved = match threshold {
-        0..=2 => 1,
-        3..=6 => 2,
-        7..=10 => 3,
-        _ => 4,
-    };
+    let b_level_resolved = resolve_b_level(config, citizens);
 
     let mut town_hits = 0;
     let mut total_max_active: u64 = 0;
@@ -958,5 +990,59 @@ mod tests {
             citizen_probs[1] > 0.0,
             "Bob (0 defense) should have a positive death rate"
         );
+    }
+
+    #[test]
+    fn test_exact_perfect_square_home_levels_and_b_level() {
+        use crate::config::SimulationCitizen;
+
+        assert_eq!(citizen_home_level(0), 0);
+        assert_eq!(citizen_home_level(1), 1);
+        assert_eq!(citizen_home_level(4), 2);
+        assert_eq!(citizen_home_level(9), 3);
+        assert_eq!(citizen_home_level(16), 4);
+        assert_eq!(citizen_home_level(25), 5);
+        assert_eq!(citizen_home_level(36), 6);
+        assert_eq!(citizen_home_level(49), 7);
+        assert_eq!(citizen_home_level(56), 7);
+
+        // Test explicit config.b_level
+        let cfg_explicit = SimConfig {
+            b_level: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(resolve_b_level(&cfg_explicit, &[]), 5);
+
+        // Test min_def fallback (min_def = 56 => 54 => 7)
+        let cfg_56 = SimConfig {
+            min_def: 56,
+            ..Default::default()
+        };
+        assert_eq!(resolve_b_level(&cfg_56, &[]), 7);
+
+        // Test min_def fallback (min_def = 4 => 4 => 2)
+        let cfg_4 = SimConfig {
+            min_def: 4,
+            ..Default::default()
+        };
+        assert_eq!(resolve_b_level(&cfg_4, &[]), 2);
+
+        // Test citizen list tercile calculation (3 citizens: levels 7, 7, 0 => tercile level 7)
+        let citizens = vec![
+            SimulationCitizen {
+                name: "A".to_string(),
+                defense: 49,
+            },
+            SimulationCitizen {
+                name: "B".to_string(),
+                defense: 56,
+            },
+            SimulationCitizen {
+                name: "C".to_string(),
+                defense: 0,
+            },
+        ];
+        let cfg_citizens = SimConfig::default();
+        assert_eq!(resolve_b_level(&cfg_citizens, &citizens), 7);
     }
 }
