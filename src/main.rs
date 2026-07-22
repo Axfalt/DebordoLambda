@@ -715,7 +715,7 @@ fn resolve_citizens(
             if !citizen.dead {
                 let name_lower = citizen.name.to_lowercase();
                 let defense = if let Some(&custom_def) = custom_map.get(&name_lower) {
-                    custom_def + home_bonus
+                    custom_def
                 } else {
                     let job_uid = citizen
                         .job
@@ -762,7 +762,7 @@ fn resolve_citizens(
                     if let Ok(def) = def_str.parse::<i32>() {
                         citizens.push(SimulationCitizen {
                             name: name.to_string(),
-                            defense: def + home_bonus,
+                            defense: def,
                         });
                         added_names.insert(name_lower);
                     }
@@ -1057,8 +1057,8 @@ mod tests {
         let citizens = resolve_citizens(Some("Axfalt:10"), 4, None, 2, 5);
         assert_eq!(citizens.len(), 2);
         assert_eq!(citizens[0].name, "Axfalt");
-        assert_eq!(citizens[0].defense, 14); // 10 + 4
+        assert_eq!(citizens[0].defense, 10); // Custom defense used as-is
         assert_eq!(citizens[1].name, "Citoyen 1");
-        assert_eq!(citizens[1].defense, 9); // 5 (min_def) + 4
+        assert_eq!(citizens[1].defense, 9); // 5 (min_def) + 4 (home_bonus)
     }
 }
