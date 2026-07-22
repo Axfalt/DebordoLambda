@@ -90,8 +90,6 @@ pub struct SimulationJob {
     pub application_id: String,
     pub config: SimConfig,
     #[serde(default)]
-    pub api_pulled_fields: Vec<String>,
-    #[serde(default)]
     pub citizens: Vec<SimulationCitizen>,
 }
 
@@ -101,7 +99,6 @@ pub fn format_results(
     prob: f64,
     elapsed_ms: u128,
     total_runs: u64,
-    api_pulled_fields: &[String],
     citizens: &[SimulationCitizen],
     citizen_percentages: &[f64],
 ) -> String {
@@ -109,32 +106,18 @@ pub fn format_results(
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
 
-    let is_api = |field: &str| -> bool { api_pulled_fields.iter().any(|f| f == field) };
+    let fmt_line =
+        |emoji_label: &str, val: i32| -> String { format!("• **{}**: {}\n", emoji_label, val) };
 
-    let fmt_line = |emoji_label: &str, field: &str, val: i32| -> String {
-        if is_api(field) {
-            format!("• **{}**: {} *(api)*\n", emoji_label, val)
-        } else {
-            format!("• **{}**: {}\n", emoji_label, val)
-        }
-    };
+    let tdg_line = format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max);
 
-    let tdg_line = if is_api("tdg") {
-        format!(
-            "• **🔭 TDG**: {} - {} *(api)*\n",
-            config.tdg_min, config.tdg_max
-        )
-    } else {
-        format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max)
-    };
-
-    output.push_str(&fmt_line("🛡️ Défense", "defense", config.defense));
+    output.push_str(&fmt_line("🛡️ Défense", config.defense));
     output.push_str(&tdg_line);
-    output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", "nb_hab", config.nb_hab));
+    output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", config.nb_hab));
     if !config.is_complete {
-        output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+        output.push_str(&fmt_line("🏠 Défense min", config.min_def));
     }
-    output.push_str(&fmt_line("📅 Jour", "day", config.day));
+    output.push_str(&fmt_line("📅 Jour", config.day));
     output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
     output.push_str(&format!(
@@ -269,7 +252,7 @@ mod tests {
             is_complete: false,
             ..Default::default()
         };
-        let res_std = format_results(&config_std, 5.0, 10, 1000, &[], &[], &[]);
+        let res_std = format_results(&config_std, 5.0, 10, 1000, &[], &[]);
         assert!(res_std.contains("Défense min"));
         assert!(!res_std.contains("Bonus maison"));
 
@@ -282,7 +265,7 @@ mod tests {
             is_complete: true,
             ..Default::default()
         };
-        let res_comp = format_results(&config_comp, 5.0, 10, 1000, &[], &[], &[]);
+        let res_comp = format_results(&config_comp, 5.0, 10, 1000, &[], &[]);
         assert!(!res_comp.contains("Défense min"));
         assert!(!res_comp.contains("Bonus maison"));
     }

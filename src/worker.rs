@@ -75,7 +75,6 @@ async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Resul
             prob,
             start.elapsed().as_millis(),
             total_runs,
-            &job.api_pulled_fields,
             &job.citizens,
             &citizen_percentages,
         ),

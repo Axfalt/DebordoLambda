@@ -313,7 +313,6 @@ async fn handle_command(
             token,
             application_id,
             config,
-            api_pulled_fields: Vec::new(),
             citizens,
         };
 
@@ -378,7 +377,6 @@ async fn handle_command(
                 token,
                 application_id,
                 config,
-                api_pulled_fields: Vec::new(),
                 citizens,
             };
 
@@ -491,23 +489,6 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
-                        let mut api_pulled_fields = Vec::new();
-                        if user_day.is_none() {
-                            api_pulled_fields.push("day".to_string());
-                        }
-                        if user_defense.is_none() {
-                            api_pulled_fields.push("defense".to_string());
-                        }
-                        if user_tdg_min.is_none() || user_tdg_max.is_none() {
-                            api_pulled_fields.push("tdg".to_string());
-                        }
-                        if user_nb_hab.is_none() {
-                            api_pulled_fields.push("nb_hab".to_string());
-                        }
-                        if user_min_def.is_none() {
-                            api_pulled_fields.push("min_def".to_string());
-                        }
-
                         // Si après la fusion, des paramètres critiques restent à 0, renvoyer une erreur
                         if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
                             let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
@@ -556,7 +537,6 @@ async fn handle_command(
                             token,
                             application_id,
                             config,
-                            api_pulled_fields,
                             citizens,
                         };
 
@@ -626,7 +606,6 @@ async fn handle_command(
                         token,
                         application_id,
                         config,
-                        api_pulled_fields: Vec::new(),
                         citizens,
                     };
 
@@ -1030,7 +1009,6 @@ async fn handle_debordo_modal_submit(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Handling debordo configuration modal submission");
 
-    let is_api = custom_id.contains("api");
     let was_complete = custom_id.contains("comp");
 
     let token = interaction.token.clone().unwrap_or_default();
@@ -1042,19 +1020,10 @@ async fn handle_debordo_modal_submit(
     config.is_complete = was_complete;
     config.custom_defenses = Some(defenses_val.to_string());
 
-    let mut api_pulled_fields = Vec::new();
-    if is_api {
-        api_pulled_fields.push("defense".to_string());
-        api_pulled_fields.push("tdg".to_string());
-        api_pulled_fields.push("nb_hab".to_string());
-        api_pulled_fields.push("min_def".to_string());
-    }
-
     let job = SimulationJob {
         token,
         application_id,
         config,
-        api_pulled_fields,
         citizens,
     };
 
