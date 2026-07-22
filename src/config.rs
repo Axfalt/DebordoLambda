@@ -257,4 +257,33 @@ mod tests {
         let config = SimConfig::from_options(&options);
         assert!(config.is_interactive);
     }
+
+    #[test]
+    fn test_format_results_visibility_matrix() {
+        let config_std = SimConfig {
+            defense: 100,
+            tdg_min: 50,
+            tdg_max: 60,
+            min_def: 15,
+            home_bonus: 4,
+            is_complete: false,
+            ..Default::default()
+        };
+        let res_std = format_results(&config_std, 5.0, 10, 1000, &[], &[], &[]);
+        assert!(res_std.contains("Défense min"));
+        assert!(!res_std.contains("Bonus maison"));
+
+        let config_comp = SimConfig {
+            defense: 100,
+            tdg_min: 50,
+            tdg_max: 60,
+            min_def: 15,
+            home_bonus: 4,
+            is_complete: true,
+            ..Default::default()
+        };
+        let res_comp = format_results(&config_comp, 5.0, 10, 1000, &[], &[], &[]);
+        assert!(!res_comp.contains("Défense min"));
+        assert!(!res_comp.contains("Bonus maison"));
+    }
 }

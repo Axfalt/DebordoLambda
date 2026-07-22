@@ -274,7 +274,7 @@ async fn handle_command(
     }
 
     let is_complete = is_complete_cmd || user_complete.unwrap_or(false);
-    let is_interactive = user_interactive.unwrap_or(false);
+    let is_interactive = is_complete_cmd || user_interactive.unwrap_or(false);
 
     // 2. Vérifier si on a tous les paramètres requis manuellement
     let has_all_critical = user_defense.is_some()
@@ -925,6 +925,11 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
                         config.nb_drapo = v;
                     }
                 }
+                "home_bonus" | "bonus_maison" => {
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.home_bonus = v;
+                    }
+                }
                 _ => {
                     if let Ok(def) = val_str.parse::<i32>() {
                         let name = line[..pos].trim().to_string();
@@ -963,6 +968,13 @@ fn respond_with_defenses_modal(
     let mut config_lines = vec![
         format!("defense: {}", config.defense),
         format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
+    ];
+
+    if !config.is_complete {
+        config_lines.push(format!("min_def: {}", config.min_def));
+    }
+
+    config_lines.extend(vec![
         format!("nb_drapo: {}", config.nb_drapo),
         format!("day: {}", config.day),
         format!("iterations: {}", config.iterations),
@@ -971,7 +983,7 @@ fn respond_with_defenses_modal(
         format!("population: {}", pop_str),
         format!("chaos: {}", config.is_chaos),
         format!("devastated: {}", config.is_devastated),
-    ];
+    ]);
 
     if config.is_complete {
         config_lines.push("---".to_string());
@@ -1027,7 +1039,7 @@ async fn handle_debordo_modal_submit(
     let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
 
     let (mut config, citizens) = parse_complete_modal_text(defenses_val);
-    config.is_complete = was_complete || !citizens.is_empty();
+    config.is_complete = was_complete;
     config.custom_defenses = Some(defenses_val.to_string());
 
     let mut api_pulled_fields = Vec::new();
