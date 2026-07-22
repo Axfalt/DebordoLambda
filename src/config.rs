@@ -94,12 +94,14 @@ pub struct SimulationJob {
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
+#[allow(clippy::too_many_arguments)]
 pub fn format_results(
     config: &SimConfig,
     prob: f64,
     elapsed_ms: u128,
     total_runs: u64,
     avg_max_active: f64,
+    avg_active_factor: f64,
     citizens: &[SimulationCitizen],
     citizen_percentages: &[f64],
 ) -> String {
@@ -121,8 +123,12 @@ pub fn format_results(
     output.push_str(&fmt_line("📅 Jour", config.day));
     output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
     output.push_str(&format!(
-        "🧟 **Max zombies actifs (moyenne)**: {:.1}\n\n",
+        "• **🧟 Max zombies actifs (moyenne)**: {:.1}\n",
         avg_max_active
+    ));
+    output.push_str(&format!(
+        "• **🧟 Facteur actif (tmp)**: {:.1}%\n\n",
+        avg_active_factor * 100.0
     ));
 
     output.push_str(&format!(
@@ -257,10 +263,11 @@ mod tests {
             is_complete: false,
             ..Default::default()
         };
-        let res_std = format_results(&config_std, 5.0, 10, 1000, 25.0, &[], &[]);
+        let res_std = format_results(&config_std, 5.0, 10, 1000, 25.0, 0.48, &[], &[]);
         assert!(res_std.contains("Défense min"));
         assert!(!res_std.contains("Bonus maison"));
         assert!(res_std.contains("Max zombies actifs (moyenne)"));
+        assert!(res_std.contains("Facteur actif (tmp)"));
 
         let config_comp = SimConfig {
             defense: 100,
@@ -271,7 +278,7 @@ mod tests {
             is_complete: true,
             ..Default::default()
         };
-        let res_comp = format_results(&config_comp, 5.0, 10, 1000, 25.0, &[], &[]);
+        let res_comp = format_results(&config_comp, 5.0, 10, 1000, 25.0, 0.48, &[], &[]);
         assert!(!res_comp.contains("Défense min"));
         assert!(!res_comp.contains("Bonus maison"));
     }
