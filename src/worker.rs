@@ -50,25 +50,12 @@ async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Resul
         Duration::from_secs(SIMULATION_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
             if is_complete {
-                let (prob, total_runs, citizen_percentages, avg_max_active, avg_active_factor) =
+                let (prob, total_runs, citizen_percentages, avg_max_active) =
                     complete_overflow_probability(&sim_config, &citizens);
-                (
-                    prob,
-                    total_runs,
-                    citizen_percentages,
-                    avg_max_active,
-                    avg_active_factor,
-                )
+                (prob, total_runs, citizen_percentages, avg_max_active)
             } else {
-                let (prob, total_runs, avg_max_active, avg_active_factor) =
-                    overflow_probability(&sim_config);
-                (
-                    prob,
-                    total_runs,
-                    Vec::new(),
-                    avg_max_active,
-                    avg_active_factor,
-                )
+                let (prob, total_runs, avg_max_active) = overflow_probability(&sim_config);
+                (prob, total_runs, Vec::new(), avg_max_active)
             }
         }),
     )
@@ -83,18 +70,15 @@ async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Resul
             error!("Simulation panicked: {}", e);
             "❌ La simulation a échoué. Veuillez réessayer.".to_string()
         }
-        Ok(Ok((prob, total_runs, citizen_percentages, avg_max_active, avg_active_factor))) => {
-            format_results(
-                &config,
-                prob,
-                start.elapsed().as_millis(),
-                total_runs,
-                avg_max_active,
-                avg_active_factor,
-                &job.citizens,
-                &citizen_percentages,
-            )
-        }
+        Ok(Ok((prob, total_runs, citizen_percentages, avg_max_active))) => format_results(
+            &config,
+            prob,
+            start.elapsed().as_millis(),
+            total_runs,
+            avg_max_active,
+            &job.citizens,
+            &citizen_percentages,
+        ),
     };
 
     send_followup(http_client, &job.application_id, &job.token, &content).await?;
