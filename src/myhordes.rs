@@ -1,7 +1,7 @@
 //! Client module for MyHordes External JSON API.
 
 use serde::Deserialize;
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHMeResponse {
@@ -61,8 +61,9 @@ pub async fn fetch_mh_data(
     ssm_client: &aws_sdk_ssm::Client,
     http_client: &reqwest::Client,
 ) -> Result<MHMeResponse, lambda_runtime::Error> {
-    let param_name = std::env::var("SSM_APP_KEY_PARAMETER").unwrap_or_else(|_| "MH_APP_KEY".to_string());
-    
+    let param_name =
+        std::env::var("SSM_APP_KEY_PARAMETER").unwrap_or_else(|_| "MH_APP_KEY".to_string());
+
     let app_key = match ssm_client
         .get_parameter()
         .name(&param_name)
@@ -71,11 +72,16 @@ pub async fn fetch_mh_data(
         .await
     {
         Ok(res) => res.parameter.and_then(|p| p.value).unwrap_or_else(|| {
-            std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
+            std::env::var("MH_APP_KEY")
+                .unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
         }),
         Err(e) => {
-            info!("SSM lookup for app key parameter '{}' failed ({}). Falling back to environment variables.", param_name, e);
-            std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
+            info!(
+                "SSM lookup for app key parameter '{}' failed ({}). Falling back to environment variables.",
+                param_name, e
+            );
+            std::env::var("MH_APP_KEY")
+                .unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
         }
     };
 
@@ -150,7 +156,7 @@ mod tests {
 
         let response: MHMeResponse = serde_json::from_value(json_data).unwrap();
         assert!(response.map.is_some());
-        
+
         let map = response.map.unwrap();
         assert_eq!(map.days, 4);
 
@@ -163,7 +169,7 @@ mod tests {
             name.contains("réacteur") || name.contains("reactor")
         });
         assert!(has_reactor);
- 
+
         // Test fortifications check
         let has_fortifications = city.buildings.iter().any(|b| {
             let name = b.name.to_lowercase();
@@ -180,7 +186,9 @@ mod tests {
         assert_eq!(nb_hab, 2);
 
         // Test min_def among alive citizens
-        let min_def = map.citizens.iter()
+        let min_def = map
+            .citizens
+            .iter()
             .filter(|c| !c.dead)
             .map(|c| c.base_def)
             .min()
@@ -188,4 +196,3 @@ mod tests {
         assert_eq!(min_def, 12);
     }
 }
-

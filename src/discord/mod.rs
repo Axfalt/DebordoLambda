@@ -3,6 +3,4 @@ pub mod signature;
 pub mod types;
 
 pub use signature::verify_discord_signature;
-pub use types::{
-    interaction_types, response_types, DiscordInteraction, DiscordResponse,
-};
+pub use types::{DiscordInteraction, DiscordResponse, interaction_types, response_types};

@@ -2,15 +2,15 @@
 
 use aws_lambda_events::apigw::{ApiGatewayV2httpRequest, ApiGatewayV2httpResponse};
 use aws_lambda_events::http::HeaderMap;
-use lambda_runtime::{service_fn, Error, LambdaEvent};
+use lambda_runtime::{Error, LambdaEvent, service_fn};
 use serde::Serialize;
 use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{SimConfig, SimulationCitizen, SimulationJob};
 use debordo_lib::discord::{
-    interaction_types, response_types, verify_discord_signature, DiscordInteraction,
-    DiscordResponse,
+    DiscordInteraction, DiscordResponse, interaction_types, response_types,
+    verify_discord_signature,
 };
 use debordo_lib::{database, myhordes};
 
@@ -74,11 +74,26 @@ async fn handler(
             if cmd_name == "register-key" {
                 handle_register_key_command()
             } else {
-                handle_command(interaction, &sqs_client, &queue_url, &dynamodb_client, &ssm_client, http_client).await
+                handle_command(
+                    interaction,
+                    &sqs_client,
+                    &queue_url,
+                    &dynamodb_client,
+                    &ssm_client,
+                    http_client,
+                )
+                .await
             }
         }
         interaction_types::MODAL_SUBMIT => {
-            handle_modal_submit(interaction, &sqs_client, &queue_url, &dynamodb_client, &ssm_client).await
+            handle_modal_submit(
+                interaction,
+                &sqs_client,
+                &queue_url,
+                &dynamodb_client,
+                &ssm_client,
+            )
+            .await
         }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
@@ -234,10 +249,7 @@ async fn handle_command(
     let mut user_defenses: Option<String> = None;
     let mut user_home_bonus: Option<i32> = None;
 
-    let options = interaction
-        .data
-        .as_ref()
-        .and_then(|d| d.options.as_ref());
+    let options = interaction.data.as_ref().and_then(|d| d.options.as_ref());
 
     if let Some(opts) = options {
         for opt in opts {
@@ -317,7 +329,11 @@ async fn handle_command(
     match user_key {
         None => {
             // Utilisateur non enregistré: valider les paramètres manquants et renvoyer une erreur s'ils n'ont pas de défaut
-            if user_defense.is_none() || user_tdg_min.is_none() || user_tdg_max.is_none() || user_min_def.is_none() {
+            if user_defense.is_none()
+                || user_tdg_min.is_none()
+                || user_tdg_max.is_none()
+                || user_min_def.is_none()
+            {
                 let error_msg = "Certains paramètres requis sont manquants (defense, tdg_min, tdg_max, min_def) et vous n'avez pas enregistré votre clé API MyHordes. Veuillez utiliser `/register-key` ou fournir tous les paramètres manuellement.";
                 let response = DiscordResponse {
                     response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
@@ -391,24 +407,21 @@ async fn handle_command(
                             .city
                             .as_ref()
                             .map(|c| {
-                                c.buildings
-                                    .iter()
-                                    .any(|b| {
-                                        let name = b.name.to_lowercase();
-                                        name.contains("réacteur") || name.contains("reactor")
-                                    })
+                                c.buildings.iter().any(|b| {
+                                    let name = b.name.to_lowercase();
+                                    name.contains("réacteur") || name.contains("reactor")
+                                })
                             })
                             .unwrap_or(false);
                         let api_fortifications = map
                             .city
                             .as_ref()
                             .map(|c| {
-                                c.buildings
-                                    .iter()
-                                    .any(|b| {
-                                        let name = b.name.to_lowercase();
-                                        name == "habitations fortifiées" || name == "habitations fortifiees"
-                                    })
+                                c.buildings.iter().any(|b| {
+                                    let name = b.name.to_lowercase();
+                                    name == "habitations fortifiées"
+                                        || name == "habitations fortifiees"
+                                })
                             })
                             .unwrap_or(false);
                         let api_nb_hab = map.citizens.iter().filter(|c| !c.dead).count() as i32;
@@ -474,11 +487,21 @@ async fn handle_command(
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
                         let mut api_pulled_fields = Vec::new();
-                        if user_day.is_none() { api_pulled_fields.push("day".to_string()); }
-                        if user_defense.is_none() { api_pulled_fields.push("defense".to_string()); }
-                        if user_tdg_min.is_none() || user_tdg_max.is_none() { api_pulled_fields.push("tdg".to_string()); }
-                        if user_nb_hab.is_none() { api_pulled_fields.push("nb_hab".to_string()); }
-                        if user_min_def.is_none() { api_pulled_fields.push("min_def".to_string()); }
+                        if user_day.is_none() {
+                            api_pulled_fields.push("day".to_string());
+                        }
+                        if user_defense.is_none() {
+                            api_pulled_fields.push("defense".to_string());
+                        }
+                        if user_tdg_min.is_none() || user_tdg_max.is_none() {
+                            api_pulled_fields.push("tdg".to_string());
+                        }
+                        if user_nb_hab.is_none() {
+                            api_pulled_fields.push("nb_hab".to_string());
+                        }
+                        if user_min_def.is_none() {
+                            api_pulled_fields.push("min_def".to_string());
+                        }
 
                         // Si après la fusion, des paramètres critiques restent à 0, renvoyer une erreur
                         if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
@@ -493,7 +516,8 @@ async fn handle_command(
                             return Ok(build_json_response(200, &response));
                         }
 
-                        let home_bonus = user_home_bonus.unwrap_or(0) + if api_fortifications { 4 } else { 0 };
+                        let home_bonus =
+                            user_home_bonus.unwrap_or(0) + if api_fortifications { 4 } else { 0 };
 
                         let citizens = resolve_citizens(
                             user_defenses.as_deref(),
@@ -548,7 +572,11 @@ async fn handle_command(
                     error!("MyHordes API call failed: {}", e);
 
                     // Si l'API échoue, on ne peut continuer que si l'utilisateur a tout fourni manuellement
-                    if user_defense.is_none() || user_tdg_min.is_none() || user_tdg_max.is_none() || user_min_def.is_none() {
+                    if user_defense.is_none()
+                        || user_tdg_min.is_none()
+                        || user_tdg_max.is_none()
+                        || user_min_def.is_none()
+                    {
                         let error_msg = format!(
                             "Erreur de connexion à l'API MyHordes : {}. Veuillez vérifier votre clé avec `/register-key` ou saisir les paramètres requis manuellement.",
                             e
@@ -649,7 +677,7 @@ fn parse_custom_defenses(defenses_str: &str) -> std::collections::HashMap<String
         }
         if let Some(pos) = part.rfind(':') {
             let name = part[..pos].trim().to_lowercase();
-            let def_str = part[pos+1..].trim();
+            let def_str = part[pos + 1..].trim();
             if let Ok(def) = def_str.parse::<i32>() {
                 map.insert(name, def);
             }
@@ -705,7 +733,7 @@ fn resolve_citizens(
     } else {
         // Mode Manuel: Build based on custom map first, then fill remainder
         let mut added_names = std::collections::HashSet::new();
-        
+
         // 1. Add explicitly nominated citizens from defenses string
         if let Some(s) = custom_defenses_str {
             for part in s.split([',', '\n', '\r']) {
@@ -719,7 +747,7 @@ fn resolve_citizens(
                     if added_names.contains(&name_lower) {
                         continue;
                     }
-                    let def_str = part[pos+1..].trim();
+                    let def_str = part[pos + 1..].trim();
                     if let Ok(def) = def_str.parse::<i32>() {
                         citizens.push(SimulationCitizen {
                             name: name.to_string(),
@@ -797,59 +825,97 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
 
             match key.as_str() {
                 "defense" | "défense" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.defense = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.defense = v;
+                    }
                 }
                 "tdg" | "estimations" => {
                     if let Some(dash_pos) = val_str.find('-') {
-                        if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() { config.tdg_min = mn; }
-                        if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() { config.tdg_max = mx; }
+                        if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() {
+                            config.tdg_min = mn;
+                        }
+                        if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() {
+                            config.tdg_max = mx;
+                        }
                     } else if let Ok(v) = val_str.parse::<i32>() {
                         config.tdg_min = v;
                         config.tdg_max = v;
                     }
                 }
                 "tdg_min" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.tdg_min = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.tdg_min = v;
+                    }
                 }
                 "tdg_max" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.tdg_max = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.tdg_max = v;
+                    }
                 }
                 "min_def" | "defense_minimale" | "défense_minimale" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.min_def = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.min_def = v;
+                    }
                 }
                 "day" | "jour" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.day = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.day = v;
+                    }
                 }
                 "iterations" | "itérations" => {
-                    if let Ok(v) = val_str.parse::<u32>() { config.iterations = v; }
+                    if let Ok(v) = val_str.parse::<u32>() {
+                        config.iterations = v;
+                    }
                 }
                 "reactor" | "réacteur" => {
                     let lower = val_str.to_lowercase();
-                    config.is_reactor_built = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                    config.is_reactor_built = lower == "true"
+                        || lower == "1"
+                        || lower == "oui"
+                        || lower == "yes"
+                        || lower == "y";
                 }
                 "nb_hab" | "citoyens_max" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.nb_hab = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.nb_hab = v;
+                    }
                 }
                 "b_level" | "tercile" => {
-                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" && let Ok(v) = val_str.parse::<i32>() {
+                    if val_str.to_lowercase() != "none"
+                        && val_str.to_lowercase() != "n"
+                        && let Ok(v) = val_str.parse::<i32>()
+                    {
                         config.b_level = Some(v);
                     }
                 }
                 "population" => {
-                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" && let Ok(v) = val_str.parse::<i32>() {
+                    if val_str.to_lowercase() != "none"
+                        && val_str.to_lowercase() != "n"
+                        && let Ok(v) = val_str.parse::<i32>()
+                    {
                         config.population = Some(v);
                     }
                 }
                 "chaos" => {
                     let lower = val_str.to_lowercase();
-                    config.is_chaos = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                    config.is_chaos = lower == "true"
+                        || lower == "1"
+                        || lower == "oui"
+                        || lower == "yes"
+                        || lower == "y";
                 }
                 "devastated" | "dévastée" | "devast" => {
                     let lower = val_str.to_lowercase();
-                    config.is_devastated = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                    config.is_devastated = lower == "true"
+                        || lower == "1"
+                        || lower == "oui"
+                        || lower == "yes"
+                        || lower == "y";
                 }
                 "nb_drapo" => {
-                    if let Ok(v) = val_str.parse::<i32>() { config.nb_drapo = v; }
+                    if let Ok(v) = val_str.parse::<i32>() {
+                        config.nb_drapo = v;
+                    }
                 }
                 _ => {
                     if let Ok(def) = val_str.parse::<i32>() {
@@ -873,7 +939,10 @@ fn respond_with_defenses_modal(
 
     let custom_id = if is_api { "dm:api" } else { "dm:manual" };
 
-    let pop_str = config.population.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
+    let pop_str = config
+        .population
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
 
     let mut citizens_sorted = citizens.to_vec();
     citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
@@ -940,7 +1009,7 @@ async fn handle_debordo_modal_submit(
     let application_id = interaction.application_id.clone().unwrap_or_default();
 
     let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
-    
+
     let (mut config, citizens) = parse_complete_modal_text(defenses_val);
     config.is_complete = true;
     config.custom_defenses = Some(defenses_val.to_string());

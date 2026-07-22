@@ -49,7 +49,10 @@ impl SimConfig {
                 "min_def" => config.min_def = opt.value.as_i64().unwrap_or(0) as i32,
                 "nb_drapo" => config.nb_drapo = opt.value.as_i64().unwrap_or(0) as i32,
                 "day" => config.day = opt.value.as_i64().unwrap_or(1) as i32,
-                "iterations" => config.iterations = (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS),
+                "iterations" => {
+                    config.iterations =
+                        (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS)
+                }
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 "nb_hab" => config.nb_hab = opt.value.as_i64().unwrap_or(40) as i32,
                 "b_level" => config.b_level = opt.value.as_i64().map(|v| v as i32),
@@ -104,9 +107,7 @@ pub fn format_results(
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
 
-    let is_api = |field: &str| -> bool {
-        api_pulled_fields.iter().any(|f| f == field)
-    };
+    let is_api = |field: &str| -> bool { api_pulled_fields.iter().any(|f| f == field) };
 
     let fmt_line = |emoji_label: &str, field: &str, val: i32| -> String {
         if is_api(field) {
@@ -117,7 +118,10 @@ pub fn format_results(
     };
 
     let tdg_line = if is_api("tdg") {
-        format!("• **🔭 TDG**: {} - {} *(api)*\n", config.tdg_min, config.tdg_max)
+        format!(
+            "• **🔭 TDG**: {} - {} *(api)*\n",
+            config.tdg_min, config.tdg_max
+        )
     } else {
         format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max)
     };
@@ -131,19 +135,25 @@ pub fn format_results(
     output.push_str(&fmt_line("📅 Jour", "day", config.day));
     output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
-
-    output.push_str(&format!("💀 **Probabilité de mort (ville): {:.3}%**\n\n", prob));
+    output.push_str(&format!(
+        "💀 **Probabilité de mort (ville): {:.3}%**\n\n",
+        prob
+    ));
 
     if config.is_complete && !citizens.is_empty() {
         output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
-        let mut list: Vec<(&SimulationCitizen, f64)> = citizens.iter().zip(citizen_percentages.iter().copied()).collect();
+        let mut list: Vec<(&SimulationCitizen, f64)> = citizens
+            .iter()
+            .zip(citizen_percentages.iter().copied())
+            .collect();
         // Sort alphabetically by name (case-insensitive)
-        list.sort_by(|a, b| {
-            a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase())
-        });
+        list.sort_by_key(|a| a.0.name.to_lowercase());
 
         for &(citizen, c_prob) in &list {
-            output.push_str(&format!("• **{}**: {} 🛡️ — **{:.3}%**\n", citizen.name, citizen.defense, c_prob));
+            output.push_str(&format!(
+                "• **{}**: {} 🛡️ — **{:.3}%**\n",
+                citizen.name, citizen.defense, c_prob
+            ));
         }
         output.push('\n');
     }
@@ -162,7 +172,10 @@ mod tests {
     use serde_json::json;
 
     fn make_opt(name: &str, value: serde_json::Value) -> CommandOption {
-        CommandOption { name: name.to_string(), value }
+        CommandOption {
+            name: name.to_string(),
+            value,
+        }
     }
 
     #[test]

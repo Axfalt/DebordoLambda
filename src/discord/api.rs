@@ -1,4 +1,3 @@
-
 pub async fn send_followup(
     client: &reqwest::Client,
     application_id: &str,
@@ -14,7 +13,12 @@ pub async fn send_followup(
         "content": content
     });
 
-    client.patch(&url).json(&body).send().await?.error_for_status()?;
+    client
+        .patch(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
@@ -34,8 +38,12 @@ pub async fn create_followup_message(
         "content": content
     });
 
-    client.post(&url).json(&body).send().await?.error_for_status()?;
+    client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
-
