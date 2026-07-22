@@ -247,7 +247,6 @@ fn complete_debordo_sequential(
         return (0.0, vec![0.0; citizens.len()], None);
     }
 
-    let threshold = citizens.iter().map(|c| c.defense).min().unwrap_or(0);
     let b_level_resolved = resolve_b_level(config, citizens);
 
     let mut town_hits = 0;
@@ -279,10 +278,7 @@ fn complete_debordo_sequential(
             capped_iterations += 1;
         }
 
-        if allocated.iter().any(|&x| x > threshold) {
-            town_hits += 1;
-        }
-
+        let mut any_citizen_died = false;
         if !citizens.is_empty() {
             use rand::seq::SliceRandom;
             indices.shuffle(&mut rng);
@@ -292,8 +288,13 @@ fn complete_debordo_sequential(
                 let zombies = allocated[j];
                 if zombies > citizens[idx].defense {
                     citizen_hits[idx] += 1;
+                    any_citizen_died = true;
                 }
             }
+        }
+
+        if any_citizen_died {
+            town_hits += 1;
         }
     }
 
@@ -1128,6 +1129,43 @@ mod tests {
         assert!(
             avg_max_active.is_some(),
             "Expected Some(avg_max_active) when max_active < overflow"
+        );
+    }
+
+    #[test]
+    fn test_user_report_single_zero_def_citizen_town_probability() {
+        use crate::config::SimulationCitizen;
+
+        let mut citizens = Vec::new();
+        for i in 1..=39 {
+            citizens.push(SimulationCitizen {
+                name: format!("Citoyen {}", i),
+                defense: 60,
+            });
+        }
+        citizens.push(SimulationCitizen {
+            name: "Snow".to_string(),
+            defense: 0,
+        });
+
+        let config = SimConfig {
+            defense: 11274,
+            tdg_min: 11784,
+            tdg_max: 11814,
+            day: 27,
+            iterations: 1000,
+            nb_hab: 40,
+            is_complete: true,
+            ..Default::default()
+        };
+
+        let (town_prob, _runs, _citizen_percentages, _avg) =
+            complete_overflow_probability(&config, &citizens);
+
+        assert!(
+            town_prob < 80.0 && town_prob > 50.0,
+            "Town probability should be around ~64%, got {}",
+            town_prob
         );
     }
 }
