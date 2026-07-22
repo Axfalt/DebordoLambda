@@ -470,9 +470,6 @@ async fn handle_command(
                             b_level = tercile;
                         }
 
-                        let population = map.citizens.len() as i32;
-
-                        // Fusionner les valeurs: Input > API > Default
                         let day = user_day.unwrap_or(api_day);
                         let defense = user_defense.unwrap_or(api_defense);
                         let tdg_min = user_tdg_min.unwrap_or(api_tdg_min);
@@ -518,7 +515,6 @@ async fn handle_command(
                             is_reactor_built: reactor,
                             nb_hab,
                             b_level: Some(b_level),
-                            population: Some(population),
                             is_chaos: api_chaos,
                             is_devastated: api_devast,
                             is_complete,
@@ -856,25 +852,20 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
                         || lower == "yes"
                         || lower == "y";
                 }
-                "nb_hab" | "citoyens_max" => {
-                    if let Ok(v) = val_str.parse::<i32>() {
+                "nb_hab" => {
+                    if val_str.to_lowercase() != "none"
+                        && val_str.to_lowercase() != "n"
+                        && let Ok(v) = val_str.parse::<i32>()
+                    {
                         config.nb_hab = v;
                     }
                 }
-                "b_level" | "tercile" => {
+                "b_level" => {
                     if val_str.to_lowercase() != "none"
                         && val_str.to_lowercase() != "n"
                         && let Ok(v) = val_str.parse::<i32>()
                     {
                         config.b_level = Some(v);
-                    }
-                }
-                "population" => {
-                    if val_str.to_lowercase() != "none"
-                        && val_str.to_lowercase() != "n"
-                        && let Ok(v) = val_str.parse::<i32>()
-                    {
-                        config.population = Some(v);
                     }
                 }
                 "chaos" => {
@@ -930,11 +921,6 @@ fn respond_with_defenses_modal(
         format!("dm:manual:{}", mode_tag)
     };
 
-    let pop_str = config
-        .population
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "none".to_string());
-
     let mut citizens_sorted = citizens.to_vec();
     citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
 
@@ -953,7 +939,6 @@ fn respond_with_defenses_modal(
         format!("iterations: {}", config.iterations),
         format!("reactor: {}", config.is_reactor_built),
         format!("nb_hab: {}", config.nb_hab),
-        format!("population: {}", pop_str),
         format!("chaos: {}", config.is_chaos),
         format!("devastated: {}", config.is_devastated),
     ]);

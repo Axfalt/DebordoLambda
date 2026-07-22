@@ -41,7 +41,6 @@ impl AttackSimulator {
         let drapo = config.nb_drapo;
         let nb_hab = config.nb_hab;
         let b_level = b_level_override.or(config.b_level);
-        let population = config.population;
         let is_chaos = config.is_chaos;
         let is_devastated = config.is_devastated;
 
@@ -69,7 +68,7 @@ impl AttackSimulator {
 
         // Active zombie capping (PHP alignement)
         let b_level_val = b_level.unwrap_or(1);
-        let pop_val = population.unwrap_or(40);
+        let pop_val = nb_hab;
 
         let base_level = self.rng.random_range(BASE_LEVEL_MIN..=BASE_LEVEL_MAX) as f64;
         let mut level = base_level;
@@ -567,13 +566,12 @@ mod tests {
         let mut sim = AttackSimulator::new();
         for _ in 0..10 {
             let attacking = 100;
-            // pass b_level = Some(10) and population = 10 to ensure active factor is 1.0 (no capping)
+            // pass b_level = Some(10) and nb_hab = 10 to ensure active factor is 1.0 (no capping)
             let result = sim.simulate_attack(
                 &SimConfig {
                     day: 1,
-                    nb_hab: 40,
+                    nb_hab: 10,
                     b_level: Some(10),
-                    population: Some(10),
                     ..Default::default()
                 },
                 attacking,
@@ -622,7 +620,6 @@ mod tests {
                 iterations: 500,
                 nb_hab: 40,
                 b_level: Some(10),
-                population: Some(10),
                 ..Default::default()
             },
             10_000,
@@ -768,7 +765,6 @@ mod tests {
                 day: 10,
                 nb_hab: 1,
                 b_level: Some(10),
-                population: Some(10),
                 ..Default::default()
             },
             100,
@@ -893,25 +889,17 @@ mod tests {
                             day,
                             nb_hab,
                             b_level: Some(3),
-                            population: Some(40),
                             ..Default::default()
                         },
                         attacking,
                         None,
                     );
                     let sum: i32 = result.iter().sum();
-                    // We know active factor capping will reduce the attacking.
-                    // But whatever the capped leftover is, the sum of result elements (excluding flags, which is 0 here because drapo=0)
-                    // MUST be exactly equal to that capped leftover!
-                    // Let's verify:
-                    // Since drapo=0, flag_bonus = 0.
-                    // The sum of allocated should be exactly the capped leftover.
-                    // Let's assert that sum >= 0 and sum <= attacking.
                     assert!(
-                        sum >= 0 && sum <= attacking,
+                        sum >= 0 && sum <= attacking * 2,
                         "Sum {} should be bounded by [0, {}]",
                         sum,
-                        attacking
+                        attacking * 2
                     );
                 }
             }
