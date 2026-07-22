@@ -123,7 +123,14 @@ fn handle_component_interaction(
         return respond_with_defenses_modal(&config, false, &citizens);
     }
 
-    Ok(build_response(400, "Unknown component interaction"))
+    let response = DiscordResponse {
+        response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+        data: Some(serde_json::json!({
+            "content": "Composant non reconnu.",
+            "flags": 64
+        })),
+    };
+    Ok(build_json_response(200, &response))
 }
 
 /// Répond au PING de validation Discord.
