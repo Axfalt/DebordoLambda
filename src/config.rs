@@ -130,7 +130,7 @@ pub fn format_results(
     ));
 
     output.push_str(&format!(
-        "💀 **Probabilité de mort (ville): {:.3}%**\n\n",
+        "💀 **Probabilité de mort: {:.3}%**\n\n",
         prob
     ));
 
