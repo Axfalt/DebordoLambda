@@ -78,7 +78,11 @@ impl AttackSimulator {
             leftover -= (total_attack as f64 * FLAG_REDUCTION_RATE).round() as i32;
         }
 
-        let flag_bonus = (total_attack as f64 * FLAG_REDUCTION_RATE).round() as i32;
+        let flag_bonus = if drapo > 0 {
+            (total_attack as f64 * FLAG_REDUCTION_RATE).round() as i32
+        } else {
+            0
+        };
         if leftover <= 0 {
             self.allocated_buf.clear();
             self.allocated_buf.resize(targets as usize, flag_bonus);
@@ -586,12 +590,10 @@ mod tests {
                 None,
             );
             let sum: i32 = result.iter().sum();
-            let flag_bonus = (attacking as f64 * 0.025).round() as i32;
-            let expected_sum = attacking + (result.len() as i32 * flag_bonus);
             assert_eq!(
-                sum, expected_sum,
+                sum, attacking,
                 "sum {} should be exactly equal to {}",
-                sum, expected_sum
+                sum, attacking
             );
         }
     }
@@ -1061,5 +1063,25 @@ mod tests {
         ];
         let cfg_citizens = SimConfig::default();
         assert_eq!(resolve_b_level(&cfg_citizens, &citizens), 7);
+    }
+
+    #[test]
+    fn test_user_report_defense_11600() {
+        let config = SimConfig {
+            defense: 11600,
+            tdg_min: 11784,
+            tdg_max: 11814,
+            min_def: 59,
+            day: 27,
+            nb_hab: 40,
+            iterations: 1000,
+            ..Default::default()
+        };
+        let (prob, _total_runs, _avg_max_active, _avg_active_factor) =
+            overflow_probability(&config);
+        assert_eq!(
+            prob, 0.0,
+            "Expected 0.0% death probability for 200 overflow vs 59 min_def"
+        );
     }
 }
