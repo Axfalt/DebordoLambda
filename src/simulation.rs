@@ -6,6 +6,13 @@ use rand_mt::Mt64;
 use rand::RngExt;
 use std::collections::HashMap;
 
+const FLAG_REDUCTION_RATE: f64 = 0.025;
+const BASE_LEVEL_MIN: u32 = 45;
+const BASE_LEVEL_MAX: u32 = 55;
+const UNLUCKY_BOOST: f64 = 0.3;
+const REACTOR_DAMAGE_MIN: i32 = 100;
+const REACTOR_DAMAGE_MAX: i32 = 250;
+
 #[derive(Clone)]
 pub struct AttackSimulator {
     rng: Mt64,
@@ -23,6 +30,7 @@ impl AttackSimulator {
         }
     }
     
+    #[allow(clippy::too_many_arguments)]
     pub fn simulate_attack(
         &mut self,
         day: i32,
@@ -46,10 +54,10 @@ impl AttackSimulator {
 
         // Réduction par les drapeaux
         for _ in 0..drapo {
-            leftover -= (attacking as f64 * 0.025).round() as i32;
+            leftover -= (attacking as f64 * FLAG_REDUCTION_RATE).round() as i32;
         }
 
-        let flag_bonus = (attacking as f64 * 0.025).round() as i32;
+        let flag_bonus = (attacking as f64 * FLAG_REDUCTION_RATE).round() as i32;
         if leftover <= 0 {
             self.allocated_buf.clear();
             self.allocated_buf.resize(targets as usize, flag_bonus);
@@ -57,14 +65,13 @@ impl AttackSimulator {
         }
 
         // Active zombie capping (PHP alignement)
-        let targets_val = targets;
         let b_level_val = b_level.unwrap_or(1);
         let pop_val = population.unwrap_or(40);
 
-        let base_level = self.rng.random_range(45..=55) as f64;
+        let base_level = self.rng.random_range(BASE_LEVEL_MIN..=BASE_LEVEL_MAX) as f64;
         let mut level = base_level;
 
-        level *= (targets_val.max(15) as f64 + b_level_val.max(0) as f64 * 2.0) / pop_val.max(1) as f64;
+        level *= (targets.max(15) as f64 + b_level_val.max(0) as f64 * 2.0) / pop_val.max(1) as f64;
 
         if is_chaos {
             level += 10.0;
@@ -92,7 +99,7 @@ impl AttackSimulator {
         // Une cible reçoit un boost de +0.3
         if !self.repartition_buf.is_empty() {
             let unlucky_idx = self.rng.random_range(0..self.repartition_buf.len());
-            self.repartition_buf[unlucky_idx] += 0.3;
+            self.repartition_buf[unlucky_idx] += UNLUCKY_BOOST;
         }
 
         let sum: f64 = self.repartition_buf.iter().sum();
@@ -131,6 +138,7 @@ impl Default for AttackSimulator {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn debordo_sequential(
     day: i32,
     attacking: i32,
@@ -150,7 +158,7 @@ fn debordo_sequential(
 
     let mut town_hits = 0;
     let mut rng = rand::rng();
-    let reactor_damage = Uniform::new_inclusive(100, 250).unwrap();
+    let reactor_damage = Uniform::new_inclusive(REACTOR_DAMAGE_MIN, REACTOR_DAMAGE_MAX).unwrap();
 
     let b_level_resolved = b_level.unwrap_or(
         match threshold {
@@ -188,6 +196,7 @@ fn debordo_sequential(
     town_hits as f64 / iterations as f64
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_debordo_sequential(
     day: i32,
     attacking: i32,
@@ -215,7 +224,7 @@ fn complete_debordo_sequential(
     let mut town_hits = 0;
     let mut citizen_hits = vec![0u64; citizens.len()];
     let mut rng = rand::rng();
-    let reactor_damage = Uniform::new_inclusive(100, 250).unwrap();
+    let reactor_damage = Uniform::new_inclusive(REACTOR_DAMAGE_MIN, REACTOR_DAMAGE_MAX).unwrap();
 
     let mut simulator = AttackSimulator::new();
     let mut indices: Vec<usize> = (0..citizens.len()).collect();
@@ -298,6 +307,7 @@ fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64
     prob
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn overflow_probability(
     defense: f64,
     tdg_interval: (i32, i32),
@@ -341,6 +351,7 @@ pub fn overflow_probability(
     (overflow_prob * 100.0, total_runs)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn complete_overflow_probability(
     defense: f64,
     tdg_interval: (i32, i32),

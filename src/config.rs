@@ -1,7 +1,4 @@
 //! Configuration de simulation extraite des paramètres Discord.
-// Shared between bootstrap and worker binaries — suppress dead-code lints for
-// items only used by one of the two.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +11,7 @@ pub struct CommandOption {
 }
 
 /// Configuration de simulation avec tous les paramètres nécessaires.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SimConfig {
     pub defense: i32,
     pub tdg_min: i32,
@@ -86,7 +83,7 @@ pub struct SimulationCitizen {
 pub struct SimulationJob {
     pub token: String,
     pub application_id: String,
-    pub options: Vec<CommandOption>,
+    pub config: SimConfig,
     #[serde(default)]
     pub api_pulled_fields: Vec<String>,
     #[serde(default)]

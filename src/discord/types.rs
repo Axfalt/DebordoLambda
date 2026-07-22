@@ -1,5 +1,3 @@
-// Shared between bootstrap and worker binaries — suppress dead-code lints.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use crate::config::CommandOption;
@@ -62,13 +60,10 @@ pub struct DiscordResponse {
 impl DiscordInteraction {
     /// Récupère l'ID de l'utilisateur Discord qui a déclenché l'interaction.
     pub fn user_id(&self) -> Option<&str> {
-        if let Some(user) = &self.user {
-            Some(&user.id)
-        } else if let Some(member) = &self.member {
-            Some(&member.user.id)
-        } else {
-            None
-        }
+        self.user
+            .as_ref()
+            .map(|u| u.id.as_str())
+            .or_else(|| self.member.as_ref().map(|m| m.user.id.as_str()))
     }
 
     /// Récupère la valeur saisie dans un champ de formulaire modal.

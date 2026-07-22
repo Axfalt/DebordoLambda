@@ -1,22 +1,18 @@
 //! Worker Lambda - déclenché par SQS, exécute la simulation et envoie le résultat à Discord.
 
-mod config;
-mod discord;
-mod simulation;
-
 use aws_lambda_events::sqs::SqsEvent;
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info};
 use std::time::Instant;
 
-use crate::config::{format_results, SimConfig, SimulationJob};
-use crate::discord::api::send_followup;
-use crate::simulation::{overflow_probability, complete_overflow_probability};
+use debordo_lib::config::{format_results, SimulationJob};
+use debordo_lib::discord::api::send_followup;
+use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 
-async fn handler(event: LambdaEvent<SqsEvent>) -> Result<(), Error> {
+async fn handler(event: LambdaEvent<SqsEvent>, http_client: &reqwest::Client) -> Result<(), Error> {
     for record in event.payload.records {
         let body = match record.body {
             Some(b) => b,
@@ -34,15 +30,15 @@ async fn handler(event: LambdaEvent<SqsEvent>) -> Result<(), Error> {
             }
         };
 
-        if let Err(e) = process_job(job).await {
+        if let Err(e) = process_job(job, http_client).await {
             error!("Failed to process simulation job: {}", e);
         }
     }
     Ok(())
 }
 
-async fn process_job(job: SimulationJob) -> Result<(), Error> {
-    let config = SimConfig::from_options(&job.options);
+async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Result<(), Error> {
+    let config = job.config.clone();
     info!("Processing simulation with config: {:?}", config);
 
     let defense = config.defense as f64;
@@ -118,7 +114,7 @@ async fn process_job(job: SimulationJob) -> Result<(), Error> {
         ),
     };
 
-    send_followup(&job.application_id, &job.token, &content).await?;
+    send_followup(http_client, &job.application_id, &job.token, &content).await?;
 
     info!("Simulation results sent to Discord");
     Ok(())
@@ -131,6 +127,11 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let http_client = reqwest::Client::new();
     info!("Starting DebordoLambda Worker");
-    lambda_runtime::run(service_fn(handler)).await
+    lambda_runtime::run(service_fn(move |event| {
+        let client = http_client.clone();
+        async move { handler(event, &client).await }
+    }))
+    .await
 }

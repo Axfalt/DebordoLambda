@@ -62,9 +62,7 @@ pub async fn store_user_key(
 
     // 3. Generate a random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
-    for byte in &mut nonce_bytes {
-        *byte = rand::rng().random();
-    }
+    rand::rng().fill(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     // 4. Encrypt the plaintext key

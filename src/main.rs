@@ -1,10 +1,5 @@
 //! DebordoLambda - Commande Discord slash pour simulations de débordements
 
-mod config;
-mod database;
-mod discord;
-mod myhordes;
-
 use aws_lambda_events::apigw::{ApiGatewayV2httpRequest, ApiGatewayV2httpResponse};
 use aws_lambda_events::http::HeaderMap;
 use lambda_runtime::{service_fn, Error, LambdaEvent};
@@ -12,11 +7,12 @@ use serde::Serialize;
 use std::cmp;
 use tracing::{error, info};
 
-use crate::config::{SimulationJob, SimulationCitizen};
-use crate::discord::{
+use debordo_lib::config::{SimConfig, SimulationCitizen, SimulationJob};
+use debordo_lib::discord::{
     interaction_types, response_types, verify_discord_signature, DiscordInteraction,
     DiscordResponse,
 };
+use debordo_lib::{database, myhordes};
 
 // ============================================================================
 // LAMBDA HANDLER
@@ -29,10 +25,9 @@ async fn handler(
     queue_url: String,
     dynamodb_client: aws_sdk_dynamodb::Client,
     ssm_client: aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
+    public_key: &str,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
-    let public_key =
-        std::env::var("DISCORD_PUBLIC_KEY").expect("DISCORD_PUBLIC_KEY must be set");
-
     let request = event.payload;
     let body = request.body.unwrap_or_default();
 
@@ -52,7 +47,7 @@ async fn handler(
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    if !skip_signature && !verify_discord_signature(&public_key, signature, timestamp, &body) {
+    if !skip_signature && !verify_discord_signature(public_key, signature, timestamp, &body) {
         error!("Invalid Discord signature");
         return Ok(build_response(401, "Invalid signature"));
     }
@@ -79,7 +74,7 @@ async fn handler(
             if cmd_name == "register-key" {
                 handle_register_key_command()
             } else {
-                handle_command(interaction, &sqs_client, &queue_url, &dynamodb_client, &ssm_client).await
+                handle_command(interaction, &sqs_client, &queue_url, &dynamodb_client, &ssm_client, http_client).await
             }
         }
         interaction_types::MODAL_SUBMIT => {
@@ -214,6 +209,7 @@ async fn handle_command(
     queue_url: &str,
     dynamodb_client: &aws_sdk_dynamodb::Client,
     ssm_client: &aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let token = interaction.token.clone().unwrap_or_default();
     let application_id = interaction.application_id.clone().unwrap_or_default();
@@ -241,25 +237,25 @@ async fn handle_command(
     let options = interaction
         .data
         .as_ref()
-        .and_then(|d| d.options.as_ref())
-        .cloned()
-        .unwrap_or_default();
+        .and_then(|d| d.options.as_ref());
 
-    for opt in &options {
-        match opt.name.as_str() {
-            "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
-            "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
-            "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
-            "min_def" => user_min_def = opt.value.as_i64().map(|v| v as i32),
-            "nb_drapo" => user_nb_drapo = opt.value.as_i64().map(|v| v as i32),
-            "day" => user_day = opt.value.as_i64().map(|v| v as i32),
-            "iterations" => user_iterations = opt.value.as_i64().map(|v| v as i32),
-            "reactor" => user_reactor = opt.value.as_bool(),
-            "nb_hab" => user_nb_hab = opt.value.as_i64().map(|v| v as i32),
-            "complete" => user_complete = opt.value.as_bool(),
-            "defenses" => user_defenses = opt.value.as_str().map(|s| s.to_string()),
-            "home_bonus" => user_home_bonus = opt.value.as_i64().map(|v| v as i32),
-            _ => {}
+    if let Some(opts) = options {
+        for opt in opts {
+            match opt.name.as_str() {
+                "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
+                "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
+                "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
+                "min_def" => user_min_def = opt.value.as_i64().map(|v| v as i32),
+                "nb_drapo" => user_nb_drapo = opt.value.as_i64().map(|v| v as i32),
+                "day" => user_day = opt.value.as_i64().map(|v| v as i32),
+                "iterations" => user_iterations = opt.value.as_i64().map(|v| v as i32),
+                "reactor" => user_reactor = opt.value.as_bool(),
+                "nb_hab" => user_nb_hab = opt.value.as_i64().map(|v| v as i32),
+                "complete" => user_complete = opt.value.as_bool(),
+                "defenses" => user_defenses = opt.value.as_str().map(|s| s.to_string()),
+                "home_bonus" => user_home_bonus = opt.value.as_i64().map(|v| v as i32),
+                _ => {}
+            }
         }
     }
 
@@ -273,69 +269,39 @@ async fn handle_command(
 
     if has_all_critical {
         info!("All critical parameters provided manually. Skipping API call.");
-        let day = user_day.unwrap_or(1);
-        let defense = user_defense.unwrap();
-        let tdg_min = user_tdg_min.unwrap();
-        let tdg_max = user_tdg_max.unwrap();
-        let reactor = user_reactor.unwrap_or(false);
-        let nb_hab = user_nb_hab.unwrap_or(40);
-        let min_def = user_min_def.unwrap();
-        let nb_drapo = user_nb_drapo.unwrap_or(0);
-        let iterations = user_iterations.unwrap_or(10000);
+        let config = SimConfig {
+            defense: user_defense.unwrap(),
+            tdg_min: user_tdg_min.unwrap(),
+            tdg_max: user_tdg_max.unwrap(),
+            min_def: user_min_def.unwrap(),
+            nb_drapo: user_nb_drapo.unwrap_or(0),
+            day: user_day.unwrap_or(1),
+            iterations: user_iterations.unwrap_or(10000) as u32,
+            is_reactor_built: user_reactor.unwrap_or(false),
+            nb_hab: user_nb_hab.unwrap_or(40),
+            is_complete,
+            custom_defenses: user_defenses.clone(),
+            home_bonus: user_home_bonus.unwrap_or(0),
+            ..Default::default()
+        };
 
         let citizens = resolve_citizens(
             user_defenses.as_deref(),
-            user_home_bonus.unwrap_or(0),
+            config.home_bonus,
             None,
-            nb_hab,
-            min_def,
+            config.nb_hab,
+            config.min_def,
         );
 
-        if is_complete && user_defenses.is_none() {
-            return respond_with_defenses_modal(
-                defense,
-                tdg_min,
-                tdg_max,
-                min_def,
-                nb_drapo,
-                day,
-                iterations,
-                reactor,
-                nb_hab,
-                None,
-                None,
-                false,
-                false,
-                false,
-                &citizens,
-            );
-        }
-
-        return enqueue_simulation(
+        let job = SimulationJob {
             token,
             application_id,
-            sqs_client,
-            queue_url,
-            defense,
-            tdg_min,
-            tdg_max,
-            min_def,
-            nb_drapo,
-            day,
-            iterations,
-            reactor,
-            nb_hab,
-            None,
-            None,
-            false,
-            false,
-            Vec::new(),
-            is_complete,
-            user_defenses.clone(),
-            user_home_bonus.unwrap_or(0),
+            config,
+            api_pulled_fields: Vec::new(),
             citizens,
-        )
-        .await;
+        };
+
+        return finalize_and_dispatch(job, sqs_client, queue_url, false).await;
     }
 
     // 3. Essayer de récupérer la clé de l'utilisateur
@@ -363,74 +329,43 @@ async fn handle_command(
                 return Ok(build_json_response(200, &response));
             }
 
-            // Si tout le reste a des défauts, on lance avec les overrides + valeurs par défaut
-            let day = user_day.unwrap_or(1);
-            let defense = user_defense.unwrap_or(0);
-            let tdg_min = user_tdg_min.unwrap_or(0);
-            let tdg_max = user_tdg_max.unwrap_or(0);
-            let reactor = user_reactor.unwrap_or(false);
-            let nb_hab = user_nb_hab.unwrap_or(40);
-            let min_def = user_min_def.unwrap_or(0);
-            let nb_drapo = user_nb_drapo.unwrap_or(0);
-            let iterations = user_iterations.unwrap_or(10000);
+            let config = SimConfig {
+                defense: user_defense.unwrap_or(0),
+                tdg_min: user_tdg_min.unwrap_or(0),
+                tdg_max: user_tdg_max.unwrap_or(0),
+                min_def: user_min_def.unwrap_or(0),
+                nb_drapo: user_nb_drapo.unwrap_or(0),
+                day: user_day.unwrap_or(1),
+                iterations: user_iterations.unwrap_or(10000) as u32,
+                is_reactor_built: user_reactor.unwrap_or(false),
+                nb_hab: user_nb_hab.unwrap_or(40),
+                is_complete,
+                custom_defenses: user_defenses.clone(),
+                home_bonus: user_home_bonus.unwrap_or(0),
+                ..Default::default()
+            };
 
             let citizens = resolve_citizens(
                 user_defenses.as_deref(),
-                user_home_bonus.unwrap_or(0),
+                config.home_bonus,
                 None,
-                nb_hab,
-                min_def,
+                config.nb_hab,
+                config.min_def,
             );
 
-            if is_complete && user_defenses.is_none() {
-                return respond_with_defenses_modal(
-                    defense,
-                    tdg_min,
-                    tdg_max,
-                    min_def,
-                    nb_drapo,
-                    day,
-                    iterations,
-                    reactor,
-                    nb_hab,
-                    None,
-                    None,
-                    false,
-                    false,
-                    false,
-                    &citizens,
-                );
-            }
-
-            enqueue_simulation(
+            let job = SimulationJob {
                 token,
                 application_id,
-                sqs_client,
-                queue_url,
-                defense,
-                tdg_min,
-                tdg_max,
-                min_def,
-                nb_drapo,
-                day,
-                iterations,
-                reactor,
-                nb_hab,
-                None,
-                None,
-                false,
-                false,
-                Vec::new(),
-                is_complete,
-                user_defenses.clone(),
-                user_home_bonus.unwrap_or(0),
+                config,
+                api_pulled_fields: Vec::new(),
                 citizens,
-            )
-            .await
+            };
+
+            finalize_and_dispatch(job, sqs_client, queue_url, false).await
         }
         Some(key) => {
             // Utilisateur enregistré: appeler l'API de MyHordes
-            match myhordes::fetch_mh_data(&key, ssm_client).await {
+            match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
                 Ok(mh_data) => {
                     if let Some(map) = mh_data.map {
                         let api_day = map.days;
@@ -536,7 +471,7 @@ async fn handle_command(
                         let nb_hab = user_nb_hab.unwrap_or(api_nb_hab);
                         let min_def = user_min_def.unwrap_or(api_min_def);
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
-                        let iterations = user_iterations.unwrap_or(10000);
+                        let iterations = user_iterations.unwrap_or(10000) as u32;
 
                         let mut api_pulled_fields = Vec::new();
                         if user_day.is_none() { api_pulled_fields.push("day".to_string()); }
@@ -568,31 +503,7 @@ async fn handle_command(
                             min_def,
                         );
 
-                        if is_complete && user_defenses.is_none() {
-                            return respond_with_defenses_modal(
-                                defense,
-                                tdg_min,
-                                tdg_max,
-                                min_def,
-                                nb_drapo,
-                                day,
-                                iterations,
-                                reactor,
-                                nb_hab,
-                                Some(b_level),
-                                Some(population),
-                                api_chaos,
-                                api_devast,
-                                true, // is API
-                                &citizens,
-                            );
-                        }
-
-                        enqueue_simulation(
-                            token,
-                            application_id,
-                            sqs_client,
-                            queue_url,
+                        let config = SimConfig {
                             defense,
                             tdg_min,
                             tdg_max,
@@ -600,19 +511,26 @@ async fn handle_command(
                             nb_drapo,
                             day,
                             iterations,
-                            reactor,
+                            is_reactor_built: reactor,
                             nb_hab,
-                            Some(b_level),
-                            Some(population),
-                            api_chaos,
-                            api_devast,
-                            api_pulled_fields,
+                            b_level: Some(b_level),
+                            population: Some(population),
+                            is_chaos: api_chaos,
+                            is_devastated: api_devast,
                             is_complete,
-                            user_defenses.clone(),
+                            custom_defenses: user_defenses.clone(),
                             home_bonus,
+                        };
+
+                        let job = SimulationJob {
+                            token,
+                            application_id,
+                            config,
+                            api_pulled_fields,
                             citizens,
-                        )
-                        .await
+                        };
+
+                        finalize_and_dispatch(job, sqs_client, queue_url, true).await
                     } else {
                         // Pas de ville active (map est None)
                         let error_msg = "Erreur MyHordes : Vous ne semblez pas être actuellement incarné dans une ville active. Veuillez vous incarner ou saisir les paramètres manuellement.";
@@ -645,187 +563,66 @@ async fn handle_command(
                         return Ok(build_json_response(200, &response));
                     }
 
-                    // Fallback sur les paramètres fournis
-                    let day = user_day.unwrap_or(1);
-                    let defense = user_defense.unwrap_or(0);
-                    let tdg_min = user_tdg_min.unwrap_or(0);
-                    let tdg_max = user_tdg_max.unwrap_or(0);
-                    let reactor = user_reactor.unwrap_or(false);
-                    let nb_hab = user_nb_hab.unwrap_or(40);
-                    let min_def = user_min_def.unwrap_or(0);
-                    let nb_drapo = user_nb_drapo.unwrap_or(0);
-                    let iterations = user_iterations.unwrap_or(10000);
+                    let config = SimConfig {
+                        defense: user_defense.unwrap_or(0),
+                        tdg_min: user_tdg_min.unwrap_or(0),
+                        tdg_max: user_tdg_max.unwrap_or(0),
+                        min_def: user_min_def.unwrap_or(0),
+                        nb_drapo: user_nb_drapo.unwrap_or(0),
+                        day: user_day.unwrap_or(1),
+                        iterations: user_iterations.unwrap_or(10000) as u32,
+                        is_reactor_built: user_reactor.unwrap_or(false),
+                        nb_hab: user_nb_hab.unwrap_or(40),
+                        is_complete,
+                        custom_defenses: user_defenses.clone(),
+                        home_bonus: user_home_bonus.unwrap_or(0),
+                        ..Default::default()
+                    };
 
                     let citizens = resolve_citizens(
                         user_defenses.as_deref(),
-                        user_home_bonus.unwrap_or(0),
+                        config.home_bonus,
                         None,
-                        nb_hab,
-                        min_def,
+                        config.nb_hab,
+                        config.min_def,
                     );
 
-                    if is_complete && user_defenses.is_none() {
-                        return respond_with_defenses_modal(
-                            defense,
-                            tdg_min,
-                            tdg_max,
-                            min_def,
-                            nb_drapo,
-                            day,
-                            iterations,
-                            reactor,
-                            nb_hab,
-                            None,
-                            None,
-                            false,
-                            false,
-                            false,
-                            &citizens,
-                        );
-                    }
-
-                    enqueue_simulation(
+                    let job = SimulationJob {
                         token,
                         application_id,
-                        sqs_client,
-                        queue_url,
-                        defense,
-                        tdg_min,
-                        tdg_max,
-                        min_def,
-                        nb_drapo,
-                        day,
-                        iterations,
-                        reactor,
-                        nb_hab,
-                        None,
-                        None,
-                        false,
-                        false,
-                        Vec::new(),
-                        is_complete,
-                        user_defenses.clone(),
-                        user_home_bonus.unwrap_or(0),
+                        config,
+                        api_pulled_fields: Vec::new(),
                         citizens,
-                    )
-                    .await
+                    };
+
+                    finalize_and_dispatch(job, sqs_client, queue_url, false).await
                 }
             }
         }
     }
 }
 
-/// Helper pour formater et enfiler le job de simulation SQS.
-async fn enqueue_simulation(
-    token: String,
-    application_id: String,
+/// Dispatcher helper
+async fn finalize_and_dispatch(
+    job: SimulationJob,
     sqs_client: &aws_sdk_sqs::Client,
     queue_url: &str,
-    defense: i32,
-    tdg_min: i32,
-    tdg_max: i32,
-    min_def: i32,
-    nb_drapo: i32,
-    day: i32,
-    iterations: i32,
-    reactor: bool,
-    nb_hab: i32,
-    b_level: Option<i32>,
-    population: Option<i32>,
-    is_chaos: bool,
-    is_devastated: bool,
-    api_pulled_fields: Vec<String>,
-    is_complete: bool,
-    custom_defenses: Option<String>,
-    home_bonus: i32,
-    citizens: Vec<SimulationCitizen>,
+    is_api: bool,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
-    use crate::config::CommandOption;
-
-    let mut finalized_options = vec![
-        CommandOption {
-            name: "defense".to_string(),
-            value: serde_json::json!(defense),
-        },
-        CommandOption {
-            name: "tdg_min".to_string(),
-            value: serde_json::json!(tdg_min),
-        },
-        CommandOption {
-            name: "tdg_max".to_string(),
-            value: serde_json::json!(tdg_max),
-        },
-        CommandOption {
-            name: "min_def".to_string(),
-            value: serde_json::json!(min_def),
-        },
-        CommandOption {
-            name: "nb_drapo".to_string(),
-            value: serde_json::json!(nb_drapo),
-        },
-        CommandOption {
-            name: "day".to_string(),
-            value: serde_json::json!(day),
-        },
-        CommandOption {
-            name: "iterations".to_string(),
-            value: serde_json::json!(iterations),
-        },
-        CommandOption {
-            name: "reactor".to_string(),
-            value: serde_json::json!(reactor),
-        },
-        CommandOption {
-            name: "nb_hab".to_string(),
-            value: serde_json::json!(nb_hab),
-        },
-        CommandOption {
-            name: "is_chaos".to_string(),
-            value: serde_json::json!(is_chaos),
-        },
-        CommandOption {
-            name: "is_devastated".to_string(),
-            value: serde_json::json!(is_devastated),
-        },
-        CommandOption {
-            name: "complete".to_string(),
-            value: serde_json::json!(is_complete),
-        },
-        CommandOption {
-            name: "home_bonus".to_string(),
-            value: serde_json::json!(home_bonus),
-        },
-    ];
-
-    if let Some(ref cd) = custom_defenses {
-        finalized_options.push(CommandOption {
-            name: "defenses".to_string(),
-            value: serde_json::json!(cd),
-        });
+    if job.config.is_complete && job.config.custom_defenses.is_none() {
+        return respond_with_defenses_modal(&job.config, is_api, &job.citizens);
     }
 
-    if let Some(bl) = b_level {
-        finalized_options.push(CommandOption {
-            name: "b_level".to_string(),
-            value: serde_json::json!(bl),
-        });
-    }
+    enqueue_simulation(&job, sqs_client, queue_url).await
+}
 
-    if let Some(pop) = population {
-        finalized_options.push(CommandOption {
-            name: "population".to_string(),
-            value: serde_json::json!(pop),
-        });
-    }
-
-    let job = SimulationJob {
-        token,
-        application_id,
-        options: finalized_options,
-        api_pulled_fields,
-        citizens,
-    };
-    let job_json = serde_json::to_string(&job)?;
+/// Helper pour formater et enfiler le job de simulation SQS.
+async fn enqueue_simulation(
+    job: &SimulationJob,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    let job_json = serde_json::to_string(job)?;
 
     sqs_client
         .send_message()
@@ -845,7 +642,7 @@ async fn enqueue_simulation(
 
 fn parse_custom_defenses(defenses_str: &str) -> std::collections::HashMap<String, i32> {
     let mut map = std::collections::HashMap::new();
-    for part in defenses_str.split(|c| c == ',' || c == '\n' || c == '\r') {
+    for part in defenses_str.split([',', '\n', '\r']) {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -864,7 +661,7 @@ fn parse_custom_defenses(defenses_str: &str) -> std::collections::HashMap<String
 fn resolve_citizens(
     custom_defenses_str: Option<&str>,
     home_bonus: i32,
-    api_citizens: Option<&[crate::myhordes::MHCitizen]>,
+    api_citizens: Option<&[myhordes::MHCitizen]>,
     nb_hab: i32,
     min_def: i32,
 ) -> Vec<SimulationCitizen> {
@@ -911,7 +708,7 @@ fn resolve_citizens(
         
         // 1. Add explicitly nominated citizens from defenses string
         if let Some(s) = custom_defenses_str {
-            for part in s.split(|c| c == ',' || c == '\n' || c == '\r') {
+            for part in s.split([',', '\n', '\r']) {
                 let part = part.trim();
                 if part.is_empty() {
                     continue;
@@ -979,36 +776,16 @@ fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayV2
     r
 }
 
-fn parse_complete_modal_text(text: &str) -> (
-    i32, // defense
-    i32, // tdg_min
-    i32, // tdg_max
-    i32, // min_def
-    i32, // day
-    i32, // iterations
-    bool, // reactor
-    i32, // nb_hab
-    Option<i32>, // b_level
-    Option<i32>, // population
-    bool, // is_chaos
-    bool, // is_devastated
-    Vec<SimulationCitizen>,
-) {
-    let mut defense = 0;
-    let mut tdg_min = 0;
-    let mut tdg_max = 0;
-    let mut min_def = 0;
-    let mut day = 1;
-    let mut iterations = 10000;
-    let mut reactor = false;
-    let mut nb_hab = 40;
-    let mut b_level = None;
-    let mut population = None;
-    let mut is_chaos = false;
-    let mut is_devastated = false;
+fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) {
+    let mut config = SimConfig {
+        iterations: 10000,
+        day: 1,
+        nb_hab: 40,
+        ..Default::default()
+    };
     let mut citizens = Vec::new();
 
-    for line in text.split(|c| c == '\n' || c == '\r') {
+    for line in text.split(['\n', '\r']) {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
             continue;
@@ -1020,58 +797,60 @@ fn parse_complete_modal_text(text: &str) -> (
 
             match key.as_str() {
                 "defense" | "défense" => {
-                    if let Ok(v) = val_str.parse::<i32>() { defense = v; }
+                    if let Ok(v) = val_str.parse::<i32>() { config.defense = v; }
                 }
                 "tdg" | "estimations" => {
                     if let Some(dash_pos) = val_str.find('-') {
-                        if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() { tdg_min = mn; }
-                        if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() { tdg_max = mx; }
+                        if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() { config.tdg_min = mn; }
+                        if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() { config.tdg_max = mx; }
                     } else if let Ok(v) = val_str.parse::<i32>() {
-                        tdg_min = v;
-                        tdg_max = v;
+                        config.tdg_min = v;
+                        config.tdg_max = v;
                     }
                 }
                 "tdg_min" => {
-                    if let Ok(v) = val_str.parse::<i32>() { tdg_min = v; }
+                    if let Ok(v) = val_str.parse::<i32>() { config.tdg_min = v; }
                 }
                 "tdg_max" => {
-                    if let Ok(v) = val_str.parse::<i32>() { tdg_max = v; }
+                    if let Ok(v) = val_str.parse::<i32>() { config.tdg_max = v; }
                 }
                 "min_def" | "defense_minimale" | "défense_minimale" => {
-                    if let Ok(v) = val_str.parse::<i32>() { min_def = v; }
+                    if let Ok(v) = val_str.parse::<i32>() { config.min_def = v; }
                 }
                 "day" | "jour" => {
-                    if let Ok(v) = val_str.parse::<i32>() { day = v; }
+                    if let Ok(v) = val_str.parse::<i32>() { config.day = v; }
                 }
                 "iterations" | "itérations" => {
-                    if let Ok(v) = val_str.parse::<i32>() { iterations = v; }
+                    if let Ok(v) = val_str.parse::<u32>() { config.iterations = v; }
                 }
                 "reactor" | "réacteur" => {
                     let lower = val_str.to_lowercase();
-                    reactor = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                    config.is_reactor_built = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
                 }
                 "nb_hab" | "citoyens_max" => {
-                    if let Ok(v) = val_str.parse::<i32>() { nb_hab = v; }
+                    if let Ok(v) = val_str.parse::<i32>() { config.nb_hab = v; }
                 }
                 "b_level" | "tercile" => {
-                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" {
-                        if let Ok(v) = val_str.parse::<i32>() { b_level = Some(v); }
+                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" && let Ok(v) = val_str.parse::<i32>() {
+                        config.b_level = Some(v);
                     }
                 }
                 "population" => {
-                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" {
-                        if let Ok(v) = val_str.parse::<i32>() { population = Some(v); }
+                    if val_str.to_lowercase() != "none" && val_str.to_lowercase() != "n" && let Ok(v) = val_str.parse::<i32>() {
+                        config.population = Some(v);
                     }
                 }
                 "chaos" => {
                     let lower = val_str.to_lowercase();
-                    is_chaos = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                    config.is_chaos = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
                 }
                 "devastated" | "dévastée" | "devast" => {
                     let lower = val_str.to_lowercase();
-                    is_devastated = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
+                    config.is_devastated = lower == "true" || lower == "1" || lower == "oui" || lower == "yes" || lower == "y";
                 }
-                "nb_drapo" => {} // Handled separately to avoid citizen parsing
+                "nb_drapo" => {
+                    if let Ok(v) = val_str.parse::<i32>() { config.nb_drapo = v; }
+                }
                 _ => {
                     if let Ok(def) = val_str.parse::<i32>() {
                         let name = line[..pos].trim().to_string();
@@ -1082,37 +861,11 @@ fn parse_complete_modal_text(text: &str) -> (
         }
     }
 
-    (
-        defense,
-        tdg_min,
-        tdg_max,
-        min_def,
-        day,
-        iterations,
-        reactor,
-        nb_hab,
-        b_level,
-        population,
-        is_chaos,
-        is_devastated,
-        citizens,
-    )
+    (config, citizens)
 }
 
 fn respond_with_defenses_modal(
-    defense: i32,
-    tdg_min: i32,
-    tdg_max: i32,
-    _min_def: i32,
-    nb_drapo: i32,
-    day: i32,
-    iterations: i32,
-    reactor: bool,
-    nb_hab: i32,
-    _b_level: Option<i32>,
-    population: Option<i32>,
-    is_chaos: bool,
-    is_devastated: bool,
+    config: &SimConfig,
     is_api: bool,
     citizens: &[SimulationCitizen],
 ) -> Result<ApiGatewayV2httpResponse, Error> {
@@ -1120,22 +873,22 @@ fn respond_with_defenses_modal(
 
     let custom_id = if is_api { "dm:api" } else { "dm:manual" };
 
-    let pop_str = population.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
+    let pop_str = config.population.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string());
 
     let mut citizens_sorted = citizens.to_vec();
-    citizens_sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
 
     let mut config_lines = vec![
-        format!("defense: {}", defense),
-        format!("tdg: {}-{}", tdg_min, tdg_max),
-        format!("nb_drapo: {}", nb_drapo),
-        format!("day: {}", day),
-        format!("iterations: {}", iterations),
-        format!("reactor: {}", reactor),
-        format!("nb_hab: {}", nb_hab),
+        format!("defense: {}", config.defense),
+        format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
+        format!("nb_drapo: {}", config.nb_drapo),
+        format!("day: {}", config.day),
+        format!("iterations: {}", config.iterations),
+        format!("reactor: {}", config.is_reactor_built),
+        format!("nb_hab: {}", config.nb_hab),
         format!("population: {}", pop_str),
-        format!("chaos: {}", is_chaos),
-        format!("devastated: {}", is_devastated),
+        format!("chaos: {}", config.is_chaos),
+        format!("devastated: {}", config.is_devastated),
         "---".to_string(),
     ];
 
@@ -1188,34 +941,9 @@ async fn handle_debordo_modal_submit(
 
     let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
     
-    let (
-        defense,
-        tdg_min,
-        tdg_max,
-        min_def,
-        day,
-        iterations,
-        reactor,
-        nb_hab,
-        b_level,
-        population,
-        is_chaos,
-        is_devastated,
-        citizens,
-    ) = parse_complete_modal_text(defenses_val);
-
-    let mut nb_drapo = 0;
-    for line in defenses_val.split(|c| c == '\n' || c == '\r') {
-        let line = line.trim();
-        if let Some(pos) = line.find(':') {
-            let key = line[..pos].trim().to_lowercase();
-            if key == "nb_drapo" {
-                if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
-                    nb_drapo = v;
-                }
-            }
-        }
-    }
+    let (mut config, citizens) = parse_complete_modal_text(defenses_val);
+    config.is_complete = true;
+    config.custom_defenses = Some(defenses_val.to_string());
 
     let mut api_pulled_fields = Vec::new();
     if is_api {
@@ -1225,31 +953,15 @@ async fn handle_debordo_modal_submit(
         api_pulled_fields.push("min_def".to_string());
     }
 
-    enqueue_simulation(
+    let job = SimulationJob {
         token,
         application_id,
-        sqs_client,
-        queue_url,
-        defense,
-        tdg_min,
-        tdg_max,
-        min_def,
-        nb_drapo,
-        day,
-        iterations,
-        reactor,
-        nb_hab,
-        b_level,
-        population,
-        is_chaos,
-        is_devastated,
+        config,
         api_pulled_fields,
-        true, // complete
-        Some(defenses_val.to_string()),
-        0, // home_bonus
         citizens,
-    )
-    .await
+    };
+
+    enqueue_simulation(&job, sqs_client, queue_url).await
 }
 
 // ============================================================================
@@ -1268,7 +980,9 @@ async fn main() -> Result<(), Error> {
     let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
     let dynamodb_client = aws_sdk_dynamodb::Client::new(&aws_config);
     let ssm_client = aws_sdk_ssm::Client::new(&aws_config);
+    let http_client = reqwest::Client::new();
     let queue_url = std::env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set");
+    let public_key = std::env::var("DISCORD_PUBLIC_KEY").expect("DISCORD_PUBLIC_KEY must be set");
 
     info!("Starting DebordoLambda Discord handler");
 
@@ -1277,7 +991,9 @@ async fn main() -> Result<(), Error> {
         let url = queue_url.clone();
         let db = dynamodb_client.clone();
         let ssm = ssm_client.clone();
-        async move { handler(event, client, url, db, ssm).await }
+        let http = http_client.clone();
+        let pkey = public_key.clone();
+        async move { handler(event, client, url, db, ssm, &http, &pkey).await }
     }))
     .await
 }

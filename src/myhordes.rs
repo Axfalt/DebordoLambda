@@ -59,6 +59,7 @@ pub struct MHCitizen {
 pub async fn fetch_mh_data(
     user_key: &str,
     ssm_client: &aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
 ) -> Result<MHMeResponse, lambda_runtime::Error> {
     let param_name = std::env::var("SSM_APP_KEY_PARAMETER").unwrap_or_else(|_| "MH_APP_KEY".to_string());
     
@@ -83,8 +84,7 @@ pub async fn fetch_mh_data(
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http_client
         .get(url)
         .query(&[
             ("userkey", user_key),
