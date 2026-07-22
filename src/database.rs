@@ -1,20 +1,24 @@
 //! Helper module to encrypt and save user keys in DynamoDB using local AES-256-GCM client-side,
 //! with the key passphrase fetched dynamically at runtime from AWS SSM Parameter Store.
 
-use aws_sdk_dynamodb::types::AttributeValue;
 use aes_gcm::{
+    Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce
 };
-use sha2::{Sha256, Digest};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use aws_sdk_dynamodb::types::AttributeValue;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::RngExt;
-use tracing::{info, error};
+use sha2::{Digest, Sha256};
+use tracing::{error, info};
 
 /// Helper function to retrieve the encryption passphrase from SSM and derive a 32-byte key.
 async fn derive_key(ssm_client: &aws_sdk_ssm::Client) -> Result<[u8; 32], lambda_runtime::Error> {
-    let param_name = std::env::var("SSM_PARAMETER_NAME").unwrap_or_else(|_| "MH_EID_ENCRYPTION_KEY".to_string());
-    info!("Fetching encryption passphrase from SSM parameter: {}", param_name);
+    let param_name =
+        std::env::var("SSM_PARAMETER_NAME").unwrap_or_else(|_| "MH_EID_ENCRYPTION_KEY".to_string());
+    info!(
+        "Fetching encryption passphrase from SSM parameter: {}",
+        param_name
+    );
 
     let ssm_res = ssm_client
         .get_parameter()
@@ -24,16 +28,20 @@ async fn derive_key(ssm_client: &aws_sdk_ssm::Client) -> Result<[u8; 32], lambda
         .await
         .map_err(|e| {
             error!("Failed to fetch parameter from SSM: {}", e);
-            lambda_runtime::Error::from(format!("Failed to retrieve encryption key from SSM: {}", e))
+            lambda_runtime::Error::from(format!(
+                "Failed to retrieve encryption key from SSM: {}",
+                e
+            ))
         })?;
 
-    let passphrase = ssm_res
-        .parameter
-        .and_then(|p| p.value)
-        .ok_or_else(|| lambda_runtime::Error::from("SSM response did not contain parameter value"))?;
+    let passphrase = ssm_res.parameter.and_then(|p| p.value).ok_or_else(|| {
+        lambda_runtime::Error::from("SSM response did not contain parameter value")
+    })?;
 
     if passphrase.trim().is_empty() {
-        return Err(lambda_runtime::Error::from("Server configuration error: SSM passphrase is empty"));
+        return Err(lambda_runtime::Error::from(
+            "Server configuration error: SSM passphrase is empty",
+        ));
     }
 
     let mut hasher = Sha256::new();
@@ -62,9 +70,7 @@ pub async fn store_user_key(
 
     // 3. Generate a random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
-    for byte in &mut nonce_bytes {
-        *byte = rand::rng().random();
-    }
+    rand::rng().fill(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     // 4. Encrypt the plaintext key
@@ -84,8 +90,12 @@ pub async fn store_user_key(
     let encoded_key = STANDARD.encode(&combined);
 
     // 7. Save to DynamoDB
-    let table_name = std::env::var("USER_TABLE_NAME").unwrap_or_else(|_| "UserExternalIds".to_string());
-    info!("Storing encrypted key client-side in DynamoDB table {}", table_name);
+    let table_name =
+        std::env::var("USER_TABLE_NAME").unwrap_or_else(|_| "UserExternalIds".to_string());
+    info!(
+        "Storing encrypted key client-side in DynamoDB table {}",
+        table_name
+    );
 
     db_client
         .put_item()
@@ -99,7 +109,10 @@ pub async fn store_user_key(
             lambda_runtime::Error::from(format!("Database write failed: {}", e))
         })?;
 
-    info!("Successfully stored encrypted API key client-side for user {}", user_id);
+    info!(
+        "Successfully stored encrypted API key client-side for user {}",
+        user_id
+    );
     Ok(())
 }
 
@@ -112,7 +125,8 @@ pub async fn get_user_key(
     info!("Retrieving API key for user {}", user_id);
 
     // 1. Fetch from DynamoDB
-    let table_name = std::env::var("USER_TABLE_NAME").unwrap_or_else(|_| "UserExternalIds".to_string());
+    let table_name =
+        std::env::var("USER_TABLE_NAME").unwrap_or_else(|_| "UserExternalIds".to_string());
     let get_res = db_client
         .get_item()
         .table_name(table_name)
@@ -135,7 +149,10 @@ pub async fn get_user_key(
     let encoded_key = match item.get("encrypted_key").and_then(|v| v.as_s().ok()) {
         Some(k) => k,
         None => {
-            error!("DynamoDB record for user {} is missing 'encrypted_key' attribute", user_id);
+            error!(
+                "DynamoDB record for user {} is missing 'encrypted_key' attribute",
+                user_id
+            );
             return Err(lambda_runtime::Error::from("Database record is corrupt"));
         }
     };
@@ -167,7 +184,10 @@ pub async fn get_user_key(
     })?;
 
     let plaintext = String::from_utf8(decrypted).map_err(|e| {
-        error!("Decrypted key is not valid UTF-8 for user {}: {}", user_id, e);
+        error!(
+            "Decrypted key is not valid UTF-8 for user {}: {}",
+            user_id, e
+        );
         lambda_runtime::Error::from("Decrypted data is corrupt".to_string())
     })?;
 

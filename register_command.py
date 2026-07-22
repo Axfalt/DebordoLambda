@@ -81,6 +81,90 @@ commands = [
                 "description": "Nombre de personnes en ville (défaut: 40)",
                 "type": 4,  # INTEGER
                 "required": False
+            },
+            {
+                "name": "interactive",
+                "description": "Ouvrir un formulaire (modal) pré-rempli pour ajuster la configuration (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            }
+        ]
+    },
+    {
+        "name": "debordo-complete",
+        "description": "Simulation détaillée avec risque de mort par citoyen",
+        "options": [
+            {
+                "name": "defense",
+                "description": "Valeur de défense de la ville",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "tdg_min",
+                "description": "Estimation minimale de la TDG",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "tdg_max",
+                "description": "Estimation maximale de la TDG",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "min_def",
+                "description": "Défense minimale en maison",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "nb_drapo",
+                "description": "Nombre de drapeaux (défaut: 0, fonctionnalité legacy)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "day",
+                "description": "Jour de la simulation (défaut: 1)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "iterations",
+                "description": "Nombre d'itérations (défaut: 10000)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "reactor",
+                "description": "Le réacteur est-il construit? (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            },
+            {
+                "name": "nb_hab",
+                "description": "Nombre de personnes en ville (défaut: 40)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "defenses",
+                "description": "Défenses nominatives (ex: 'Axfalt:15, Bob:8')",
+                "type": 3,  # STRING
+                "required": False
+            },
+            {
+                "name": "home_bonus",
+                "description": "Bonus de défense fixe appliqué à chaque maison (ex: 4)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "interactive",
+                "description": "Ouvrir un formulaire (modal) pré-rempli pour ajuster la configuration",
+                "type": 5,  # BOOLEAN
+                "required": False
             }
         ]
     },

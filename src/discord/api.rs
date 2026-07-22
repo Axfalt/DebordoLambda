@@ -1,12 +1,9 @@
-// Shared between bootstrap and worker binaries — suppress dead-code lints.
-#![allow(dead_code)]
-
 pub async fn send_followup(
+    client: &reqwest::Client,
     application_id: &str,
     token: &str,
     content: &str,
 ) -> Result<(), reqwest::Error> {
-    let client = reqwest::Client::new();
     let url = format!(
         "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
         application_id, token
@@ -16,18 +13,22 @@ pub async fn send_followup(
         "content": content
     });
 
-    client.patch(&url).json(&body).send().await?;
+    client
+        .patch(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
 
-#[allow(dead_code)]
 pub async fn create_followup_message(
+    client: &reqwest::Client,
     application_id: &str,
     token: &str,
     content: &str,
 ) -> Result<(), reqwest::Error> {
-    let client = reqwest::Client::new();
     let url = format!(
         "https://discord.com/api/v10/webhooks/{}/{}",
         application_id, token
@@ -37,8 +38,12 @@ pub async fn create_followup_message(
         "content": content
     });
 
-    client.post(&url).json(&body).send().await?;
+    client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
-

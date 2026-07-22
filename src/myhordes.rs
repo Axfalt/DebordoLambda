@@ -1,7 +1,7 @@
 //! Client module for MyHordes External JSON API.
 
 use serde::Deserialize;
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHMeResponse {
@@ -40,55 +40,68 @@ pub struct MHEstimation {
     pub max: i32,
 }
 
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct MHJob {
+    #[serde(default)]
+    pub uid: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHCitizen {
+    pub name: String,
     pub dead: bool,
     #[serde(rename = "baseDef")]
     pub base_def: i32,
+    pub job: Option<MHJob>,
 }
 
 /// Fetches current user map and city details from MyHordes JSON API.
 pub async fn fetch_mh_data(
     user_key: &str,
     ssm_client: &aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
 ) -> Result<MHMeResponse, lambda_runtime::Error> {
-    let param_name = std::env::var("SSM_APP_KEY_PARAMETER").unwrap_or_else(|_| "MH_APP_KEY".to_string());
-    
+    let param_name =
+        std::env::var("SSM_APP_KEY_PARAMETER").unwrap_or_else(|_| "MH_APP_KEY".to_string());
+
     let app_key = match ssm_client
         .get_parameter()
         .name(&param_name)
         .with_decryption(true)
         .send()
-        .await 
+        .await
     {
         Ok(res) => res.parameter.and_then(|p| p.value).unwrap_or_else(|| {
-            std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
+            std::env::var("MH_APP_KEY")
+                .unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
         }),
         Err(e) => {
-            info!("SSM lookup for app key parameter '{}' failed ({}). Falling back to environment variables.", param_name, e);
-            std::env::var("MH_APP_KEY").unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
+            info!(
+                "SSM lookup for app key parameter '{}' failed ({}). Falling back to environment variables.",
+                param_name, e
+            );
+            std::env::var("MH_APP_KEY")
+                .unwrap_or_else(|_| "fefe0000fefe0000fefe0000fefe0000".to_string())
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(dead,baseDef))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http_client
         .get(url)
         .query(&[
             ("userkey", user_key),
             ("appkey", &app_key),
-            ("languages", "fr"),
             ("fields", fields_param),
         ])
         .send()
         .await
         .map_err(|e| {
             error!("Failed to connect to MyHordes API: {}", e);
-            lambda_runtime::Error::from(format!("Failed to connect to MyHordes API: {}", e))
+            lambda_runtime::Error::from("Failed to connect to MyHordes API")
         })?;
 
     if !resp.status().is_success() {
@@ -101,13 +114,15 @@ pub async fn fetch_mh_data(
         )));
     }
 
-    let data: MHMeResponse = resp
-        .json()
-        .await
-        .map_err(|e| {
-            error!("Failed to parse MyHordes response JSON: {}", e);
-            lambda_runtime::Error::from(format!("Failed to parse MyHordes response JSON: {}", e))
-        })?;
+    let body = resp.text().await.map_err(|e| {
+        error!("Failed to read MyHordes response body: {}", e);
+        lambda_runtime::Error::from("Failed to read MyHordes response body")
+    })?;
+
+    let data: MHMeResponse = serde_json::from_str(&body).map_err(|e| {
+        error!("Failed to parse MyHordes response JSON: {}", e);
+        lambda_runtime::Error::from(format!("Failed to parse MyHordes response JSON: {}", e))
+    })?;
 
     Ok(data)
 }
@@ -125,21 +140,23 @@ mod tests {
                   "defense": { "total": 125 },
                   "buildings": [
                     { "name": "Réacteur chimique" },
+                    { "name": "Fortifications de fortune" },
+                    { "name": "Habitations fortifiées" },
                     { "name": "Wassergraben" }
                   ],
                   "estimations": { "min": 250, "max": 400 }
                 },
                 "citizens": [
-                  { "dead": false, "baseDef": 12 },
-                  { "dead": true, "baseDef": 8 },
-                  { "dead": false, "baseDef": 15 }
+                  { "name": "Axfalt", "dead": false, "baseDef": 12, "job": { "id": 3 } },
+                  { "name": "Bob", "dead": true, "baseDef": 8, "job": { "id": 0 } },
+                  { "name": "Charlie", "dead": false, "baseDef": 15, "job": { "id": 6 } }
                 ]
             }
         });
 
         let response: MHMeResponse = serde_json::from_value(json_data).unwrap();
         assert!(response.map.is_some());
-        
+
         let map = response.map.unwrap();
         assert_eq!(map.days, 4);
 
@@ -147,8 +164,18 @@ mod tests {
         assert_eq!(city.defense.unwrap().total, 125);
 
         // Test reactor check
-        let has_reactor = city.buildings.iter().any(|b| b.name.to_lowercase().contains("réacteur"));
+        let has_reactor = city.buildings.iter().any(|b| {
+            let name = b.name.to_lowercase();
+            name.contains("réacteur") || name.contains("reactor")
+        });
         assert!(has_reactor);
+
+        // Test fortifications check
+        let has_fortifications = city.buildings.iter().any(|b| {
+            let name = b.name.to_lowercase();
+            name == "habitations fortifiées" || name == "habitations fortifiees"
+        });
+        assert!(has_fortifications);
 
         let estimations = city.estimations.unwrap();
         assert_eq!(estimations.min, 250);
@@ -159,7 +186,9 @@ mod tests {
         assert_eq!(nb_hab, 2);
 
         // Test min_def among alive citizens
-        let min_def = map.citizens.iter()
+        let min_def = map
+            .citizens
+            .iter()
             .filter(|c| !c.dead)
             .map(|c| c.base_def)
             .min()
@@ -167,4 +196,3 @@ mod tests {
         assert_eq!(min_def, 12);
     }
 }
-

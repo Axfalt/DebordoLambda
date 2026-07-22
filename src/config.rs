@@ -1,7 +1,4 @@
 //! Configuration de simulation extraite des paramètres Discord.
-// Shared between bootstrap and worker binaries — suppress dead-code lints for
-// items only used by one of the two.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +11,7 @@ pub struct CommandOption {
 }
 
 /// Configuration de simulation avec tous les paramètres nécessaires.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SimConfig {
     pub defense: i32,
     pub tdg_min: i32,
@@ -29,6 +26,10 @@ pub struct SimConfig {
     pub population: Option<i32>,
     pub is_chaos: bool,
     pub is_devastated: bool,
+    pub is_complete: bool,
+    pub is_interactive: bool,
+    pub custom_defenses: Option<String>,
+    pub home_bonus: i32,
 }
 
 impl SimConfig {
@@ -49,13 +50,20 @@ impl SimConfig {
                 "min_def" => config.min_def = opt.value.as_i64().unwrap_or(0) as i32,
                 "nb_drapo" => config.nb_drapo = opt.value.as_i64().unwrap_or(0) as i32,
                 "day" => config.day = opt.value.as_i64().unwrap_or(1) as i32,
-                "iterations" => config.iterations = (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS),
+                "iterations" => {
+                    config.iterations =
+                        (opt.value.as_i64().unwrap_or(10000) as u32).min(MAX_ITERATIONS)
+                }
                 "reactor" => config.is_reactor_built = opt.value.as_bool().unwrap_or(false),
                 "nb_hab" => config.nb_hab = opt.value.as_i64().unwrap_or(40) as i32,
                 "b_level" => config.b_level = opt.value.as_i64().map(|v| v as i32),
                 "population" => config.population = opt.value.as_i64().map(|v| v as i32),
                 "is_chaos" => config.is_chaos = opt.value.as_bool().unwrap_or(false),
                 "is_devastated" => config.is_devastated = opt.value.as_bool().unwrap_or(false),
+                "complete" => config.is_complete = opt.value.as_bool().unwrap_or(false),
+                "interactive" => config.is_interactive = opt.value.as_bool().unwrap_or(false),
+                "defenses" => config.custom_defenses = opt.value.as_str().map(|s| s.to_string()),
+                "home_bonus" => config.home_bonus = opt.value.as_i64().unwrap_or(0) as i32,
                 _ => {}
             }
         }
@@ -68,14 +76,23 @@ impl SimConfig {
     }
 }
 
+/// Citoyen modélisé pour la simulation de survie détaillée.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SimulationCitizen {
+    pub name: String,
+    pub defense: i32,
+}
+
 /// Payload envoyé via SQS au worker Lambda pour exécuter une simulation.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimulationJob {
     pub token: String,
     pub application_id: String,
-    pub options: Vec<CommandOption>,
+    pub config: SimConfig,
     #[serde(default)]
     pub api_pulled_fields: Vec<String>,
+    #[serde(default)]
+    pub citizens: Vec<SimulationCitizen>,
 }
 
 /// Formate les résultats de simulation pour l'affichage Discord.
@@ -85,14 +102,14 @@ pub fn format_results(
     elapsed_ms: u128,
     total_runs: u64,
     api_pulled_fields: &[String],
+    citizens: &[SimulationCitizen],
+    citizen_percentages: &[f64],
 ) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
 
-    let is_api = |field: &str| -> bool {
-        api_pulled_fields.iter().any(|f| f == field)
-    };
+    let is_api = |field: &str| -> bool { api_pulled_fields.iter().any(|f| f == field) };
 
     let fmt_line = |emoji_label: &str, field: &str, val: i32| -> String {
         if is_api(field) {
@@ -103,7 +120,10 @@ pub fn format_results(
     };
 
     let tdg_line = if is_api("tdg") {
-        format!("• **🔭 TDG**: {} - {} *(api)*\n", config.tdg_min, config.tdg_max)
+        format!(
+            "• **🔭 TDG**: {} - {} *(api)*\n",
+            config.tdg_min, config.tdg_max
+        )
     } else {
         format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max)
     };
@@ -111,12 +131,35 @@ pub fn format_results(
     output.push_str(&fmt_line("🛡️ Défense", "defense", config.defense));
     output.push_str(&tdg_line);
     output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", "nb_hab", config.nb_hab));
-    output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+    if !config.is_complete {
+        output.push_str(&fmt_line("🏠 Défense min", "min_def", config.min_def));
+    }
     output.push_str(&fmt_line("📅 Jour", "day", config.day));
     output.push_str(&format!("• **🔁 Itérations**: {}\n\n", config.iterations));
 
+    output.push_str(&format!(
+        "💀 **Probabilité de mort (ville): {:.3}%**\n\n",
+        prob
+    ));
 
-    output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
+    if config.is_complete && !citizens.is_empty() {
+        output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
+        let mut list: Vec<(&SimulationCitizen, f64)> = citizens
+            .iter()
+            .zip(citizen_percentages.iter().copied())
+            .collect();
+        // Sort alphabetically by name (case-insensitive)
+        list.sort_by_key(|a| a.0.name.to_lowercase());
+
+        for &(citizen, c_prob) in &list {
+            output.push_str(&format!(
+                "• **{}**: {} 🛡️ — **{:.3}%**\n",
+                citizen.name, citizen.defense, c_prob
+            ));
+        }
+        output.push('\n');
+    }
+
     output.push_str(&format!(
         "-# ⏱️ {} simulations en {}ms",
         total_runs, elapsed_ms
@@ -131,7 +174,10 @@ mod tests {
     use serde_json::json;
 
     fn make_opt(name: &str, value: serde_json::Value) -> CommandOption {
-        CommandOption { name: name.to_string(), value }
+        CommandOption {
+            name: name.to_string(),
+            value,
+        }
     }
 
     #[test]
@@ -203,5 +249,12 @@ mod tests {
         ];
         let config = SimConfig::from_options(&options);
         assert_eq!(config.tdg_interval(), (50, 80));
+    }
+
+    #[test]
+    fn test_simconfig_parses_interactive() {
+        let options = vec![make_opt("interactive", json!(true))];
+        let config = SimConfig::from_options(&options);
+        assert!(config.is_interactive);
     }
 }
