@@ -27,6 +27,7 @@ pub struct SimConfig {
     pub is_chaos: bool,
     pub is_devastated: bool,
     pub is_complete: bool,
+    pub is_interactive: bool,
     pub custom_defenses: Option<String>,
     pub home_bonus: i32,
 }
@@ -60,6 +61,7 @@ impl SimConfig {
                 "is_chaos" => config.is_chaos = opt.value.as_bool().unwrap_or(false),
                 "is_devastated" => config.is_devastated = opt.value.as_bool().unwrap_or(false),
                 "complete" => config.is_complete = opt.value.as_bool().unwrap_or(false),
+                "interactive" => config.is_interactive = opt.value.as_bool().unwrap_or(false),
                 "defenses" => config.custom_defenses = opt.value.as_str().map(|s| s.to_string()),
                 "home_bonus" => config.home_bonus = opt.value.as_i64().unwrap_or(0) as i32,
                 _ => {}
@@ -247,5 +249,12 @@ mod tests {
         ];
         let config = SimConfig::from_options(&options);
         assert_eq!(config.tdg_interval(), (50, 80));
+    }
+
+    #[test]
+    fn test_simconfig_parses_interactive() {
+        let options = vec![make_opt("interactive", json!(true))];
+        let config = SimConfig::from_options(&options);
+        assert!(config.is_interactive);
     }
 }

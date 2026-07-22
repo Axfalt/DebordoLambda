@@ -246,6 +246,7 @@ async fn handle_command(
     let mut user_reactor: Option<bool> = None;
     let mut user_nb_hab: Option<i32> = None;
     let mut user_complete: Option<bool> = None;
+    let mut user_interactive: Option<bool> = None;
     let mut user_defenses: Option<String> = None;
     let mut user_home_bonus: Option<i32> = None;
 
@@ -264,6 +265,7 @@ async fn handle_command(
                 "reactor" => user_reactor = opt.value.as_bool(),
                 "nb_hab" => user_nb_hab = opt.value.as_i64().map(|v| v as i32),
                 "complete" => user_complete = opt.value.as_bool(),
+                "interactive" => user_interactive = opt.value.as_bool(),
                 "defenses" => user_defenses = opt.value.as_str().map(|s| s.to_string()),
                 "home_bonus" => user_home_bonus = opt.value.as_i64().map(|v| v as i32),
                 _ => {}
@@ -272,6 +274,7 @@ async fn handle_command(
     }
 
     let is_complete = is_complete_cmd || user_complete.unwrap_or(false);
+    let is_interactive = user_interactive.unwrap_or(false);
 
     // 2. Vérifier si on a tous les paramètres requis manuellement
     let has_all_critical = user_defense.is_some()
@@ -292,6 +295,7 @@ async fn handle_command(
             is_reactor_built: user_reactor.unwrap_or(false),
             nb_hab: user_nb_hab.unwrap_or(40),
             is_complete,
+            is_interactive,
             custom_defenses: user_defenses.clone(),
             home_bonus: user_home_bonus.unwrap_or(0),
             ..Default::default()
@@ -356,6 +360,7 @@ async fn handle_command(
                 is_reactor_built: user_reactor.unwrap_or(false),
                 nb_hab: user_nb_hab.unwrap_or(40),
                 is_complete,
+                is_interactive,
                 custom_defenses: user_defenses.clone(),
                 home_bonus: user_home_bonus.unwrap_or(0),
                 ..Default::default()
@@ -542,6 +547,7 @@ async fn handle_command(
                             is_chaos: api_chaos,
                             is_devastated: api_devast,
                             is_complete,
+                            is_interactive,
                             custom_defenses: user_defenses.clone(),
                             home_bonus,
                         };
@@ -602,6 +608,7 @@ async fn handle_command(
                         is_reactor_built: user_reactor.unwrap_or(false),
                         nb_hab: user_nb_hab.unwrap_or(40),
                         is_complete,
+                        is_interactive,
                         custom_defenses: user_defenses.clone(),
                         home_bonus: user_home_bonus.unwrap_or(0),
                         ..Default::default()
@@ -637,7 +644,8 @@ async fn finalize_and_dispatch(
     queue_url: &str,
     is_api: bool,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
-    if job.config.is_complete && job.config.custom_defenses.is_none() {
+    if job.config.is_interactive || (job.config.is_complete && job.config.custom_defenses.is_none())
+    {
         return respond_with_defenses_modal(&job.config, is_api, &job.citizens);
     }
 
@@ -937,7 +945,12 @@ fn respond_with_defenses_modal(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Responding with defenses edit modal");
 
-    let custom_id = if is_api { "dm:api" } else { "dm:manual" };
+    let mode_tag = if config.is_complete { "comp" } else { "std" };
+    let custom_id = if is_api {
+        format!("dm:api:{}", mode_tag)
+    } else {
+        format!("dm:manual:{}", mode_tag)
+    };
 
     let pop_str = config
         .population
@@ -1003,7 +1016,8 @@ async fn handle_debordo_modal_submit(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Handling debordo configuration modal submission");
 
-    let is_api = custom_id == "dm:api";
+    let is_api = custom_id.contains("api");
+    let was_complete = custom_id.contains("comp");
 
     let token = interaction.token.clone().unwrap_or_default();
     let application_id = interaction.application_id.clone().unwrap_or_default();
@@ -1011,7 +1025,7 @@ async fn handle_debordo_modal_submit(
     let defenses_val = interaction.get_modal_value("defenses_input").unwrap_or("");
 
     let (mut config, citizens) = parse_complete_modal_text(defenses_val);
-    config.is_complete = true;
+    config.is_complete = was_complete || !citizens.is_empty();
     config.custom_defenses = Some(defenses_val.to_string());
 
     let mut api_pulled_fields = Vec::new();

@@ -81,6 +81,12 @@ commands = [
                 "description": "Nombre de personnes en ville (défaut: 40)",
                 "type": 4,  # INTEGER
                 "required": False
+            },
+            {
+                "name": "interactive",
+                "description": "Ouvrir un formulaire (modal) pré-rempli pour ajuster la configuration (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
             }
         ]
     },
@@ -152,6 +158,12 @@ commands = [
                 "name": "home_bonus",
                 "description": "Bonus de défense fixe appliqué à chaque maison (ex: 4)",
                 "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "interactive",
+                "description": "Ouvrir un formulaire (modal) pré-rempli pour ajuster la configuration",
+                "type": 5,  # BOOLEAN
                 "required": False
             }
         ]
