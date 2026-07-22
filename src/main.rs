@@ -971,11 +971,13 @@ fn respond_with_defenses_modal(
         format!("population: {}", pop_str),
         format!("chaos: {}", config.is_chaos),
         format!("devastated: {}", config.is_devastated),
-        "---".to_string(),
     ];
 
-    for c in &citizens_sorted {
-        config_lines.push(format!("{}: {}", c.name, c.defense));
+    if config.is_complete {
+        config_lines.push("---".to_string());
+        for c in &citizens_sorted {
+            config_lines.push(format!("{}: {}", c.name, c.defense));
+        }
     }
 
     let citizens_str = config_lines.join("\n");
