@@ -135,6 +135,12 @@ pub fn format_results(
     citizens: &[SimulationCitizen],
     citizen_percentages: &[f64],
 ) -> String {
+    #[derive(Serialize)]
+    struct ReusableConfigPayload<'a> {
+        config: &'a SimConfig,
+        citizens: &'a [SimulationCitizen],
+    }
+
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
     output.push_str("**Paramètres:**\n");
@@ -184,12 +190,31 @@ pub fn format_results(
         "-# ⏱️ {} simulations en {}ms",
         total_runs, elapsed_ms
     ));
+    let reusable_payload = ReusableConfigPayload { config, citizens };
+    if let Ok(payload_json) = serde_json::to_string(&reusable_payload) {
+        output.push_str(&format!("\n-# cfg:{}", payload_json));
+    }
 
     output
 }
 
 /// Extrait la configuration SimConfig et les citoyens à partir du texte d'un message de résultats Discord.
 pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<SimulationCitizen>) {
+    #[derive(Deserialize)]
+    struct ReusableConfigPayload {
+        config: SimConfig,
+        #[serde(default)]
+        citizens: Vec<SimulationCitizen>,
+    }
+
+    for line in content.lines() {
+        if let Some(payload) = line.trim().strip_prefix("-# cfg:") {
+            if let Ok(parsed) = serde_json::from_str::<ReusableConfigPayload>(payload.trim()) {
+                return (parsed.config, parsed.citizens);
+            }
+        }
+    }
+
     let mut config = SimConfig {
         iterations: 10000,
         day: 1,
@@ -452,10 +477,16 @@ mod tests {
             tdg_min: 60,
             tdg_max: 90,
             min_def: 25,
+            nb_drapo: 2,
             day: 3,
             iterations: 1000,
+            is_reactor_built: true,
             nb_hab: 35,
+            b_level: Some(13),
+            is_chaos: true,
+            is_devastated: true,
             is_complete: true,
+            home_bonus: 7,
             ..Default::default()
         };
         let citizens = vec![
@@ -478,6 +509,12 @@ mod tests {
         assert_eq!(parsed_config.nb_hab, 35);
         assert_eq!(parsed_config.day, 3);
         assert_eq!(parsed_config.iterations, 1000);
+        assert_eq!(parsed_config.nb_drapo, 2);
+        assert!(parsed_config.is_reactor_built);
+        assert_eq!(parsed_config.b_level, Some(13));
+        assert!(parsed_config.is_chaos);
+        assert!(parsed_config.is_devastated);
+        assert_eq!(parsed_config.home_bonus, 7);
         assert!(parsed_config.is_complete);
         assert_eq!(parsed_citizens.len(), 2);
     }
