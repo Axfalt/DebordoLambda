@@ -238,7 +238,7 @@ fn debordo_sequential(config: &SimConfig, raw_attack: i32, threshold: i32) -> (f
     (town_prob, avg_max_active)
 }
 
-fn complete_debordo_sequential(
+pub fn complete_debordo(
     config: &SimConfig,
     raw_attack: i32,
     citizens: &[crate::config::SimulationCitizen],
@@ -247,8 +247,12 @@ fn complete_debordo_sequential(
         return (0.0, vec![0.0; citizens.len()], None);
     }
 
-    let threshold = citizens.iter().map(|c| c.defense).min().unwrap_or(0);
-    let b_level_resolved = resolve_b_level(config, citizens);
+    let mut effective_config = config.clone();
+    if !citizens.is_empty() {
+        effective_config.nb_hab = citizens.len() as i32;
+    }
+
+    let b_level_resolved = resolve_b_level(&effective_config, citizens);
 
     let mut town_hits = 0;
     let mut total_capped_max_active: u64 = 0;
@@ -260,16 +264,16 @@ fn complete_debordo_sequential(
     let mut simulator = AttackSimulator::new();
     let mut indices: Vec<usize> = (0..citizens.len()).collect();
 
-    for _ in 0..config.iterations {
-        let real_total_attack = if config.is_reactor_built {
+    for _ in 0..effective_config.iterations {
+        let real_total_attack = if effective_config.is_reactor_built {
             raw_attack + reactor_damage.sample(&mut rng)
         } else {
             raw_attack
         };
-        let overflow = (real_total_attack - config.defense).max(0);
+        let overflow = (real_total_attack - effective_config.defense).max(0);
 
         let (allocated, max_active, _active_factor) = simulator.simulate_attack_with_max_active(
-            config,
+            &effective_config,
             real_total_attack,
             overflow,
             Some(b_level_resolved),
@@ -279,10 +283,7 @@ fn complete_debordo_sequential(
             capped_iterations += 1;
         }
 
-        if allocated.iter().any(|&x| x > threshold) {
-            town_hits += 1;
-        }
-
+        let mut any_citizen_died = false;
         if !citizens.is_empty() {
             use rand::seq::SliceRandom;
             indices.shuffle(&mut rng);
@@ -292,15 +293,20 @@ fn complete_debordo_sequential(
                 let zombies = allocated[j];
                 if zombies > citizens[idx].defense {
                     citizen_hits[idx] += 1;
+                    any_citizen_died = true;
                 }
             }
         }
+
+        if any_citizen_died {
+            town_hits += 1;
+        }
     }
 
-    let town_prob = town_hits as f64 / config.iterations as f64;
+    let town_prob = town_hits as f64 / effective_config.iterations as f64;
     let citizen_probs = citizen_hits
         .iter()
-        .map(|&hits| hits as f64 / config.iterations as f64)
+        .map(|&hits| hits as f64 / effective_config.iterations as f64)
         .collect();
     let avg_max_active = if capped_iterations > 0 {
         Some(total_capped_max_active as f64 / capped_iterations as f64)
@@ -398,7 +404,7 @@ pub fn complete_overflow_probability(
         let max_reactor_damage = if config.is_reactor_built { 250.0 } else { 0.0 };
         if overflow + max_reactor_damage > 0.0 {
             let (town_prob, citizen_p, avg_max_active) =
-                complete_debordo_sequential(config, attack, citizens);
+                complete_debordo(config, attack, citizens);
             overflow_prob += base_prob * town_prob;
             if let Some(avg_m) = avg_max_active {
                 weighted_avg_max_active += base_prob * avg_m;
@@ -1128,6 +1134,126 @@ mod tests {
         assert!(
             avg_max_active.is_some(),
             "Expected Some(avg_max_active) when max_active < overflow"
+        );
+    }
+
+    #[test]
+    fn test_user_report_single_zero_def_citizen_town_probability() {
+        use crate::config::SimulationCitizen;
+
+        let mut citizens = Vec::new();
+        for i in 1..=39 {
+            citizens.push(SimulationCitizen {
+                name: format!("Citoyen {}", i),
+                defense: 60,
+            });
+        }
+        citizens.push(SimulationCitizen {
+            name: "Snow".to_string(),
+            defense: 0,
+        });
+
+        let config = SimConfig {
+            defense: 11274,
+            tdg_min: 11784,
+            tdg_max: 11814,
+            day: 27,
+            iterations: 1000,
+            nb_hab: 40,
+            is_complete: true,
+            ..Default::default()
+        };
+
+        let (town_prob, _runs, _citizen_percentages, _avg) =
+            complete_overflow_probability(&config, &citizens);
+
+        assert!(
+            town_prob < 80.0 && town_prob > 50.0,
+            "Town probability should be around ~64%, got {}",
+            town_prob
+        );
+    }
+
+    #[test]
+    fn test_complete_debordo_population_override() {
+        use crate::config::SimulationCitizen;
+
+        let citizens = vec![
+            SimulationCitizen {
+                name: "Cit 1".to_string(),
+                defense: 0,
+            },
+            SimulationCitizen {
+                name: "Cit 2".to_string(),
+                defense: 0,
+            },
+            SimulationCitizen {
+                name: "Cit 3".to_string(),
+                defense: 0,
+            },
+        ];
+
+        // Pass config with default nb_hab = 40, but 3 citizens in list
+        let config = SimConfig {
+            defense: 100,
+            day: 10,
+            iterations: 100,
+            nb_hab: 40,
+            b_level: Some(10),
+            ..Default::default()
+        };
+
+        let (town_prob, citizen_probs, _avg) = complete_debordo(&config, 500, &citizens);
+        assert_eq!(citizen_probs.len(), 3);
+        assert!(
+            town_prob > 0.9,
+            "With 3 zero-defense citizens and 400 overflow zombies, town hit rate should be high"
+        );
+        for &p in &citizen_probs {
+            assert!(
+                p > 0.5,
+                "Each of the 3 citizens should have a high death rate"
+            );
+        }
+    }
+
+    #[test]
+    fn test_complete_debordo_individual_death_tracking() {
+        use crate::config::SimulationCitizen;
+
+        let citizens = vec![
+            SimulationCitizen {
+                name: "Immortal".to_string(),
+                defense: 999_999,
+            },
+            SimulationCitizen {
+                name: "Mortal".to_string(),
+                defense: 0,
+            },
+        ];
+
+        let config = SimConfig {
+            defense: 100,
+            day: 10,
+            iterations: 500,
+            nb_hab: 2,
+            b_level: Some(10),
+            ..Default::default()
+        };
+
+        let (town_prob, citizen_probs, _avg) = complete_debordo(&config, 200, &citizens);
+        assert_eq!(citizen_probs.len(), 2);
+        assert_eq!(
+            citizen_probs[0], 0.0,
+            "Immortal citizen must have 0.0 death rate"
+        );
+        assert!(
+            citizen_probs[1] > 0.0,
+            "Mortal citizen (0 def) must have > 0.0 death rate"
+        );
+        assert_eq!(
+            town_prob, citizen_probs[1],
+            "Town hit rate must equal Mortal's death rate when only Mortal can die"
         );
     }
 }
