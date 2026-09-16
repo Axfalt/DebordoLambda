@@ -8,7 +8,8 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    format_conf, parse_result_message_content, SimConfig, SimulationCitizen, SimulationJob,
+    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_result_message_content,
+    JobType, SimConfig, SimulationCitizen, SimulationJob, MAX_ITERATIONS,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -75,6 +76,8 @@ async fn handler(
 
             if cmd_name == "register-key" {
                 handle_register_key_command()
+            } else if cmd_name == "reparo" {
+                handle_reparo_command(interaction, &dynamodb_client, &ssm_client, http_client).await
             } else {
                 handle_command(
                     interaction,
@@ -189,6 +192,10 @@ async fn handle_modal_submit(
 
     if custom_id.starts_with("dm:") {
         return handle_debordo_modal_submit(interaction, &custom_id, sqs_client, queue_url).await;
+    }
+
+    if custom_id == "rm:reparo" {
+        return handle_reparo_modal_submit(interaction, sqs_client, queue_url).await;
     }
 
     if custom_id != "register_key_modal" {
@@ -348,6 +355,8 @@ async fn handle_command(
             application_id,
             config,
             citizens,
+            job_type: JobType::Debordo,
+            buildings: Vec::new(),
         };
 
         return finalize_and_dispatch(job, sqs_client, queue_url, false).await;
@@ -412,6 +421,8 @@ async fn handle_command(
                 application_id,
                 config,
                 citizens,
+                job_type: JobType::Debordo,
+                buildings: Vec::new(),
             };
 
             finalize_and_dispatch(job, sqs_client, queue_url, false).await
@@ -562,6 +573,8 @@ async fn handle_command(
                             application_id,
                             config,
                             citizens,
+                            job_type: JobType::Debordo,
+                            buildings: Vec::new(),
                         };
 
                         finalize_and_dispatch(job, sqs_client, queue_url, true).await
@@ -631,6 +644,8 @@ async fn handle_command(
                         application_id,
                         config,
                         citizens,
+                        job_type: JobType::Debordo,
+                        buildings: Vec::new(),
                     };
 
                     finalize_and_dispatch(job, sqs_client, queue_url, false).await
@@ -638,6 +653,229 @@ async fn handle_command(
             }
         }
     }
+}
+
+/// Gère la commande /reparo : récupère (ou utilise par défaut) l'état des bâtiments de la
+/// ville et affiche un modal pré-rempli permettant de le relire/corriger avant de lancer la
+/// simulation.
+async fn handle_reparo_command(
+    interaction: DiscordInteraction,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
+    ssm_client: &aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    let mut user_defense: Option<i32> = None;
+    let mut user_tdg_min: Option<i32> = None;
+    let mut user_tdg_max: Option<i32> = None;
+    let mut user_iterations: Option<i32> = None;
+    let mut no_api = false;
+
+    let options = interaction.data.as_ref().and_then(|d| d.options.as_ref());
+    if let Some(opts) = options {
+        for opt in opts {
+            match opt.name.as_str() {
+                "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
+                "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
+                "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
+                "iterations" => user_iterations = opt.value.as_i64().map(|v| v as i32),
+                "no_api" => no_api = opt.value.as_bool().unwrap_or(false),
+                _ => {}
+            }
+        }
+    }
+
+    let iterations = (user_iterations.unwrap_or(10000) as u32).min(MAX_ITERATIONS);
+
+    let user_id = interaction.user_id().unwrap_or("");
+    let user_key = if no_api || user_id.is_empty() {
+        None
+    } else {
+        database::get_user_key(user_id, dynamodb_client, ssm_client)
+            .await
+            .unwrap_or(None)
+    };
+
+    // Le catalogue de bâtiments par défaut et la simulation sont calibrés pour le mode
+    // Pandemonium ; sans données API utilisables (pas de clé, échec, ou ville non-panda), on
+    // retombe sur les paramètres saisis manuellement.
+    let manual_fallback = || {
+        (
+            user_defense.unwrap_or(0),
+            user_tdg_min.unwrap_or(0),
+            user_tdg_max.unwrap_or(0),
+            reparo_lib::default_buildings(),
+        )
+    };
+
+    let (defense, tdg_min, tdg_max, buildings) = match user_key {
+        Some(key) => match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
+            Ok(mh_data) => match mh_data.map {
+                Some(map) => {
+                    let is_panda = map.city.as_ref().map(|c| c.hard).unwrap_or(false);
+                    if !is_panda {
+                        info!(
+                            "User's current town is not Pandemonium; falling back to manual /reparo parameters"
+                        );
+                        manual_fallback()
+                    } else {
+                        let api_defense = map
+                            .city
+                            .as_ref()
+                            .and_then(|c| c.defense.as_ref())
+                            .map(|d| d.total)
+                            .unwrap_or(0);
+                        let api_tdg_min = map
+                            .city
+                            .as_ref()
+                            .and_then(|c| c.estimations.as_ref())
+                            .map(|e| e.min)
+                            .unwrap_or(0);
+                        let api_tdg_max = map
+                            .city
+                            .as_ref()
+                            .and_then(|c| c.estimations.as_ref())
+                            .map(|e| e.max)
+                            .unwrap_or(0);
+                        let api_buildings: Vec<reparo_lib::SimBuilding> = map
+                            .city
+                            .as_ref()
+                            .map(|c| {
+                                c.buildings
+                                    .iter()
+                                    .filter(|b| b.breakable && !b.temporary)
+                                    .map(|b| reparo_lib::SimBuilding {
+                                        name: b.name.clone(),
+                                        life: b.life,
+                                        max_life: b.max_life,
+                                        breakable: b.breakable,
+                                        temporary: b.temporary,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let buildings = if api_buildings.is_empty() {
+                            reparo_lib::default_buildings()
+                        } else {
+                            api_buildings
+                        };
+
+                        (
+                            user_defense.unwrap_or(api_defense),
+                            user_tdg_min.unwrap_or(api_tdg_min),
+                            user_tdg_max.unwrap_or(api_tdg_max),
+                            buildings,
+                        )
+                    }
+                }
+                None => manual_fallback(),
+            },
+            Err(e) => {
+                error!("MyHordes API call failed for /reparo: {}", e);
+                manual_fallback()
+            }
+        },
+        None => manual_fallback(),
+    };
+
+    if defense <= 0 || tdg_min <= 0 || tdg_max < tdg_min {
+        let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `defense`, `tdg_min` et `tdg_max`.";
+        let response = DiscordResponse {
+            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+            data: Some(serde_json::json!({
+                "content": error_msg,
+                "flags": 64
+            })),
+        };
+        return Ok(build_json_response(200, &response));
+    }
+
+    let config = SimConfig {
+        defense,
+        tdg_min,
+        tdg_max,
+        iterations,
+        ..Default::default()
+    };
+
+    respond_with_buildings_modal(&config, &buildings)
+}
+
+/// Affiche le modal pré-rempli listant les bâtiments (vie/vie max) pour /reparo, permettant à
+/// l'utilisateur de relire/corriger son état de ville importé avant de lancer la simulation.
+fn respond_with_buildings_modal(
+    config: &SimConfig,
+    buildings: &[reparo_lib::SimBuilding],
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Responding with reparo buildings edit modal");
+
+    let buildings_str = format_reparo_conf(config, buildings);
+
+    let response = DiscordResponse {
+        response_type: response_types::MODAL,
+        data: Some(serde_json::json!({
+            "title": "Configuration & Bâtiments",
+            "custom_id": "rm:reparo",
+            "components": [
+                {
+                    "type": 1, // ACTION_ROW
+                    "components": [
+                        {
+                            "type": 4, // TEXT_INPUT
+                            "custom_id": "buildings_input",
+                            "label": "Configuration et bâtiments",
+                            "style": 2, // PARAGRAPH
+                            "min_length": 1,
+                            "max_length": 4000,
+                            "value": buildings_str,
+                            "required": true
+                        }
+                    ]
+                }
+            ]
+        })),
+    };
+
+    Ok(build_json_response(200, &response))
+}
+
+/// Gère la soumission du modal /reparo : parse la configuration et la liste des bâtiments
+/// relues/corrigées, puis envoie le job de simulation sur SQS.
+async fn handle_reparo_modal_submit(
+    interaction: DiscordInteraction,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Handling reparo configuration modal submission");
+
+    let token = interaction.token.clone().unwrap_or_default();
+    let application_id = interaction.application_id.clone().unwrap_or_default();
+
+    let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
+    let (config, buildings) = parse_reparo_modal_text(buildings_val);
+
+    if config.defense <= 0 || config.tdg_min <= 0 || config.tdg_max < config.tdg_min || buildings.is_empty() {
+        let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `tdg` (min-max) et la liste des bâtiments (format `Nom: vie/vie_max`).";
+        let response = DiscordResponse {
+            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+            data: Some(serde_json::json!({
+                "content": error_msg,
+                "flags": 64
+            })),
+        };
+        return Ok(build_json_response(200, &response));
+    }
+
+    let job = SimulationJob {
+        token,
+        application_id,
+        config,
+        citizens: Vec::new(),
+        job_type: JobType::Reparation,
+        buildings,
+    };
+
+    enqueue_simulation(&job, sqs_client, queue_url).await
 }
 
 /// Dispatcher helper
@@ -1009,6 +1247,8 @@ async fn handle_debordo_modal_submit(
         application_id,
         config,
         citizens,
+        job_type: JobType::Debordo,
+        buildings: Vec::new(),
     };
 
     enqueue_simulation(&job, sqs_client, queue_url).await

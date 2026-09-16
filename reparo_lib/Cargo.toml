@@ -1,0 +1,10 @@
+[package]
+name = "reparo_lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.10.2"
+rand_mt = "6.0.3"
+rayon = "1"
+serde = { version = "1.0.229", features = ["derive"] }

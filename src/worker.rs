@@ -6,8 +6,9 @@ use std::time::Instant;
 use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
-use debordo_lib::config::{SimulationJob, format_results};
-use debordo_lib::discord::api::send_followup;
+use debordo_lib::config::{JobType, SimulationJob, format_results};
+use debordo_lib::discord::api::{send_followup, send_followup_with_image};
+use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
@@ -41,6 +42,17 @@ async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Resul
     let config = job.config.clone();
     info!("Processing simulation with config: {:?}", config);
 
+    match job.job_type {
+        JobType::Debordo => process_debordo_job(job, config, http_client).await,
+        JobType::Reparation => process_reparo_job(job, config, http_client).await,
+    }
+}
+
+async fn process_debordo_job(
+    job: SimulationJob,
+    config: debordo_lib::config::SimConfig,
+    http_client: &reqwest::Client,
+) -> Result<(), Error> {
     let citizens = job.citizens.clone();
     let is_complete = config.is_complete;
     let sim_config = config.clone();
@@ -84,6 +96,78 @@ async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Resul
     send_followup(http_client, &job.application_id, &job.token, &content).await?;
 
     info!("Simulation results sent to Discord");
+    Ok(())
+}
+
+async fn process_reparo_job(
+    job: SimulationJob,
+    config: debordo_lib::config::SimConfig,
+    http_client: &reqwest::Client,
+) -> Result<(), Error> {
+    let buildings = job.buildings.clone();
+    let watch_def = config.defense;
+    let tdg_interval = config.tdg_interval();
+    let iterations = config.iterations;
+
+    let result = timeout(
+        Duration::from_secs(SIMULATION_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            reparo_lib::calculate_reparation_probabilities(
+                watch_def,
+                tdg_interval,
+                iterations,
+                &buildings,
+            )
+        }),
+    )
+    .await;
+
+    let (content, image_url) = match result {
+        Err(_elapsed) => {
+            error!("Reparo simulation timed out after {}s", SIMULATION_TIMEOUT_SECS);
+            (
+                "⏱️ La simulation a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string(),
+                None,
+            )
+        }
+        Ok(Err(e)) => {
+            error!("Reparo simulation panicked: {}", e);
+            ("❌ La simulation a échoué. Veuillez réessayer.".to_string(), None)
+        }
+        Ok(Ok(results)) if results.is_empty() => (
+            "❌ Aucun résultat : vérifiez que tdg_min <= tdg_max.".to_string(),
+            None,
+        ),
+        Ok(Ok(results)) => {
+            let chart_config = build_chart_config(&results);
+            match create_chart_url(http_client, &chart_config).await {
+                Ok(url) => (
+                    format!(
+                        "🔧 **Réparations estimées** — défense: {}, attaque: {}-{} ({} itérations)",
+                        config.defense, config.tdg_min, config.tdg_max, config.iterations
+                    ),
+                    Some(url),
+                ),
+                Err(e) => {
+                    error!("Failed to create QuickChart chart: {}", e);
+                    (
+                        "❌ La simulation a réussi mais le graphique n'a pas pu être généré. Veuillez réessayer.".to_string(),
+                        None,
+                    )
+                }
+            }
+        }
+    };
+
+    match image_url {
+        Some(url) => {
+            send_followup_with_image(http_client, &job.application_id, &job.token, &content, &url)
+                .await?
+        }
+        None => send_followup(http_client, &job.application_id, &job.token, &content).await?,
+    }
+
+    info!("Reparo simulation results sent to Discord");
     Ok(())
 }
 

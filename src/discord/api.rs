@@ -51,6 +51,39 @@ pub async fn send_followup(
     Ok(())
 }
 
+/// Envoie une réponse différée contenant une image (embed) en plus du texte, utilisé par la
+/// commande /reparo pour joindre le graphique QuickChart.
+pub async fn send_followup_with_image(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+    image_url: &str,
+) -> Result<(), reqwest::Error> {
+    let url = format!(
+        "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
+        application_id, token
+    );
+
+    let body = serde_json::json!({
+        "content": content,
+        "embeds": [
+            {
+                "image": { "url": image_url }
+            }
+        ]
+    });
+
+    client
+        .patch(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    Ok(())
+}
+
 pub async fn create_followup_message(
     client: &reqwest::Client,
     application_id: &str,

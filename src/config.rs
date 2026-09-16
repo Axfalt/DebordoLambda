@@ -81,6 +81,14 @@ pub struct SimulationCitizen {
     pub defense: i32,
 }
 
+/// Type de simulation à exécuter dans le worker.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub enum JobType {
+    #[default]
+    Debordo,
+    Reparation,
+}
+
 /// Payload envoyé via SQS au worker Lambda pour exécuter une simulation.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimulationJob {
@@ -89,6 +97,10 @@ pub struct SimulationJob {
     pub config: SimConfig,
     #[serde(default)]
     pub citizens: Vec<SimulationCitizen>,
+    #[serde(default)]
+    pub job_type: JobType,
+    #[serde(default)]
+    pub buildings: Vec<reparo_lib::SimBuilding>,
 }
 
 /// Formate la configuration sous forme textuelle clé: valeur, réutilisable pour le copier/coller en mode interactif.
@@ -186,6 +198,100 @@ pub fn format_results(
     ));
 
     output
+}
+
+/// Formate la configuration et la liste des bâtiments pour le modal Discord de /reparo,
+/// permettant à l'utilisateur de relire/modifier l'état de sa ville avant de lancer la simulation.
+pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuilding]) -> String {
+    let mut buildings_sorted = buildings.to_vec();
+    buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
+
+    let mut lines = vec![
+        format!("defense: {}", config.defense),
+        format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
+        format!("iterations: {}", config.iterations),
+        "---".to_string(),
+    ];
+
+    for b in &buildings_sorted {
+        lines.push(format!("{}: {}/{}", b.name, b.life, b.max_life));
+    }
+
+    lines.join("\n")
+}
+
+/// Extrait la configuration SimConfig et la liste des bâtiments à partir du texte soumis via
+/// le modal Discord de /reparo.
+pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBuilding>) {
+    let mut config = SimConfig {
+        iterations: 10000,
+        ..Default::default()
+    };
+    let mut buildings = Vec::new();
+    let mut in_buildings_section = false;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line == "---" {
+            in_buildings_section = true;
+            continue;
+        }
+
+        if in_buildings_section {
+            if let Some(pos) = line.rfind(':') {
+                let name = line[..pos].trim();
+                let rest = line[pos + 1..].trim();
+                if let Some((life_str, max_str)) = rest.split_once('/') {
+                    if let (Ok(life), Ok(max_life)) =
+                        (life_str.trim().parse::<i32>(), max_str.trim().parse::<i32>())
+                    {
+                        buildings.push(reparo_lib::SimBuilding {
+                            name: name.to_string(),
+                            life,
+                            max_life,
+                            breakable: true,
+                            temporary: false,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some(pos) = line.find(':') {
+            let key = line[..pos].trim().to_lowercase();
+            let val = line[pos + 1..].trim();
+            match key.as_str() {
+                "defense" => {
+                    if let Ok(v) = val.parse::<i32>() {
+                        config.defense = v;
+                    }
+                }
+                "tdg" => {
+                    if let Some((mn, mx)) = val.split_once('-') {
+                        if let Ok(v) = mn.trim().parse::<i32>() {
+                            config.tdg_min = v;
+                        }
+                        if let Ok(v) = mx.trim().parse::<i32>() {
+                            config.tdg_max = v;
+                        }
+                    }
+                }
+                "iterations" => {
+                    if let Ok(v) = val.parse::<u32>() {
+                        config.iterations = v.min(MAX_ITERATIONS);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (config, buildings)
 }
 
 /// Extrait la configuration SimConfig et les citoyens à partir du texte d'un message de résultats Discord.
@@ -442,6 +548,77 @@ mod tests {
         let conf_comp = format_conf(&config_complete, &citizens);
         assert!(!conf_comp.contains("min_def:"));
         assert!(conf_comp.contains("---\nAlice: 25\nBob: 30"));
+    }
+
+    #[test]
+    fn test_format_reparo_conf_and_parse_roundtrip() {
+        let config = SimConfig {
+            defense: 150,
+            tdg_min: 50,
+            tdg_max: 80,
+            iterations: 5000,
+            ..Default::default()
+        };
+        let buildings = vec![
+            reparo_lib::SimBuilding {
+                name: "Muraille".to_string(),
+                life: 25,
+                max_life: 25,
+                breakable: true,
+                temporary: false,
+            },
+            reparo_lib::SimBuilding {
+                name: "Atelier".to_string(),
+                life: 19,
+                max_life: 25,
+                breakable: true,
+                temporary: false,
+            },
+        ];
+
+        let text = format_reparo_conf(&config, &buildings);
+        assert!(text.contains("defense: 150"));
+        assert!(text.contains("tdg: 50-80"));
+        assert!(text.contains("iterations: 5000"));
+        assert!(text.contains("Atelier: 19/25"));
+        assert!(text.contains("Muraille: 25/25"));
+
+        let (parsed_config, mut parsed_buildings) = parse_reparo_modal_text(&text);
+        assert_eq!(parsed_config.defense, 150);
+        assert_eq!(parsed_config.tdg_min, 50);
+        assert_eq!(parsed_config.tdg_max, 80);
+        assert_eq!(parsed_config.iterations, 5000);
+
+        parsed_buildings.sort_by_key(|b| b.name.clone());
+        assert_eq!(parsed_buildings.len(), 2);
+        assert_eq!(parsed_buildings[0].name, "Atelier");
+        assert_eq!(parsed_buildings[0].life, 19);
+        assert_eq!(parsed_buildings[0].max_life, 25);
+        assert_eq!(parsed_buildings[1].name, "Muraille");
+        assert_eq!(parsed_buildings[1].life, 25);
+    }
+
+    #[test]
+    fn test_parse_reparo_modal_text_ignores_malformed_building_lines() {
+        let text = "defense: 100\ntdg: 10-20\niterations: 1000\n---\nGoodBuilding: 5/10\nBadLine without slash\nAnother: notanumber/10";
+        let (config, buildings) = parse_reparo_modal_text(text);
+        assert_eq!(config.defense, 100);
+        assert_eq!(buildings.len(), 1);
+        assert_eq!(buildings[0].name, "GoodBuilding");
+    }
+
+    #[test]
+    fn test_simulation_job_deserializes_without_new_fields() {
+        // Old-shape SQS payload from before job_type/buildings existed must still parse.
+        let old_json = serde_json::json!({
+            "token": "tok",
+            "application_id": "app",
+            "config": SimConfig::default(),
+            "citizens": []
+        });
+        let job: SimulationJob = serde_json::from_value(old_json).unwrap();
+        assert_eq!(job.job_type, JobType::Debordo);
+        assert!(job.buildings.is_empty());
     }
 
     #[test]

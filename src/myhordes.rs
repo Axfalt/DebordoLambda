@@ -22,6 +22,10 @@ pub struct MHCity {
     pub estimations: Option<MHEstimation>,
     pub chaos: Option<bool>,
     pub devast: Option<bool>,
+    /// Vrai si la ville actuelle est de type Pandemonium (le nom interne de la ville de
+    /// type "panda" dans le moteur MyHordes est historiquement exposé comme "hard").
+    #[serde(default)]
+    pub hard: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -32,6 +36,14 @@ pub struct MHDefense {
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHBuilding {
     pub name: String,
+    #[serde(default)]
+    pub life: i32,
+    #[serde(default, rename = "maxLife")]
+    pub max_life: i32,
+    #[serde(default)]
+    pub breakable: bool,
+    #[serde(default)]
+    pub temporary: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -85,7 +97,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,defense.fields(total),buildings.fields(name),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,hard,defense.fields(total),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -194,5 +206,58 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert_eq!(min_def, 12);
+    }
+
+    #[test]
+    fn test_parse_city_hard_field() {
+        let panda_city: MHCity = serde_json::from_value(serde_json::json!({
+            "buildings": [],
+            "hard": true
+        }))
+        .unwrap();
+        assert!(panda_city.hard);
+
+        let non_panda_city: MHCity = serde_json::from_value(serde_json::json!({
+            "buildings": [],
+            "hard": false
+        }))
+        .unwrap();
+        assert!(!non_panda_city.hard);
+    }
+
+    #[test]
+    fn test_parse_city_without_hard_field_defaults_false() {
+        // Backward compatibility: city payloads fetched via the old fields_param (no "hard").
+        let city: MHCity = serde_json::from_value(serde_json::json!({ "buildings": [] })).unwrap();
+        assert!(!city.hard);
+    }
+
+    #[test]
+    fn test_parse_building_life_fields() {
+        let json_data = serde_json::json!({
+            "name": "Atelier",
+            "life": 19,
+            "maxLife": 25,
+            "breakable": true,
+            "temporary": false
+        });
+        let building: MHBuilding = serde_json::from_value(json_data).unwrap();
+        assert_eq!(building.name, "Atelier");
+        assert_eq!(building.life, 19);
+        assert_eq!(building.max_life, 25);
+        assert!(building.breakable);
+        assert!(!building.temporary);
+    }
+
+    #[test]
+    fn test_parse_building_without_life_fields_defaults() {
+        // Backward compatibility: buildings fetched via the old debordo-only fields_param
+        // (name only) must still parse.
+        let json_data = serde_json::json!({ "name": "Réacteur chimique" });
+        let building: MHBuilding = serde_json::from_value(json_data).unwrap();
+        assert_eq!(building.name, "Réacteur chimique");
+        assert_eq!(building.life, 0);
+        assert_eq!(building.max_life, 0);
+        assert!(!building.breakable);
     }
 }
