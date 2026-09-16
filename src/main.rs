@@ -677,7 +677,7 @@ async fn handle_reparo_command(
                 "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
                 "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
                 "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
-                "iterations" => user_iterations = opt.value.as_i64().map(|v| v as i32),
+                "iterations" => user_iterations = opt.value.as_i64().map(|v| v.max(0) as i32),
                 "no_api" => no_api = opt.value.as_bool().unwrap_or(false),
                 _ => {}
             }
@@ -801,6 +801,9 @@ async fn handle_reparo_command(
     respond_with_buildings_modal(&config, &buildings)
 }
 
+/// Limite `max_length` du champ TEXT_INPUT du modal Discord de /reparo.
+const REPARO_MODAL_MAX_LENGTH: usize = 4000;
+
 /// Affiche le modal pré-rempli listant les bâtiments (vie/vie max) pour /reparo, permettant à
 /// l'utilisateur de relire/corriger son état de ville importé avant de lancer la simulation.
 fn respond_with_buildings_modal(
@@ -809,7 +812,10 @@ fn respond_with_buildings_modal(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Responding with reparo buildings edit modal");
 
-    let buildings_str = format_reparo_conf(config, buildings);
+    let buildings_str = debordo_lib::config::truncate_for_discord_modal(
+        &format_reparo_conf(config, buildings),
+        REPARO_MODAL_MAX_LENGTH,
+    );
 
     let response = DiscordResponse {
         response_type: response_types::MODAL,
@@ -826,7 +832,7 @@ fn respond_with_buildings_modal(
                             "label": "Configuration et bâtiments",
                             "style": 2, // PARAGRAPH
                             "min_length": 1,
-                            "max_length": 4000,
+                            "max_length": REPARO_MODAL_MAX_LENGTH,
                             "value": buildings_str,
                             "required": true
                         }

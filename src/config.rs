@@ -220,6 +220,34 @@ pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuildi
     lines.join("\n")
 }
 
+/// Tronque un texte à `max_length` caractères pour respecter la limite `max_length` d'un champ
+/// TEXT_INPUT de modal Discord, en coupant uniquement sur des frontières de ligne (pour ne pas
+/// couper une entrée `Nom: vie/vie_max` au milieu) et en ajoutant un avertissement visible.
+pub fn truncate_for_discord_modal(text: &str, max_length: usize) -> String {
+    if text.chars().count() <= max_length {
+        return text.to_string();
+    }
+
+    let notice = "\n… (liste tronquée, trop de bâtiments pour le modal)";
+    let budget = max_length.saturating_sub(notice.chars().count());
+
+    let mut truncated = String::new();
+    for line in text.lines() {
+        let candidate_len = truncated.chars().count()
+            + line.chars().count()
+            + usize::from(!truncated.is_empty());
+        if candidate_len > budget {
+            break;
+        }
+        if !truncated.is_empty() {
+            truncated.push('\n');
+        }
+        truncated.push_str(line);
+    }
+    truncated.push_str(notice);
+    truncated
+}
+
 /// Extrait la configuration SimConfig et la liste des bâtiments à partir du texte soumis via
 /// le modal Discord de /reparo.
 pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBuilding>) {
@@ -249,13 +277,17 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
                     if let (Ok(life), Ok(max_life)) =
                         (life_str.trim().parse::<i32>(), max_str.trim().parse::<i32>())
                     {
-                        buildings.push(reparo_lib::SimBuilding {
-                            name: name.to_string(),
-                            life,
-                            max_life,
-                            breakable: true,
-                            temporary: false,
-                        });
+                        // Reject negative/zero values: they would make reparo_gen produce a
+                        // negative repair total instead of a valid simulation input.
+                        if life >= 0 && max_life > 0 {
+                            buildings.push(reparo_lib::SimBuilding {
+                                name: name.to_string(),
+                                life,
+                                max_life,
+                                breakable: true,
+                                temporary: false,
+                            });
+                        }
                     }
                 }
             }
@@ -266,7 +298,7 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
             let key = line[..pos].trim().to_lowercase();
             let val = line[pos + 1..].trim();
             match key.as_str() {
-                "defense" => {
+                "defense" | "défense" => {
                     if let Ok(v) = val.parse::<i32>() {
                         config.defense = v;
                     }
@@ -281,7 +313,7 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
                         }
                     }
                 }
-                "iterations" => {
+                "iterations" | "itérations" => {
                     if let Ok(v) = val.parse::<u32>() {
                         config.iterations = v.min(MAX_ITERATIONS);
                     }
@@ -605,6 +637,48 @@ mod tests {
         assert_eq!(config.defense, 100);
         assert_eq!(buildings.len(), 1);
         assert_eq!(buildings[0].name, "GoodBuilding");
+    }
+
+    #[test]
+    fn test_parse_reparo_modal_text_rejects_negative_or_zero_building_values() {
+        let text = "defense: 100\ntdg: 10-20\niterations: 1000\n---\nNegativeLife: -5/10\nNegativeMax: 10/-5\nZeroMax: 5/0\nValid: 5/10";
+        let (_, buildings) = parse_reparo_modal_text(text);
+        assert_eq!(buildings.len(), 1);
+        assert_eq!(buildings[0].name, "Valid");
+    }
+
+    #[test]
+    fn test_truncate_for_discord_modal_leaves_short_text_untouched() {
+        let text = "defense: 100\ntdg: 10-20\n---\nMuraille: 25/25";
+        assert_eq!(truncate_for_discord_modal(text, 4000), text);
+    }
+
+    #[test]
+    fn test_truncate_for_discord_modal_stays_under_limit_and_keeps_whole_lines() {
+        let mut lines = vec!["defense: 100".to_string(), "---".to_string()];
+        for i in 0..500 {
+            lines.push(format!("Bâtiment numéro {i}: 25/25"));
+        }
+        let text = lines.join("\n");
+        assert!(text.chars().count() > 4000);
+
+        let truncated = truncate_for_discord_modal(&text, 4000);
+        assert!(truncated.chars().count() <= 4000);
+        assert!(truncated.contains("tronquée"));
+        // Every kept building line must be a complete, untruncated original line.
+        for line in truncated.lines() {
+            if line.starts_with("Bâtiment numéro") {
+                assert!(text.contains(line));
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_reparo_modal_text_accepts_french_key_aliases() {
+        let text = "défense: 150\ntdg: 10-20\nitérations: 500\n---";
+        let (config, _) = parse_reparo_modal_text(text);
+        assert_eq!(config.defense, 150);
+        assert_eq!(config.iterations, 500);
     }
 
     #[test]
