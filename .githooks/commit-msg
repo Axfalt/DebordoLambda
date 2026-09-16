@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Rejects commits that credit an AI assistant as a (co-)author in the commit message.
+# Enable with: git config core.hooksPath .githooks
+
+commit_msg_file="$1"
+
+if grep -qiE 'co-authored-by:.*(claude|anthropic|copilot|chatgpt|openai|gpt-[0-9])' "$commit_msg_file" \
+    || grep -qiE 'noreply@anthropic\.com' "$commit_msg_file"; then
+    echo "error: commit message credits an AI assistant as co-author." >&2
+    echo "Remove any 'Co-Authored-By: <AI assistant> ...' trailer before committing." >&2
+    exit 1
+fi
