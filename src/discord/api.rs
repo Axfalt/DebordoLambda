@@ -28,27 +28,58 @@ fn build_followup_body(content: &str) -> serde_json::Value {
     }
 }
 
+/// URL du webhook de réponse différée ("@original"), partagée par tous les envois de followup.
+fn followup_message_url(application_id: &str, token: &str) -> String {
+    format!(
+        "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
+        application_id, token
+    )
+}
+
+async fn patch_followup(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<(), reqwest::Error> {
+    client
+        .patch(&followup_message_url(application_id, token))
+        .json(body)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    Ok(())
+}
+
 pub async fn send_followup(
     client: &reqwest::Client,
     application_id: &str,
     token: &str,
     content: &str,
 ) -> Result<(), reqwest::Error> {
-    let url = format!(
-        "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
-        application_id, token
-    );
-
     let body = build_followup_body(content);
+    patch_followup(client, application_id, token, &body).await
+}
 
-    client
-        .patch(&url)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    Ok(())
+/// Envoie une réponse différée contenant une image (embed) en plus du texte, utilisé par la
+/// commande /reparo pour joindre le graphique QuickChart.
+pub async fn send_followup_with_image(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+    image_url: &str,
+) -> Result<(), reqwest::Error> {
+    let body = serde_json::json!({
+        "content": content,
+        "embeds": [
+            {
+                "image": { "url": image_url }
+            }
+        ]
+    });
+    patch_followup(client, application_id, token, &body).await
 }
 
 pub async fn create_followup_message(

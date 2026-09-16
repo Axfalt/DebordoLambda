@@ -1,3 +1,6 @@
+[workspace]
+members = ["reparo_lib"]
+
 [package]
 name = "DebordoLambda"
 version = "0.2.0"
@@ -20,6 +23,7 @@ rand = "0.10.2"
 rand_mt = "6.0.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
+reparo_lib = { path = "reparo_lib" }
 
 # AWS Lambda
 lambda_runtime = "1.3"
