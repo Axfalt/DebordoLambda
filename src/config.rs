@@ -247,29 +247,6 @@ pub fn format_reparo_results(
     output
 }
 
-/// Construit le contenu texte (une entrée `Nom: vie/vie_max` par ligne) de la pièce jointe
-/// `buildings.txt` accompagnant le message de résultats /reparo : jamais affichée par défaut
-/// (pièce jointe repliée, à ouvrir sur clic) et sans limite de longueur pratique, contrairement
-/// à un bloc intégré au contenu du message. Relue par le bouton "Voir la configuration" pour
-/// pré-remplir le modal — voir `parse_reparo_buildings_attachment`.
-pub fn format_reparo_buildings_attachment(buildings: &[reparo_lib::SimBuilding]) -> String {
-    let mut buildings_sorted = buildings.to_vec();
-    buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
-
-    buildings_sorted
-        .iter()
-        .map(|b| format!("{}: {}/{}", b.name, b.life, b.max_life))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Extrait la liste des bâtiments à partir du contenu texte de la pièce jointe `buildings.txt`
-/// (voir `format_reparo_buildings_attachment`), pour le bouton "Voir la configuration" de
-/// /reparo.
-pub fn parse_reparo_buildings_attachment(text: &str) -> Vec<reparo_lib::SimBuilding> {
-    text.lines().filter_map(parse_building_line).collect()
-}
-
 pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuilding]) -> String {
     let mut buildings_sorted = buildings.to_vec();
     buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
@@ -318,9 +295,7 @@ pub fn truncate_for_discord(text: &str, max_length: usize, notice: &str) -> Stri
 
 /// Parse une ligne `Nom: vie/vie_max` en `SimBuilding`, en rejetant les valeurs négatives ou
 /// nulles (elles feraient produire à `reparo_gen` un total de dégâts négatif au lieu d'une
-/// entrée de simulation valide). Partagée par `parse_reparo_modal_text` (texte du modal) et
-/// `parse_reparo_buildings_attachment` (pièce jointe `buildings.txt`), qui utilisent toutes deux
-/// ce même format de ligne.
+/// entrée de simulation valide). Utilisée par `parse_reparo_modal_text` pour le texte du modal.
 fn parse_building_line(line: &str) -> Option<reparo_lib::SimBuilding> {
     let pos = line.rfind(':')?;
     let name = line[..pos].trim();
@@ -403,7 +378,8 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
 /// Extrait la configuration à partir du texte d'un message de résultats /reparo (produit par
 /// `format_reparo_results`), pour le bouton "Voir la configuration" — miroir de
 /// `parse_result_message_content` côté /debordo. La liste des bâtiments n'est pas dans ce texte
-/// (voir `parse_reparo_buildings_attachment`, relue depuis la pièce jointe `buildings.txt`).
+/// et n'est pas récupérable depuis le bouton : le modal rouvert utilise
+/// `reparo_lib::default_buildings()` (voir `handle_component_interaction`).
 pub fn parse_reparo_result_content(content: &str) -> SimConfig {
     let mut config = SimConfig {
         iterations: 10000,
@@ -699,9 +675,9 @@ mod tests {
         assert!(output.contains("min 2"));
         assert!(output.contains("max 40"));
         assert!(output.contains("1000 simulations en 42ms"));
-        // format_reparo_results never embeds the building list itself — it's posted as a
-        // separate file attachment (see worker.rs / format_reparo_buildings_attachment), not
-        // shown inline in the message.
+        // format_reparo_results never embeds the building list — /reparo's "Voir la
+        // configuration" button no longer round-trips it at all (see
+        // handle_component_interaction: it falls back to default_buildings()).
         assert!(!output.contains("||"));
     }
 
@@ -717,46 +693,6 @@ mod tests {
         let output = format_reparo_results(&config, &[], 5, 0, &[]);
         assert!(output.contains("Aucun dégât attendu"));
         assert!(!output.contains("||"));
-    }
-
-    #[test]
-    fn test_format_and_parse_reparo_buildings_attachment_roundtrip() {
-        let buildings = vec![
-            reparo_lib::SimBuilding {
-                name: "Muraille".to_string(),
-                life: 6,
-                max_life: 25,
-                breakable: true,
-                temporary: false,
-            },
-            reparo_lib::SimBuilding {
-                name: "Atelier".to_string(),
-                life: 23,
-                max_life: 25,
-                breakable: true,
-                temporary: false,
-            },
-        ];
-        let attachment_text = format_reparo_buildings_attachment(&buildings);
-        assert_eq!(attachment_text, "Atelier: 23/25\nMuraille: 6/25");
-        assert_eq!(format_reparo_buildings_attachment(&[]), "");
-
-        let mut parsed = parse_reparo_buildings_attachment(&attachment_text);
-        parsed.sort_by_key(|b| b.name.clone());
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].name, "Atelier");
-        assert_eq!(parsed[0].life, 23);
-        assert_eq!(parsed[0].max_life, 25);
-        assert_eq!(parsed[1].name, "Muraille");
-        assert_eq!(parsed[1].life, 6);
-    }
-
-    #[test]
-    fn test_parse_reparo_buildings_attachment_ignores_malformed_lines() {
-        let text = "GoodBuilding: 5/10\nBadLine without slash\nNegative: -5/10";
-        let parsed = parse_reparo_buildings_attachment(text);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].name, "GoodBuilding");
     }
 
     #[test]
@@ -780,7 +716,7 @@ mod tests {
             temporary: false,
         }];
         // Matches how worker.rs assembles the real message: results text, then the chart link.
-        // The buildings list is never part of this text (it's the separate attachment).
+        // The building list is never part of this text at all.
         let mut content = format_reparo_results(&config, &results, 42, 1000, &buildings);
         content.push_str("\n\n🖼️ **Graphique**: https://quickchart.io/chart/render/example");
 
