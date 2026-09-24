@@ -104,6 +104,20 @@ pub fn damage_pool(attack: i32, total_defense: i32, watch_def: i32) -> i32 {
     ((attack - blocked_by_watch) as f64 * 0.2).round() as i32
 }
 
+fn max_real_damage(life: i32, max_life: i32) -> i32 {
+    if max_life <= 0 {
+        return 0;
+    }
+    min(life.max(0), (max_life as f64 * 0.7).ceil() as i32)
+}
+
+pub fn damage_capacity(buildings: &[SimBuilding]) -> i32 {
+    buildings
+        .iter()
+        .map(|b| max_real_damage(b.life, b.max_life))
+        .sum()
+}
+
 fn reparo_gen(
     damage_inflicted: i32,
     buildings: &[(i32, i32)],
@@ -131,7 +145,7 @@ fn reparo_gen(
         let damages = min(life, raw_damage);
         let damages = min(damages, damage_counter);
 
-        let real_damages = min(damages, (max_life as f64 * 0.7).ceil() as i32);
+        let real_damages = min(damages, max_real_damage(life, max_life));
         total_damaged_hp += real_damages;
         damage_counter -= damages;
     }
@@ -349,6 +363,30 @@ mod tests {
     }
 
     #[test]
+    fn test_damage_capacity_caps_each_building_at_70_percent_and_current_life() {
+        let buildings = vec![
+            building("Intact", 25, 25),         // ceil(17.5) = 18
+            building("Abîmé", 6, 25),           // current life 6 < 18
+            building("Robinetterie", 130, 130), // 91
+            building("Sans PV", 0, 0),          // not a target
+        ];
+        assert_eq!(damage_capacity(&buildings), 18 + 6 + 91);
+    }
+
+    #[test]
+    fn test_reparo_gen_huge_pool_reaches_exactly_damage_capacity() {
+        // Every building absorbs its cap only when each draw is >= that cap; with 1-HP buildings
+        // (mt_rand(1, 1) = 1, cap ceil(0.7) = 1) this is deterministic.
+        let bs: Vec<SimBuilding> = (0..20).map(|i| building(&format!("B{i}"), 1, 1)).collect();
+        let mut rng = Mt64::new(1);
+        let mut scratch = Vec::new();
+        assert_eq!(
+            reparo_gen(1_000, &life_pairs(&bs), &mut rng, &mut scratch),
+            damage_capacity(&bs)
+        );
+    }
+
+    #[test]
     fn test_reparo_gen_zero_pool_gives_zero_damage() {
         let mut rng = Mt64::new(1);
         let buildings = life_pairs(&default_buildings());
@@ -363,10 +401,7 @@ mod tests {
         let default_bs = default_buildings();
         let buildings = life_pairs(&default_bs);
         let mut scratch = Vec::new();
-        let max_tank = default_bs
-            .iter()
-            .map(|b| min(b.life, (b.max_life as f64 * 0.7).ceil() as i32))
-            .sum::<i32>();
+        let max_tank = damage_capacity(&default_bs);
 
         for _ in 0..50 {
             let damage = reparo_gen(100_000, &buildings, &mut rng, &mut scratch);

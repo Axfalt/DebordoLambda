@@ -244,6 +244,11 @@ pub fn format_reparo_results(
     }
 
     output.push_str(&format!(
+        "🧱 **Capacité d'absorption des bâtiments: {} PV**\n-# Dégâts maximum encaissables en une nuit : au-delà, le surplus de dégâts est perdu.\n\n",
+        reparo_lib::damage_capacity(buildings)
+    ));
+
+    output.push_str(&format!(
         "-# ⏱️ {} simulations en {}ms",
         total_runs, elapsed_ms
     ));
@@ -719,6 +724,8 @@ mod tests {
         assert!(output.contains("min 2"));
         assert!(output.contains("max 40"));
         assert!(output.contains("1000 simulations en 42ms"));
+        // 60 buildings at 10/10: each absorbs at most ceil(10 * 0.7) = 7.
+        assert!(output.contains("Capacité d'absorption des bâtiments: 420 PV"));
         assert!(!output.contains("||"));
     }
 
@@ -733,6 +740,7 @@ mod tests {
         };
         let output = format_reparo_results(&config, &[], 5, 0, &[]);
         assert!(output.contains("Aucun dégât attendu"));
+        assert!(output.contains("Capacité d'absorption des bâtiments: 0 PV"));
         assert!(!output.contains("||"));
     }
 
