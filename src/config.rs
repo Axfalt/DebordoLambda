@@ -217,7 +217,7 @@ pub fn format_reparo_results(
     output.push_str("## 🔧 Résultats de la simulation de réparation\n\n");
     output.push_str("**Paramètres:**\n");
     output.push_str(&format!("• **🛡️ Défense**: {}\n", config.defense));
-    output.push_str(&format!("• **👁️ Veille**: {}\n", config.veille));
+    output.push_str(&format!("• **⚔️ Veille**: {}\n", config.veille));
     output.push_str(&format!(
         "• **🔭 TDG**: {} - {}\n",
         config.tdg_min, config.tdg_max
