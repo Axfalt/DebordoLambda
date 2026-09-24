@@ -163,6 +163,42 @@ commands = [
         ]
     },
     {
+        "name": "reparo",
+        "description": "Estime les dégâts de réparation nécessaires après une attaque",
+        "options": [
+            {
+                "name": "defense",
+                "description": "Valeur de défense de la garde",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "tdg_min",
+                "description": "Estimation minimale de la TDG",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "tdg_max",
+                "description": "Estimation maximale de la TDG",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "iterations",
+                "description": "Nombre d'itérations (défaut: 10000)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "no_api",
+                "description": "Ignorer la clé API enregistrée et utiliser les valeurs manuelles/par défaut (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            }
+        ]
+    },
+    {
         "name": "register-key",
         "description": "Enregistre votre ExternalID MyHordes de manière sécurisée",
         "options": []

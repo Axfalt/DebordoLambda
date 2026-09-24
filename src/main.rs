@@ -1,5 +1,3 @@
-//! DebordoLambda - Commande Discord slash pour simulations de débordements
-
 use aws_lambda_events::apigw::{ApiGatewayV2httpRequest, ApiGatewayV2httpResponse};
 use aws_lambda_events::http::HeaderMap;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
@@ -8,7 +6,9 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    format_conf, parse_result_message_content, SimConfig, SimulationCitizen, SimulationJob,
+    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
+    parse_result_message_content, JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, SimConfig,
+    SimulationCitizen, SimulationJob,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -16,11 +16,6 @@ use debordo_lib::discord::{
 };
 use debordo_lib::{database, myhordes};
 
-// ============================================================================
-// LAMBDA HANDLER
-// ============================================================================
-
-/// Handler principal pour les requêtes Lambda via API Gateway.
 async fn handler(
     event: LambdaEvent<ApiGatewayV2httpRequest>,
     sqs_client: aws_sdk_sqs::Client,
@@ -33,7 +28,6 @@ async fn handler(
     let request = event.payload;
     let body = request.body.unwrap_or_default();
 
-    // Récupérer les headers pour la vérification de signature
     let headers = &request.headers;
     let signature = headers
         .get("x-signature-ed25519")
@@ -44,7 +38,6 @@ async fn handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Vérifier la signature Discord (skip en mode test si la variable d'env est définie)
     let skip_signature = std::env::var("SKIP_SIGNATURE_CHECK")
         .map(|v| v == "true")
         .unwrap_or(false);
@@ -54,7 +47,6 @@ async fn handler(
         return Ok(build_response(401, "Invalid signature"));
     }
 
-    // Parser l'interaction Discord
     let interaction: DiscordInteraction = match serde_json::from_str(&body) {
         Ok(i) => i,
         Err(e) => {
@@ -63,7 +55,6 @@ async fn handler(
         }
     };
 
-    // Router selon le type d'interaction
     match interaction.interaction_type {
         interaction_types::PING => handle_ping(),
         interaction_types::APPLICATION_COMMAND => {
@@ -75,6 +66,8 @@ async fn handler(
 
             if cmd_name == "register-key" {
                 handle_register_key_command()
+            } else if cmd_name == "reparo" {
+                handle_reparo_command(interaction, &dynamodb_client, &ssm_client, http_client).await
             } else {
                 handle_command(
                     interaction,
@@ -102,7 +95,6 @@ async fn handler(
     }
 }
 
-/// Gère le clic sur un bouton Discord.
 fn handle_component_interaction(
     interaction: DiscordInteraction,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
@@ -123,6 +115,18 @@ fn handle_component_interaction(
         return respond_with_defenses_modal(&config, false, &citizens);
     }
 
+    if custom_id == "vconf_reparo" {
+        let msg_content = interaction
+            .message
+            .as_ref()
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or_default();
+        let config = parse_reparo_result_content(msg_content);
+        let buildings = reparo_lib::default_buildings();
+
+        return respond_with_buildings_modal(&config, &buildings);
+    }
+
     let response = DiscordResponse {
         response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
         data: Some(serde_json::json!({
@@ -133,7 +137,6 @@ fn handle_component_interaction(
     Ok(build_json_response(200, &response))
 }
 
-/// Répond au PING de validation Discord.
 fn handle_ping() -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Received PING, responding with PONG");
     let response = DiscordResponse {
@@ -143,7 +146,6 @@ fn handle_ping() -> Result<ApiGatewayV2httpResponse, Error> {
     Ok(build_json_response(200, &response))
 }
 
-/// Affiche le formulaire modal pour enregistrer la clé API.
 fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Handling /register-key command, responding with Modal");
     let response = DiscordResponse {
@@ -173,7 +175,6 @@ fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
     Ok(build_json_response(200, &response))
 }
 
-/// Gère la soumission du formulaire modal et stocke la clé chiffrée.
 async fn handle_modal_submit(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
@@ -189,6 +190,10 @@ async fn handle_modal_submit(
 
     if custom_id.starts_with("dm:") {
         return handle_debordo_modal_submit(interaction, &custom_id, sqs_client, queue_url).await;
+    }
+
+    if custom_id == "rm:reparo" {
+        return handle_reparo_modal_submit(interaction, sqs_client, queue_url).await;
     }
 
     if custom_id != "register_key_modal" {
@@ -251,7 +256,6 @@ async fn handle_modal_submit(
     }
 }
 
-/// Envoie un job de simulation sur SQS et répond immédiatement avec une réponse différée.
 async fn handle_command(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
@@ -348,12 +352,12 @@ async fn handle_command(
             application_id,
             config,
             citizens,
+            ..Default::default()
         };
 
         return finalize_and_dispatch(job, sqs_client, queue_url, false).await;
     }
-
-    // 3. Essayer de récupérer la clé de l'utilisateur
+    
     let user_id = interaction.user_id().unwrap_or("");
     let user_key = if !user_id.is_empty() {
         database::get_user_key(user_id, dynamodb_client, ssm_client)
@@ -365,7 +369,6 @@ async fn handle_command(
 
     match user_key {
         None => {
-            // Utilisateur non enregistré: valider les paramètres manquants et renvoyer une erreur s'ils n'ont pas de défaut
             if user_defense.is_none()
                 || user_tdg_min.is_none()
                 || user_tdg_max.is_none()
@@ -412,12 +415,12 @@ async fn handle_command(
                 application_id,
                 config,
                 citizens,
+                ..Default::default()
             };
 
             finalize_and_dispatch(job, sqs_client, queue_url, false).await
         }
         Some(key) => {
-            // Utilisateur enregistré: appeler l'API de MyHordes
             match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
                 Ok(mh_data) => {
                     if let Some(map) = mh_data.map {
@@ -514,7 +517,6 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
-                        // Si après la fusion, des paramètres critiques restent à 0, renvoyer une erreur
                         if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
                             let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
                             let response = DiscordResponse {
@@ -562,11 +564,11 @@ async fn handle_command(
                             application_id,
                             config,
                             citizens,
+                            ..Default::default()
                         };
 
                         finalize_and_dispatch(job, sqs_client, queue_url, true).await
                     } else {
-                        // Pas de ville active (map est None)
                         let error_msg = "Erreur MyHordes : Vous ne semblez pas être actuellement incarné dans une ville active. Veuillez vous incarner ou saisir les paramètres manuellement.";
                         let response = DiscordResponse {
                             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
@@ -580,8 +582,6 @@ async fn handle_command(
                 }
                 Err(e) => {
                     error!("MyHordes API call failed: {}", e);
-
-                    // Si l'API échoue, on ne peut continuer que si l'utilisateur a tout fourni manuellement
                     if user_defense.is_none()
                         || user_tdg_min.is_none()
                         || user_tdg_max.is_none()
@@ -631,6 +631,7 @@ async fn handle_command(
                         application_id,
                         config,
                         citizens,
+                        ..Default::default()
                     };
 
                     finalize_and_dispatch(job, sqs_client, queue_url, false).await
@@ -640,7 +641,248 @@ async fn handle_command(
     }
 }
 
-/// Dispatcher helper
+async fn handle_reparo_command(
+    interaction: DiscordInteraction,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
+    ssm_client: &aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    let mut user_defense: Option<i32> = None;
+    let mut user_tdg_min: Option<i32> = None;
+    let mut user_tdg_max: Option<i32> = None;
+    let mut user_iterations: Option<i32> = None;
+    let mut no_api = false;
+
+    let options = interaction.data.as_ref().and_then(|d| d.options.as_ref());
+    if let Some(opts) = options {
+        for opt in opts {
+            match opt.name.as_str() {
+                "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
+                "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
+                "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
+                "iterations" => user_iterations = opt.value.as_i64().map(|v| v.max(0) as i32),
+                "no_api" => no_api = opt.value.as_bool().unwrap_or(false),
+                _ => {}
+            }
+        }
+    }
+
+    let iterations = (user_iterations.unwrap_or(10000) as u32).min(MAX_ITERATIONS);
+
+    let user_id = interaction.user_id().unwrap_or("");
+    let user_key = if no_api || user_id.is_empty() {
+        None
+    } else {
+        database::get_user_key(user_id, dynamodb_client, ssm_client)
+            .await
+            .unwrap_or(None)
+    };
+    
+    let manual_fallback = || {
+        (
+            user_defense.unwrap_or(0),
+            user_tdg_min.unwrap_or(0),
+            user_tdg_max.unwrap_or(0),
+            reparo_lib::default_buildings(),
+        )
+    };
+
+    let (defense, tdg_min, tdg_max, buildings) = match user_key {
+        Some(key) => match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
+            Ok(mh_data) => match mh_data.map {
+                Some(map) => {
+                    let is_panda = map.city.as_ref().map(|c| c.hard).unwrap_or(false);
+                    if !is_panda {
+                        info!(
+                            "User's current town is not Pandemonium; falling back to manual /reparo parameters"
+                        );
+                        manual_fallback()
+                    } else {
+                        let api_defense = map
+                            .city
+                            .as_ref()
+                            .and_then(|c| c.defense.as_ref())
+                            .map(|d| d.total)
+                            .unwrap_or(0);
+                        let api_tdg_min = map
+                            .city
+                            .as_ref()
+                            .and_then(|c| c.estimations.as_ref())
+                            .map(|e| e.min)
+                            .unwrap_or(0);
+                        let api_tdg_max = map
+                            .city
+                            .as_ref()
+                            .and_then(|c| c.estimations.as_ref())
+                            .map(|e| e.max)
+                            .unwrap_or(0);
+                        let api_buildings: Vec<reparo_lib::SimBuilding> = map
+                            .city
+                            .as_ref()
+                            .map(|c| {
+                                c.buildings
+                                    .iter()
+                                    .filter(|b| b.breakable && !b.temporary)
+                                    .map(|b| reparo_lib::SimBuilding {
+                                        name: b.name.clone(),
+                                        life: b.life,
+                                        max_life: b.max_life,
+                                        breakable: b.breakable,
+                                        temporary: b.temporary,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let buildings = if api_buildings.is_empty() {
+                            reparo_lib::default_buildings()
+                        } else {
+                            api_buildings
+                        };
+
+                        (
+                            user_defense.unwrap_or(api_defense),
+                            user_tdg_min.unwrap_or(api_tdg_min),
+                            user_tdg_max.unwrap_or(api_tdg_max),
+                            buildings,
+                        )
+                    }
+                }
+                None => manual_fallback(),
+            },
+            Err(e) => {
+                error!("MyHordes API call failed for /reparo: {}", e);
+                manual_fallback()
+            }
+        },
+        None => manual_fallback(),
+    };
+
+    if defense <= 0 || tdg_min <= 0 || tdg_max < tdg_min {
+        let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `defense`, `tdg_min` et `tdg_max`.";
+        let response = DiscordResponse {
+            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+            data: Some(serde_json::json!({
+                "content": error_msg,
+                "flags": 64
+            })),
+        };
+        return Ok(build_json_response(200, &response));
+    }
+
+    let config = SimConfig {
+        defense,
+        tdg_min,
+        tdg_max,
+        iterations,
+        ..Default::default()
+    };
+
+    respond_with_buildings_modal(&config, &buildings)
+}
+
+/// Limite `max_length` du champ TEXT_INPUT du modal Discord de /reparo.
+const REPARO_MODAL_MAX_LENGTH: usize = 4000;
+
+fn respond_with_buildings_modal(
+    config: &SimConfig,
+    buildings: &[reparo_lib::SimBuilding],
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Responding with reparo buildings edit modal");
+
+    let buildings_str = debordo_lib::config::truncate_for_discord(
+        &format_reparo_conf(config, buildings),
+        REPARO_MODAL_MAX_LENGTH,
+        "\n… (liste tronquée, trop de bâtiments pour le modal)",
+    );
+
+    let response = DiscordResponse {
+        response_type: response_types::MODAL,
+        data: Some(serde_json::json!({
+            "title": "Configuration & Bâtiments",
+            "custom_id": "rm:reparo",
+            "components": [
+                {
+                    "type": 1, // ACTION_ROW
+                    "components": [
+                        {
+                            "type": 4, // TEXT_INPUT
+                            "custom_id": "buildings_input",
+                            "label": "Configuration et bâtiments",
+                            "style": 2, // PARAGRAPH
+                            "min_length": 1,
+                            "max_length": REPARO_MODAL_MAX_LENGTH,
+                            "value": buildings_str,
+                            "required": true
+                        }
+                    ]
+                }
+            ]
+        })),
+    };
+
+    Ok(build_json_response(200, &response))
+}
+
+async fn handle_reparo_modal_submit(
+    interaction: DiscordInteraction,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Handling reparo configuration modal submission");
+
+    let token = interaction.token.clone().unwrap_or_default();
+    let application_id = interaction.application_id.clone().unwrap_or_default();
+
+    let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
+    let (config, buildings) = parse_reparo_modal_text(buildings_val);
+
+    if config.defense <= 0
+        || config.tdg_min <= 0
+        || config.tdg_max < config.tdg_min
+        || config.iterations == 0
+        || buildings.is_empty()
+    {
+        let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `tdg` (min-max), `iterations` (doit être > 0) et la liste des bâtiments (format `Nom: vie/vie_max`).";
+        let response = DiscordResponse {
+            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+            data: Some(serde_json::json!({
+                "content": error_msg,
+                "flags": 64
+            })),
+        };
+        return Ok(build_json_response(200, &response));
+    }
+
+    let tdg_range_width = (config.tdg_max - config.tdg_min + 1) as u64;
+    let total_work = config.iterations as u64 * tdg_range_width;
+    if total_work > MAX_REPARO_TOTAL_WORK {
+        let error_msg = format!(
+            "Erreur : itérations ({}) × plage TDG ({}-{}, largeur {}) dépasse la limite autorisée. Réduisez le nombre d'itérations ou resserrez la plage TDG.",
+            config.iterations, config.tdg_min, config.tdg_max, tdg_range_width
+        );
+        let response = DiscordResponse {
+            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+            data: Some(serde_json::json!({
+                "content": error_msg,
+                "flags": 64
+            })),
+        };
+        return Ok(build_json_response(200, &response));
+    }
+
+    let job = SimulationJob {
+        token,
+        application_id,
+        config,
+        citizens: Vec::new(),
+        job_type: JobType::Reparation,
+        buildings,
+    };
+
+    enqueue_simulation(&job, sqs_client, queue_url).await
+}
+
 async fn finalize_and_dispatch(
     job: SimulationJob,
     sqs_client: &aws_sdk_sqs::Client,
@@ -655,7 +897,6 @@ async fn finalize_and_dispatch(
     enqueue_simulation(&job, sqs_client, queue_url).await
 }
 
-/// Helper pour formater et enfiler le job de simulation SQS.
 async fn enqueue_simulation(
     job: &SimulationJob,
     sqs_client: &aws_sdk_sqs::Client,
@@ -742,10 +983,8 @@ fn resolve_citizens(
             }
         }
     } else {
-        // Mode Manuel: Build based on custom map first, then fill remainder
         let mut added_names = std::collections::HashSet::new();
-
-        // 1. Add explicitly nominated citizens from defenses string
+        
         if let Some(s) = custom_defenses_str {
             for part in s.split([',', '\n', '\r']) {
                 let part = part.trim();
@@ -769,8 +1008,7 @@ fn resolve_citizens(
                 }
             }
         }
-
-        // 2. Fill the remainder up to nb_hab
+        
         let mut count = 1;
         while citizens.len() < nb_hab as usize {
             let gen_name = format!("Citoyen {}", count);
@@ -794,7 +1032,6 @@ fn resolve_citizens(
 // RESPONSE BUILDERS
 // ============================================================================
 
-/// Construit une réponse HTTP simple avec du texte.
 fn build_response(status_code: i64, body: &str) -> ApiGatewayV2httpResponse {
     let mut r = ApiGatewayV2httpResponse::default();
     r.status_code = status_code;
@@ -802,7 +1039,6 @@ fn build_response(status_code: i64, body: &str) -> ApiGatewayV2httpResponse {
     r
 }
 
-/// Construit une réponse HTTP JSON.
 fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayV2httpResponse {
     let json_body = serde_json::to_string(body).unwrap_or_default();
     let mut headers = HeaderMap::new();
@@ -1009,6 +1245,7 @@ async fn handle_debordo_modal_submit(
         application_id,
         config,
         citizens,
+        ..Default::default()
     };
 
     enqueue_simulation(&job, sqs_client, queue_url).await
