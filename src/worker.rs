@@ -7,7 +7,7 @@ use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{JobType, SimulationJob, format_reparo_results, format_results};
-use debordo_lib::discord::api::{send_followup, send_followup_with_image};
+use debordo_lib::discord::api::send_followup;
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
@@ -125,22 +125,18 @@ async fn process_reparo_job(
     )
     .await;
 
-    let (content, image_url) = match result {
+    let content = match result {
         Err(_elapsed) => {
             error!("Reparo simulation timed out after {}s", SIMULATION_TIMEOUT_SECS);
-            (
-                "⏱️ La simulation a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string(),
-                None,
-            )
+            "⏱️ La simulation a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string()
         }
         Ok(Err(e)) => {
             error!("Reparo simulation panicked: {}", e);
-            ("❌ La simulation a échoué. Veuillez réessayer.".to_string(), None)
+            "❌ La simulation a échoué. Veuillez réessayer.".to_string()
         }
-        Ok(Ok(results)) if results.is_empty() => (
-            "❌ Aucun résultat : vérifiez que tdg_min <= tdg_max.".to_string(),
-            None,
-        ),
+        Ok(Ok(results)) if results.is_empty() => {
+            "❌ Aucun résultat : vérifiez que tdg_min <= tdg_max.".to_string()
+        }
         Ok(Ok(results)) => {
             let ran_count = results.iter().filter(|(attack, _)| *attack > watch_def).count() as u64;
             let total_runs = ran_count * iterations as u64;
@@ -153,43 +149,26 @@ async fn process_reparo_job(
                 buildings_count,
             );
 
+            // Posted as a plain link rather than a constructed embed: Discord still unfurls it
+            // into an inline preview when it can, but the link itself always works even if that
+            // unfurl doesn't happen — unlike an embed image, which shows an empty box with no
+            // way to open the chart directly if Discord fails to fetch it.
             let chart_config = build_chart_config(&results);
-            let image_url = match create_chart_url(http_client, &chart_config).await {
+            match create_chart_url(http_client, &chart_config).await {
                 Ok(url) => {
-                    info!("QuickChart image URL: {}", url);
-                    Some(url)
+                    content.push_str(&format!("\n\n🖼️ **Graphique**: {url}"));
                 }
                 Err(e) => {
                     error!("Failed to create QuickChart chart: {}", e);
                     content.push_str("\n-# ⚠️ Graphique indisponible.");
-                    None
                 }
-            };
+            }
 
-            (content, image_url)
+            content
         }
     };
 
-    // A chart failure or an unexpected Discord rejection of the image embed must never leave
-    // the interaction with no response at all — always fall back to a plain-text followup with
-    // the real computed results rather than propagating the error straight through.
-    let send_result = match &image_url {
-        Some(url) => {
-            send_followup_with_image(http_client, &job.application_id, &job.token, &content, url)
-                .await
-        }
-        None => send_followup(http_client, &job.application_id, &job.token, &content).await,
-    };
-
-    if let Err(e) = send_result {
-        if image_url.is_some() {
-            error!("Failed to send followup with image, retrying as plain text: {}", e);
-            let fallback_content = format!("{content}\n-# ⚠️ Graphique indisponible.");
-            send_followup(http_client, &job.application_id, &job.token, &fallback_content).await?;
-        } else {
-            return Err(e.into());
-        }
-    }
+    send_followup(http_client, &job.application_id, &job.token, &content).await?;
 
     info!("Reparo simulation results sent to Discord");
     Ok(())

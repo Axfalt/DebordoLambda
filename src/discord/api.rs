@@ -61,25 +61,6 @@ pub async fn send_followup(
     patch_followup(client, application_id, token, &body).await
 }
 
-pub async fn send_followup_with_image(
-    client: &reqwest::Client,
-    application_id: &str,
-    token: &str,
-    content: &str,
-    image_url: &str,
-) -> Result<(), reqwest::Error> {
-    let body = serde_json::json!({
-        "content": content,
-        "embeds": [
-            {
-                "type": "rich",
-                "image": { "url": image_url }
-            }
-        ]
-    });
-    patch_followup(client, application_id, token, &body).await
-}
-
 pub async fn create_followup_message(
     client: &reqwest::Client,
     application_id: &str,
