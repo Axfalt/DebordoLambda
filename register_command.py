@@ -167,8 +167,14 @@ commands = [
         "description": "Estime les dégâts de réparation nécessaires après une attaque",
         "options": [
             {
+                "name": "defense",
+                "description": "Défense totale de la ville (requise sans clé API)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
                 "name": "veille",
-                "description": "Défense apportée par les citoyens de garde cette nuit (pas la défense totale de la ville). 0 si personne ne garde",
+                "description": "Défense apportée par les citoyens de garde cette nuit (défaut: 0, personne ne garde)",
                 "type": 4,  # INTEGER
                 "required": False
             },

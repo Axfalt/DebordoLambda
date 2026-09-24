@@ -110,7 +110,8 @@ async fn process_reparo_job(
 ) -> Result<(), Error> {
     let buildings = job.buildings.clone();
     let buildings_for_display = buildings.clone();
-    let watch_def = config.defense;
+    let total_defense = config.defense;
+    let watch_def = config.veille;
     let tdg_interval = config.tdg_interval();
     let iterations = config.iterations;
 
@@ -119,6 +120,7 @@ async fn process_reparo_job(
         Duration::from_secs(SIMULATION_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
             reparo_lib::calculate_reparation_probabilities(
+                total_defense,
                 watch_def,
                 tdg_interval,
                 iterations,
@@ -141,7 +143,12 @@ async fn process_reparo_job(
             "❌ Aucun résultat : vérifiez que tdg_min <= tdg_max.".to_string()
         }
         Ok(Ok(results)) => {
-            let ran_count = results.iter().filter(|(attack, _)| *attack > watch_def).count() as u64;
+            let ran_count = results
+                .iter()
+                .filter(|(attack, _)| {
+                    reparo_lib::damage_pool(*attack, total_defense, watch_def) > 0
+                })
+                .count() as u64;
             let total_runs = ran_count * iterations as u64;
 
             let mut content = format_reparo_results(

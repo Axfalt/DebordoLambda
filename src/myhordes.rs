@@ -30,9 +30,8 @@ pub struct MHCity {
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHDefense {
     pub total: i32,
-    /// Défense de la garde de nuit (citoyens actuellement de garde), le composant utilisé par
-    /// le moteur du jeu pour les dégâts de réparation — distinct de `total`, qui agrège aussi
-    /// bâtiments/objets/maisons/etc. et sert au calcul de débordement (/debordo).
+    /// Défense de la garde de nuit (citoyens actuellement de garde) — distincte de `total`, qui
+    /// agrège aussi bâtiments/objets/maisons/etc. /reparo a besoin des deux.
     #[serde(default)]
     pub watchmen: i32,
 }

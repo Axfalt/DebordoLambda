@@ -98,14 +98,31 @@ pub fn default_buildings() -> Vec<SimBuilding> {
     .collect()
 }
 
+/// Calcule le budget de dégâts de réparation pour une valeur d'attaque donnée, en reproduisant
+/// la résolution de défense à deux étapes du vrai jeu (`NightlyHandler::stage2_attack`), porte
+/// toujours considérée fermée :
+/// 1. La défense totale réduit l'attaque en premier (`overflow = max(0, attack - total)`).
+/// 2. La veille réduit ensuite ce qui reste (`blocked = min(overflow, watch_def)`).
+/// 3. `round((attack - blocked) * 0.2)` devient le budget de dégâts des bâtiments — la base est
+///    `attack`, pas `overflow` : la défense totale ne fait que limiter ce que la veille peut
+///    arrêter, elle ne réduit pas elle-même les dégâts aux bâtiments.
+pub fn damage_pool(attack: i32, total_defense: i32, watch_def: i32) -> i32 {
+    let initial_overflow = (attack - total_defense).max(0);
+    let blocked_by_watch = initial_overflow.min(watch_def.max(0));
+    ((attack - blocked_by_watch) as f64 * 0.2).round() as i32
+}
+
+/// Une seule simulation : répartit un budget de dégâts déjà calculé (voir `damage_pool`) sur
+/// les bâtiments de la ville et retourne le total de points de vie endommagés (à réparer).
+///
+/// Prend `(life, max_life)` plutôt que `&[SimBuilding]` pour éviter de cloner le nom (String)
+/// de chaque bâtiment à chaque itération — seuls ces deux entiers varient dans la boucle.
 fn reparo_gen(
-    attack: i32,
-    watch_def: i32,
+    damage_inflicted: i32,
     buildings: &[(i32, i32)],
     rng: &mut Mt64,
     scratch: &mut Vec<(i32, i32)>,
 ) -> i32 {
-    let damage_inflicted = ((attack - watch_def) as f64 * 0.2).ceil() as i32;
     let mut damage_counter = damage_inflicted;
     let mut total_damaged_hp = 0;
 
@@ -117,6 +134,8 @@ fn reparo_gen(
         let (life, max_life) = scratch.pop().unwrap();
         let lower_damage_limit = (life as f64 * 0.1).ceil() as i32;
 
+        // Guard against an empty sampling range (e.g. a building already near destroyed,
+        // where lower_damage_limit >= max_life) — sampling such a range panics.
         let raw_damage = if lower_damage_limit >= max_life {
             life
         } else {
@@ -134,12 +153,12 @@ fn reparo_gen(
     total_damaged_hp
 }
 
-fn reparostats(attack: i32, watch_def: i32, iterations: u32, buildings: &[SimBuilding]) -> Vec<i32> {
+fn reparostats(damage_inflicted: i32, iterations: u32, buildings: &[SimBuilding]) -> Vec<i32> {
     let mut rng = Mt64::new(rand::random());
     let life_pairs: Vec<(i32, i32)> = buildings.iter().map(|b| (b.life, b.max_life)).collect();
     let mut scratch = Vec::with_capacity(life_pairs.len());
     (0..iterations)
-        .map(|_| reparo_gen(attack, watch_def, &life_pairs, &mut rng, &mut scratch))
+        .map(|_| reparo_gen(damage_inflicted, &life_pairs, &mut rng, &mut scratch))
         .collect()
 }
 
@@ -193,7 +212,11 @@ fn compute_statistics(data: &[i32]) -> Statistics {
     }
 }
 
+/// Calcule les statistiques de dégâts de réparation pour chaque valeur d'attaque possible dans
+/// l'intervalle de TDG donné. `total_defense` et `watch_def` sont tous deux nécessaires pour
+/// reproduire fidèlement la résolution à deux étapes du vrai jeu (voir `damage_pool`).
 pub fn calculate_reparation_probabilities(
+    total_defense: i32,
     watch_def: i32,
     tdg_interval: (i32, i32),
     iterations: u32,
@@ -207,7 +230,10 @@ pub fn calculate_reparation_probabilities(
     (tdg_min..=tdg_max)
         .into_par_iter()
         .map(|attack| {
-            let stats = if attack <= watch_def {
+            let damage_inflicted = damage_pool(attack, total_defense, watch_def);
+            // Skip the Monte Carlo run entirely when there's no damage budget — every
+            // iteration would deterministically return 0 anyway.
+            let stats = if damage_inflicted <= 0 {
                 Statistics {
                     mean: 0.0,
                     median: 0.0,
@@ -217,7 +243,7 @@ pub fn calculate_reparation_probabilities(
                     q3: 0.0,
                 }
             } else {
-                let results = reparostats(attack, watch_def, iterations, buildings);
+                let results = reparostats(damage_inflicted, iterations, buildings);
                 compute_statistics(&results)
             };
             (attack, stats)
@@ -243,23 +269,77 @@ mod tests {
         buildings.iter().map(|b| (b.life, b.max_life)).collect()
     }
 
+    // =========================================================================
+    // damage_pool
+    // =========================================================================
+
+    #[test]
+    fn test_damage_pool_subtracts_total_then_watch() {
+        // attack=1000, total=300 => overflow=700; watch=200 blocks 200 of it =>
+        // pool = round((1000 - 200) * 0.2) = 160.
+        assert_eq!(damage_pool(1000, 300, 200), 160);
+    }
+
+    #[test]
+    fn test_damage_pool_watch_capped_by_overflow_not_raw_attack() {
+        // attack=1000, total=900 => overflow=100. watch=500 can only block
+        // min(overflow, watch) = 100 (not the full 500). pool = round((1000-100)*0.2) = 180.
+        assert_eq!(damage_pool(1000, 900, 500), 180);
+    }
+
+    #[test]
+    fn test_damage_pool_zero_only_when_watch_kills_whole_attack() {
+        // No total defense => overflow = attack; watch >= attack kills everything.
+        assert_eq!(damage_pool(100, 0, 100), 0);
+    }
+
+    #[test]
+    fn test_damage_pool_total_defense_does_not_itself_reduce_building_damage() {
+        // Matches NightlyHandler.php: "Only 20% of the attack is inflicted to buildings /
+        // zombies - amount of zombies killed by the watch". Walls that stop everything leave
+        // the watch nothing to kill, so buildings still take 20% of the full attack.
+        assert_eq!(damage_pool(100, 200, 0), 20);
+        assert_eq!(damage_pool(100, 200, 500), 20);
+    }
+
+    #[test]
+    fn test_damage_pool_stronger_walls_can_mean_more_building_damage() {
+        // Counterintuitive but faithful to the game: stronger total defense shrinks the
+        // overflow, which caps how much the watch can be credited for.
+        let weak_walls = damage_pool(1000, 0, 500); // overflow 1000, watch kills 500
+        let strong_walls = damage_pool(1000, 900, 500); // overflow 100, watch kills 100
+        assert_eq!(weak_walls, 100);
+        assert_eq!(strong_walls, 180);
+        assert!(strong_walls > weak_walls);
+    }
+
+    #[test]
+    fn test_damage_pool_never_negative() {
+        assert!(damage_pool(0, 500, 500) >= 0);
+        assert!(damage_pool(0, 0, 0) >= 0);
+    }
+
+    // =========================================================================
+    // reparo_gen (given an already-computed damage pool)
+    // =========================================================================
+
     #[test]
     fn test_reparo_gen_does_not_panic_on_near_destroyed_building() {
         let mut rng = Mt64::new(42);
         let buildings = life_pairs(&[building("Ruine", 1, 1)]);
         let mut scratch = Vec::new();
         for _ in 0..100 {
-            let damage = reparo_gen(1000, 0, &buildings, &mut rng, &mut scratch);
+            let damage = reparo_gen(200, &buildings, &mut rng, &mut scratch);
             assert!(damage >= 0);
         }
     }
 
     #[test]
-    fn test_reparo_gen_zero_overflow_gives_zero_damage() {
+    fn test_reparo_gen_zero_pool_gives_zero_damage() {
         let mut rng = Mt64::new(1);
         let buildings = life_pairs(&default_buildings());
         let mut scratch = Vec::new();
-        let damage = reparo_gen(50, 100, &buildings, &mut rng, &mut scratch);
+        let damage = reparo_gen(0, &buildings, &mut rng, &mut scratch);
         assert_eq!(damage, 0);
     }
 
@@ -275,7 +355,7 @@ mod tests {
             .sum::<i32>();
 
         for _ in 0..50 {
-            let damage = reparo_gen(100_000, 0, &buildings, &mut rng, &mut scratch);
+            let damage = reparo_gen(100_000, &buildings, &mut rng, &mut scratch);
             assert!(damage >= 0);
             assert!(
                 damage <= max_tank,
@@ -309,7 +389,7 @@ mod tests {
     #[test]
     fn test_calculate_reparation_probabilities_covers_full_inclusive_range() {
         let buildings = default_buildings();
-        let results = calculate_reparation_probabilities(0, (100, 103), 10, &buildings);
+        let results = calculate_reparation_probabilities(0, 0, (100, 103), 10, &buildings);
         let attacks: Vec<i32> = results.iter().map(|(a, _)| *a).collect();
         assert_eq!(attacks.len(), 4, "range should be inclusive of tdg_max");
         assert!(attacks.contains(&100));
@@ -319,28 +399,36 @@ mod tests {
     #[test]
     fn test_calculate_reparation_probabilities_empty_for_invalid_range() {
         let buildings = default_buildings();
-        let results = calculate_reparation_probabilities(0, (10, 5), 10, &buildings);
+        let results = calculate_reparation_probabilities(0, 0, (10, 5), 10, &buildings);
         assert!(results.is_empty());
     }
 
     #[test]
-    fn test_calculate_reparation_probabilities_zero_stats_when_attack_at_or_below_defense() {
+    fn test_calculate_reparation_probabilities_zero_stats_when_watch_kills_everything() {
         let buildings = default_buildings();
-        let results = calculate_reparation_probabilities(100, (90, 101), 200, &buildings);
+        // No total defense, watch=100: attacks up to 102 leave round((attack-100)*0.2) = 0
+        // damage. attack 120 leaves round(20*0.2) = 4 damage to spread across buildings.
+        let results = calculate_reparation_probabilities(0, 100, (90, 120), 200, &buildings);
         let by_attack: std::collections::HashMap<i32, Statistics> = results.into_iter().collect();
 
-        for attack in [90, 100] {
+        for attack in [90, 100, 102] {
             let stats = by_attack[&attack];
-            assert_eq!(stats.mean, 0.0);
-            assert_eq!(stats.median, 0.0);
-            assert_eq!(stats.min, 0);
+            assert_eq!(stats.mean, 0.0, "attack {attack} should be fully killed by the watch");
             assert_eq!(stats.max, 0);
-            assert_eq!(stats.q1, 0.0);
-            assert_eq!(stats.q3, 0.0);
         }
 
-        let above = by_attack[&101];
-        assert!(above.max > 0, "attack above defense should be able to deal damage");
+        let above = by_attack[&120];
+        assert!(above.max > 0, "attack beyond the watch should damage buildings");
+    }
+
+    #[test]
+    fn test_calculate_reparation_probabilities_damage_despite_huge_total_defense() {
+        let buildings = default_buildings();
+        // Total defense stopping the whole attack leaves the watch nothing to kill, so
+        // buildings still take 20% of the attack.
+        let results = calculate_reparation_probabilities(999_999, 0, (100, 100), 200, &buildings);
+        let (_, stats) = results[0];
+        assert!(stats.max > 0, "total defense alone must not prevent building damage");
     }
 
     #[test]

@@ -557,6 +557,7 @@ async fn handle_command(
                             is_interactive,
                             custom_defenses: user_defenses.clone(),
                             home_bonus,
+                            ..Default::default()
                         };
 
                         let job = SimulationJob {
@@ -647,6 +648,7 @@ async fn handle_reparo_command(
     ssm_client: &aws_sdk_ssm::Client,
     http_client: &reqwest::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
+    let mut user_defense: Option<i32> = None;
     let mut user_veille: Option<i32> = None;
     let mut user_tdg_min: Option<i32> = None;
     let mut user_tdg_max: Option<i32> = None;
@@ -657,6 +659,7 @@ async fn handle_reparo_command(
     if let Some(opts) = options {
         for opt in opts {
             match opt.name.as_str() {
+                "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
                 "veille" => user_veille = opt.value.as_i64().map(|v| v as i32),
                 "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
                 "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
@@ -678,8 +681,11 @@ async fn handle_reparo_command(
             .unwrap_or(None)
     };
     
+    // Without API data, total defense must be supplied explicitly: defaulting it to 0 would
+    // silently mean "walls stop nothing". Veille defaults to 0 (nobody on watch).
     let manual_fallback = || {
         (
+            user_defense,
             user_veille.unwrap_or(0),
             user_tdg_min.unwrap_or(0),
             user_tdg_max.unwrap_or(0),
@@ -687,7 +693,7 @@ async fn handle_reparo_command(
         )
     };
 
-    let (veille, tdg_min, tdg_max, buildings) = match user_key {
+    let (defense, veille, tdg_min, tdg_max, buildings) = match user_key {
         Some(key) => match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
             Ok(mh_data) => match mh_data.map {
                 Some(map) => {
@@ -698,11 +704,21 @@ async fn handle_reparo_command(
                         );
                         manual_fallback()
                     } else {
-                        // Watch defense ("veille"), not the aggregate `total` /debordo uses:
-                        // the game's building-damage formula only ever subtracts the defense
-                        // contributed by citizens currently on night-watch duty, which the API
-                        // exposes as its own component. 0 is a legitimate value (nobody on
-                        // watch), not a missing-data signal.
+                        // Mirrors NightlyHandler::stage2_attack:
+                        // `$def = $town->getDevastated() ? 0 : $def_summary->sum();` — the API's
+                        // `total` doesn't apply that override itself.
+                        let is_devastated =
+                            map.city.as_ref().and_then(|c| c.devast).unwrap_or(false);
+                        let api_defense = if is_devastated {
+                            0
+                        } else {
+                            map.city
+                                .as_ref()
+                                .and_then(|c| c.defense.as_ref())
+                                .map(|d| d.total)
+                                .unwrap_or(0)
+                        };
+                        // Night-watch component only; 0 is legitimate (nobody on watch).
                         let api_veille = map
                             .city
                             .as_ref()
@@ -746,6 +762,7 @@ async fn handle_reparo_command(
                         };
 
                         (
+                            Some(user_defense.unwrap_or(api_defense)),
                             user_veille.unwrap_or(api_veille),
                             user_tdg_min.unwrap_or(api_tdg_min),
                             user_tdg_max.unwrap_or(api_tdg_max),
@@ -763,22 +780,26 @@ async fn handle_reparo_command(
         None => manual_fallback(),
     };
 
-    // veille == 0 is a legitimate value (nobody on watch), unlike /debordo's town defense —
-    // only reject a negative value or missing/invalid TDG data.
-    if veille < 0 || tdg_min <= 0 || tdg_max < tdg_min {
-        let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `veille`, `tdg_min` et `tdg_max`.";
-        let response = DiscordResponse {
-            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
-            data: Some(serde_json::json!({
-                "content": error_msg,
-                "flags": 64
-            })),
-        };
-        return Ok(build_json_response(200, &response));
-    }
+    // 0 is legitimate for both (devastated town / nobody on watch) — only reject a missing
+    // total defense, negative values, or missing/invalid TDG data.
+    let defense = match defense {
+        Some(d) if d >= 0 && veille >= 0 && tdg_min > 0 && tdg_max >= tdg_min => d,
+        _ => {
+            let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `defense` (défense totale), `tdg_min` et `tdg_max` (et `veille` si des citoyens sont de garde).";
+            let response = DiscordResponse {
+                response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+                data: Some(serde_json::json!({
+                    "content": error_msg,
+                    "flags": 64
+                })),
+            };
+            return Ok(build_json_response(200, &response));
+        }
+    };
 
     let config = SimConfig {
-        defense: veille,
+        defense,
+        veille,
         tdg_min,
         tdg_max,
         iterations,
@@ -844,14 +865,15 @@ async fn handle_reparo_modal_submit(
     let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
     let (config, buildings) = parse_reparo_modal_text(buildings_val);
 
-    // config.defense == 0 is a legitimate watch-defense value (nobody on watch).
+    // 0 is legitimate for both defense (devastated town) and veille (nobody on watch).
     if config.defense < 0
+        || config.veille < 0
         || config.tdg_min <= 0
         || config.tdg_max < config.tdg_min
         || config.iterations == 0
         || buildings.is_empty()
     {
-        let error_msg = "Erreur : configuration invalide. Vérifiez `veille`, `tdg` (min-max), `iterations` (doit être > 0) et la liste des bâtiments (format `Nom: vie/vie_max`).";
+        let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `veille`, `tdg` (min-max), `iterations` (doit être > 0) et la liste des bâtiments (format `Nom: vie/vie_max`).";
         let response = DiscordResponse {
             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
             data: Some(serde_json::json!({
