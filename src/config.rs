@@ -244,7 +244,7 @@ pub fn format_reparo_results(
     }
 
     output.push_str(&format!(
-        "🧱 **Capacité d'absorption des bâtiments: {} PV**\n-# Dégâts maximum encaissables en une nuit : au-delà, le surplus de dégâts est perdu.\n\n",
+        "🧱 **Cap d'absorption des bâtiments: {} PV**\n\n",
         reparo_lib::damage_capacity(buildings)
     ));
 
