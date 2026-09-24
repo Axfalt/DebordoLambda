@@ -265,10 +265,6 @@ pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuildi
     lines.join("\n")
 }
 
-/// Tronque un texte à `max_length` caractères en coupant uniquement sur des frontières de
-/// ligne (pour ne pas couper une entrée au milieu), en ajoutant `notice` à la fin. Partagée par
-/// le modal Discord de /reparo (limite `max_length` du champ TEXT_INPUT) et le message de
-/// résultats (limite de 2000 caractères d'un message Discord).
 pub fn truncate_for_discord(text: &str, max_length: usize, notice: &str) -> String {
     if text.chars().count() <= max_length {
         return text.to_string();
@@ -293,9 +289,6 @@ pub fn truncate_for_discord(text: &str, max_length: usize, notice: &str) -> Stri
     truncated
 }
 
-/// Parse une ligne `Nom: vie/vie_max` en `SimBuilding`, en rejetant les valeurs négatives ou
-/// nulles (elles feraient produire à `reparo_gen` un total de dégâts négatif au lieu d'une
-/// entrée de simulation valide). Utilisée par `parse_reparo_modal_text` pour le texte du modal.
 fn parse_building_line(line: &str) -> Option<reparo_lib::SimBuilding> {
     let pos = line.rfind(':')?;
     let name = line[..pos].trim();
@@ -375,11 +368,6 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
     (config, buildings)
 }
 
-/// Extrait la configuration à partir du texte d'un message de résultats /reparo (produit par
-/// `format_reparo_results`), pour le bouton "Voir la configuration" — miroir de
-/// `parse_result_message_content` côté /debordo. La liste des bâtiments n'est pas dans ce texte
-/// et n'est pas récupérable depuis le bouton : le modal rouvert utilise
-/// `reparo_lib::default_buildings()` (voir `handle_component_interaction`).
 pub fn parse_reparo_result_content(content: &str) -> SimConfig {
     let mut config = SimConfig {
         iterations: 10000,
@@ -670,14 +658,10 @@ mod tests {
         assert!(output.contains("TDG**: 200 - 202"));
         assert!(output.contains("Bâtiments pris en compte**: 60"));
         assert!(output.contains("Itérations**: 500"));
-        // mean of [10.0, 20.0] = 15.0; overall min = 2; overall max = 40
         assert!(output.contains("Dégâts moyens estimés: 15.0 PV"));
         assert!(output.contains("min 2"));
         assert!(output.contains("max 40"));
         assert!(output.contains("1000 simulations en 42ms"));
-        // format_reparo_results never embeds the building list — /reparo's "Voir la
-        // configuration" button no longer round-trips it at all (see
-        // handle_component_interaction: it falls back to default_buildings()).
         assert!(!output.contains("||"));
     }
 
@@ -715,8 +699,6 @@ mod tests {
             breakable: true,
             temporary: false,
         }];
-        // Matches how worker.rs assembles the real message: results text, then the chart link.
-        // The building list is never part of this text at all.
         let mut content = format_reparo_results(&config, &results, 42, 1000, &buildings);
         content.push_str("\n\n🖼️ **Graphique**: https://quickchart.io/chart/render/example");
 

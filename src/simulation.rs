@@ -22,7 +22,6 @@ pub struct AttackSimulator {
 }
 
 impl AttackSimulator {
-    /// Crée un nouveau simulateur avec une seed aléatoire.
     pub fn new() -> Self {
         Self {
             rng: Mt64::new(rand::random()),
@@ -44,8 +43,6 @@ impl AttackSimulator {
         let b_level = b_level_override.or(config.b_level);
         let is_chaos = config.is_chaos;
         let is_devastated = config.is_devastated;
-
-        // Calcul des cibles et suppression de l'influence des drapeaux
         let targets = cmp::min(10 + 2 * ((day - 10).max(0) / 2), nb_hab);
 
         if targets <= 0 || overflow <= 0 {
@@ -73,7 +70,6 @@ impl AttackSimulator {
         let max_active = (total_attack as f64 * active_factor).round() as i32;
         let mut leftover = max_active.min(overflow);
 
-        // Réduction par les drapeaux
         for _ in 0..drapo {
             leftover -= (total_attack as f64 * FLAG_REDUCTION_RATE).round() as i32;
         }
@@ -89,13 +85,11 @@ impl AttackSimulator {
             return (&self.allocated_buf, max_active, active_factor);
         }
 
-        // Poids aléatoires in [0, 1.0] (PHP alignement)
         self.repartition_buf.clear();
         for _ in 0..targets {
             self.repartition_buf.push(self.rng.random::<f64>());
         }
 
-        // Une cible reçoit un boost de +0.3
         if !self.repartition_buf.is_empty() {
             let unlucky_idx = self.rng.random_range(0..self.repartition_buf.len());
             self.repartition_buf[unlucky_idx] += UNLUCKY_BOOST;
@@ -103,7 +97,6 @@ impl AttackSimulator {
 
         let sum: f64 = self.repartition_buf.iter().sum();
 
-        // Allocation des attaques avec contrainte de somme exacte (PHP alignement)
         self.allocated_buf.clear();
         self.allocated_buf.resize(targets as usize, 0);
         let mut attacking_cache = leftover;
@@ -118,14 +111,12 @@ impl AttackSimulator {
             }
         }
 
-        // Distribution du reliquat aux cibles aléatoires
         while attacking_cache > 0 && !self.allocated_buf.is_empty() {
             let idx = self.rng.random_range(0..self.allocated_buf.len());
             self.allocated_buf[idx] += 1;
             attacking_cache -= 1;
         }
 
-        // Ajout de l'influence des drapeaux
         self.allocated_buf.iter_mut().for_each(|x| *x += flag_bonus);
         (&self.allocated_buf, max_active, active_factor)
     }
@@ -440,11 +431,6 @@ pub fn complete_overflow_probability(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // attack_distribution
-    // =========================================================================
-
     #[test]
     fn test_attack_distribution() {
         // Smoke test: with day=10 the midpoint (≈1167) is far above the range,

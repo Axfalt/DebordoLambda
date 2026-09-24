@@ -1,7 +1,6 @@
 use crate::config::CommandOption;
 use serde::{Deserialize, Serialize};
 
-/// Représente une interaction Discord entrante.
 #[derive(Debug, Deserialize)]
 pub struct DiscordInteraction {
     #[serde(rename = "type")]
@@ -63,15 +62,13 @@ pub struct DiscordResponse {
 }
 
 impl DiscordInteraction {
-    /// Récupère l'ID de l'utilisateur Discord qui a déclenché l'interaction.
     pub fn user_id(&self) -> Option<&str> {
         self.user
             .as_ref()
             .map(|u| u.id.as_str())
             .or_else(|| self.member.as_ref().map(|m| m.user.id.as_str()))
     }
-
-    /// Récupère la valeur saisie dans un champ de formulaire modal.
+    
     pub fn get_modal_value(&self, custom_id: &str) -> Option<&str> {
         self.data
             .as_ref()

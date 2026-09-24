@@ -1,10 +1,6 @@
-//! Génération d'un graphique QuickChart.io pour visualiser les statistiques de réparation.
-
 use reparo_lib::Statistics;
 use serde::Deserialize;
 
-/// Construit la configuration Chart.js représentant l'évolution des dégâts de réparation
-/// (moyenne, bande q1-q3, min/max) en fonction de la force de l'attaque.
 pub fn build_chart_config(results: &[(i32, Statistics)]) -> serde_json::Value {
     let labels: Vec<i32> = results.iter().map(|(attack, _)| *attack).collect();
     let q1: Vec<f64> = results.iter().map(|(_, s)| s.q1).collect();

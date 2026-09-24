@@ -15,7 +15,6 @@ use debordo_lib::simulation::{complete_overflow_probability, overflow_probabilit
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
-/// Limite de longueur d'un message Discord (contenu de followup).
 const DISCORD_MESSAGE_MAX_LENGTH: usize = 2000;
 
 async fn handler(event: LambdaEvent<SqsEvent>, http_client: &reqwest::Client) -> Result<(), Error> {
@@ -152,11 +151,6 @@ async fn process_reparo_job(
                 total_runs,
                 &buildings_for_display,
             );
-
-            // Posted as a plain link rather than a constructed embed: Discord still unfurls it
-            // into an inline preview when it can, but the link itself always works even if that
-            // unfurl doesn't happen — unlike an embed image, which shows an empty box with no
-            // way to open the chart directly if Discord fails to fetch it.
             let chart_config = build_chart_config(&results);
             match create_chart_url(http_client, &chart_config).await {
                 Ok(url) => {

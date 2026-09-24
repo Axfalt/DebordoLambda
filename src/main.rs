@@ -122,10 +122,6 @@ fn handle_component_interaction(
             .and_then(|m| m.content.as_deref())
             .unwrap_or_default();
         let config = parse_reparo_result_content(msg_content);
-
-        // The specific buildings used in that run aren't recoverable from the button alone
-        // (no attachment, no external storage) — reopen the modal with the default panda
-        // building set instead, same as when /reparo has no live API data to work with.
         let buildings = reparo_lib::default_buildings();
 
         return respond_with_buildings_modal(&config, &buildings);
@@ -141,7 +137,6 @@ fn handle_component_interaction(
     Ok(build_json_response(200, &response))
 }
 
-/// Répond au PING de validation Discord.
 fn handle_ping() -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Received PING, responding with PONG");
     let response = DiscordResponse {
@@ -151,7 +146,6 @@ fn handle_ping() -> Result<ApiGatewayV2httpResponse, Error> {
     Ok(build_json_response(200, &response))
 }
 
-/// Affiche le formulaire modal pour enregistrer la clé API.
 fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Handling /register-key command, responding with Modal");
     let response = DiscordResponse {
@@ -181,7 +175,6 @@ fn handle_register_key_command() -> Result<ApiGatewayV2httpResponse, Error> {
     Ok(build_json_response(200, &response))
 }
 
-/// Gère la soumission du formulaire modal et stocke la clé chiffrée.
 async fn handle_modal_submit(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
@@ -263,7 +256,6 @@ async fn handle_modal_submit(
     }
 }
 
-/// Envoie un job de simulation sur SQS et répond immédiatement avec une réponse différée.
 async fn handle_command(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
@@ -365,8 +357,7 @@ async fn handle_command(
 
         return finalize_and_dispatch(job, sqs_client, queue_url, false).await;
     }
-
-    // 3. Essayer de récupérer la clé de l'utilisateur
+    
     let user_id = interaction.user_id().unwrap_or("");
     let user_key = if !user_id.is_empty() {
         database::get_user_key(user_id, dynamodb_client, ssm_client)
@@ -378,7 +369,6 @@ async fn handle_command(
 
     match user_key {
         None => {
-            // Utilisateur non enregistré: valider les paramètres manquants et renvoyer une erreur s'ils n'ont pas de défaut
             if user_defense.is_none()
                 || user_tdg_min.is_none()
                 || user_tdg_max.is_none()
@@ -431,7 +421,6 @@ async fn handle_command(
             finalize_and_dispatch(job, sqs_client, queue_url, false).await
         }
         Some(key) => {
-            // Utilisateur enregistré: appeler l'API de MyHordes
             match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
                 Ok(mh_data) => {
                     if let Some(map) = mh_data.map {
@@ -688,10 +677,7 @@ async fn handle_reparo_command(
             .await
             .unwrap_or(None)
     };
-
-    // Le catalogue de bâtiments par défaut et la simulation sont calibrés pour le mode
-    // Pandemonium ; sans données API utilisables (pas de clé, échec, ou ville non-panda), on
-    // retombe sur les paramètres saisis manuellement.
+    
     let manual_fallback = || {
         (
             user_defense.unwrap_or(0),
@@ -798,8 +784,6 @@ async fn handle_reparo_command(
 /// Limite `max_length` du champ TEXT_INPUT du modal Discord de /reparo.
 const REPARO_MODAL_MAX_LENGTH: usize = 4000;
 
-/// Affiche le modal pré-rempli listant les bâtiments (vie/vie max) pour /reparo, permettant à
-/// l'utilisateur de relire/corriger son état de ville importé avant de lancer la simulation.
 fn respond_with_buildings_modal(
     config: &SimConfig,
     buildings: &[reparo_lib::SimBuilding],
@@ -840,8 +824,6 @@ fn respond_with_buildings_modal(
     Ok(build_json_response(200, &response))
 }
 
-/// Gère la soumission du modal /reparo : parse la configuration et la liste des bâtiments
-/// relues/corrigées, puis envoie le job de simulation sur SQS.
 async fn handle_reparo_modal_submit(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
@@ -901,7 +883,6 @@ async fn handle_reparo_modal_submit(
     enqueue_simulation(&job, sqs_client, queue_url).await
 }
 
-/// Dispatcher helper
 async fn finalize_and_dispatch(
     job: SimulationJob,
     sqs_client: &aws_sdk_sqs::Client,
@@ -916,7 +897,6 @@ async fn finalize_and_dispatch(
     enqueue_simulation(&job, sqs_client, queue_url).await
 }
 
-/// Helper pour formater et enfiler le job de simulation SQS.
 async fn enqueue_simulation(
     job: &SimulationJob,
     sqs_client: &aws_sdk_sqs::Client,
@@ -1003,10 +983,8 @@ fn resolve_citizens(
             }
         }
     } else {
-        // Mode Manuel: Build based on custom map first, then fill remainder
         let mut added_names = std::collections::HashSet::new();
-
-        // 1. Add explicitly nominated citizens from defenses string
+        
         if let Some(s) = custom_defenses_str {
             for part in s.split([',', '\n', '\r']) {
                 let part = part.trim();
@@ -1030,8 +1008,7 @@ fn resolve_citizens(
                 }
             }
         }
-
-        // 2. Fill the remainder up to nb_hab
+        
         let mut count = 1;
         while citizens.len() < nb_hab as usize {
             let gen_name = format!("Citoyen {}", count);
@@ -1055,7 +1032,6 @@ fn resolve_citizens(
 // RESPONSE BUILDERS
 // ============================================================================
 
-/// Construit une réponse HTTP simple avec du texte.
 fn build_response(status_code: i64, body: &str) -> ApiGatewayV2httpResponse {
     let mut r = ApiGatewayV2httpResponse::default();
     r.status_code = status_code;
@@ -1063,7 +1039,6 @@ fn build_response(status_code: i64, body: &str) -> ApiGatewayV2httpResponse {
     r
 }
 
-/// Construit une réponse HTTP JSON.
 fn build_json_response<T: Serialize>(status_code: i64, body: &T) -> ApiGatewayV2httpResponse {
     let json_body = serde_json::to_string(body).unwrap_or_default();
     let mut headers = HeaderMap::new();
