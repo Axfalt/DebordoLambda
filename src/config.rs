@@ -212,6 +212,52 @@ pub fn format_results(
     output
 }
 
+/// Formate les résultats de la simulation /reparo pour l'affichage Discord, dans le même style
+/// que `format_results` (débordement).
+pub fn format_reparo_results(
+    config: &SimConfig,
+    results: &[(i32, reparo_lib::Statistics)],
+    elapsed_ms: u128,
+    total_runs: u64,
+    buildings_count: usize,
+) -> String {
+    let mut output = String::new();
+    output.push_str("## 🔧 Résultats de la simulation de réparation\n\n");
+    output.push_str("**Paramètres:**\n");
+    output.push_str(&format!("• **🛡️ Défense**: {}\n", config.defense));
+    output.push_str(&format!(
+        "• **🔭 TDG**: {} - {}\n",
+        config.tdg_min, config.tdg_max
+    ));
+    output.push_str(&format!(
+        "• **🏚️ Bâtiments pris en compte**: {}\n",
+        buildings_count
+    ));
+    output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
+    output.push('\n');
+
+    if results.is_empty() {
+        output.push_str("🔨 **Aucun dégât attendu sur cette plage d'attaque.**\n\n");
+    } else {
+        let mean_of_means: f64 =
+            results.iter().map(|(_, s)| s.mean).sum::<f64>() / results.len() as f64;
+        let overall_min = results.iter().map(|(_, s)| s.min).min().unwrap_or(0);
+        let overall_max = results.iter().map(|(_, s)| s.max).max().unwrap_or(0);
+
+        output.push_str(&format!(
+            "🔨 **Dégâts moyens estimés: {:.1} PV** (min {} – max {})\n\n",
+            mean_of_means, overall_min, overall_max
+        ));
+    }
+
+    output.push_str(&format!(
+        "-# ⏱️ {} simulations en {}ms",
+        total_runs, elapsed_ms
+    ));
+
+    output
+}
+
 /// Formate la configuration et la liste des bâtiments pour le modal Discord de /reparo,
 /// permettant à l'utilisateur de relire/modifier l'état de sa ville avant de lancer la simulation.
 pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuilding]) -> String {
@@ -553,6 +599,51 @@ mod tests {
         assert!(!res_comp.contains("Défense min"));
         assert!(!res_comp.contains("Bonus maison"));
         assert!(!res_comp.contains("Max zombies actifs (moyenne)"));
+    }
+
+    #[test]
+    fn test_format_reparo_results_headline_stats() {
+        let config = SimConfig {
+            defense: 150,
+            tdg_min: 200,
+            tdg_max: 202,
+            iterations: 500,
+            ..Default::default()
+        };
+        let results = vec![
+            (
+                200,
+                reparo_lib::Statistics { mean: 10.0, median: 9.0, min: 2, max: 20, q1: 5.0, q3: 15.0 },
+            ),
+            (
+                201,
+                reparo_lib::Statistics { mean: 20.0, median: 19.0, min: 8, max: 40, q1: 15.0, q3: 25.0 },
+            ),
+        ];
+        let output = format_reparo_results(&config, &results, 42, 1000, 60);
+
+        assert!(output.contains("Défense**: 150"));
+        assert!(output.contains("TDG**: 200 - 202"));
+        assert!(output.contains("Bâtiments pris en compte**: 60"));
+        assert!(output.contains("Itérations**: 500"));
+        // mean of [10.0, 20.0] = 15.0; overall min = 2; overall max = 40
+        assert!(output.contains("Dégâts moyens estimés: 15.0 PV"));
+        assert!(output.contains("min 2"));
+        assert!(output.contains("max 40"));
+        assert!(output.contains("1000 simulations en 42ms"));
+    }
+
+    #[test]
+    fn test_format_reparo_results_empty_results() {
+        let config = SimConfig {
+            defense: 500,
+            tdg_min: 10,
+            tdg_max: 20,
+            iterations: 500,
+            ..Default::default()
+        };
+        let output = format_reparo_results(&config, &[], 5, 0, 60);
+        assert!(output.contains("Aucun dégât attendu"));
     }
 
     #[test]

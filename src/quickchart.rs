@@ -1,7 +1,6 @@
 //! Génération d'un graphique QuickChart.io pour visualiser les statistiques de réparation.
 
 use reparo_lib::Statistics;
-use serde::Deserialize;
 
 /// Construit la configuration Chart.js représentant l'évolution des dégâts de réparation
 /// (moyenne, bande q1-q3, min/max) en fonction de la force de l'attaque.
@@ -66,65 +65,36 @@ pub fn build_chart_config(results: &[(i32, Statistics)]) -> serde_json::Value {
         "options": {
             "title": {
                 "display": true,
-                "text": "Dégâts de réparation estimés (PV) selon la force de l'attaque"
+                "text": "Dégâts de réparation estimés selon la force de l'attaque"
             },
             "scales": {
-                "xAxes": [{ "scaleLabel": { "display": true, "labelString": "Attaque (TDG)" } }],
-                "yAxes": [{ "scaleLabel": { "display": true, "labelString": "PV à réparer" } }]
+                "xAxes": [{ "scaleLabel": { "display": true, "labelString": "Attaque" } }],
+                "yAxes": [{ "scaleLabel": { "display": true, "labelString": "Dommages" } }]
             }
         }
     })
 }
 
-#[derive(Deserialize)]
-struct QuickChartCreateResponse {
-    success: bool,
-    #[serde(default)]
-    url: Option<String>,
-}
+/// Construit une URL QuickChart.io affichant directement le graphique (rendu à la volée via le
+/// endpoint GET `/chart`), sans appel réseau ni dépendance à la persistance d'une URL courte
+/// créée via `/chart/create` — évite qu'un lien expiré ou une création manquée empêche le
+/// graphique de s'afficher dans l'embed Discord.
+pub fn build_chart_url(chart_config: &serde_json::Value) -> String {
+    let chart_json = chart_config.to_string();
 
-/// Crée un graphique hébergé via l'API QuickChart.io et retourne son URL.
-pub async fn create_chart_url(
-    http_client: &reqwest::Client,
-    chart_config: &serde_json::Value,
-) -> Result<String, lambda_runtime::Error> {
-    let body = serde_json::json!({
-        "chart": chart_config,
-        "width": 800,
-        "height": 400,
-        "backgroundColor": "white"
-    });
-
-    let resp = http_client
-        .post("https://quickchart.io/chart/create")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| lambda_runtime::Error::from(format!("Failed to reach QuickChart: {}", e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let error_body = resp.text().await.unwrap_or_default();
-        return Err(lambda_runtime::Error::from(format!(
-            "QuickChart returned status {}: {}",
-            status, error_body
-        )));
-    }
-
-    let parsed: QuickChartCreateResponse = resp
-        .json()
-        .await
-        .map_err(|e| lambda_runtime::Error::from(format!("Failed to parse QuickChart response: {}", e)))?;
-
-    if !parsed.success {
-        return Err(lambda_runtime::Error::from(
-            "QuickChart reported failure creating the chart",
-        ));
-    }
-
-    parsed
-        .url
-        .ok_or_else(|| lambda_runtime::Error::from("QuickChart response missing url"))
+    reqwest::Url::parse_with_params(
+        "https://quickchart.io/chart",
+        &[
+            ("c", chart_json.as_str()),
+            ("width", "800"),
+            ("height", "400"),
+            ("backgroundColor", "white"),
+        ],
+    )
+    .map(|url| url.to_string())
+    // Infallible in practice (fixed valid base URL, percent-encoding handles any content), but
+    // fall back to a minimal-config URL rather than panicking if it ever weren't.
+    .unwrap_or_else(|_| "https://quickchart.io/chart?c=%7B%7D".to_string())
 }
 
 #[cfg(test)]
@@ -179,5 +149,23 @@ mod tests {
     fn build_chart_config_is_a_line_chart() {
         let config = build_chart_config(&sample_results());
         assert_eq!(config["type"], "line");
+    }
+
+    #[test]
+    fn build_chart_url_produces_a_valid_get_render_url_roundtripping_the_config() {
+        let config = build_chart_config(&sample_results());
+        let url_str = build_chart_url(&config);
+
+        let url = reqwest::Url::parse(&url_str).expect("build_chart_url must return a valid URL");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("quickchart.io"));
+        assert_eq!(url.path(), "/chart");
+
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let decoded_config: serde_json::Value =
+            serde_json::from_str(&params["c"]).expect("c param must be the chart config JSON");
+        assert_eq!(decoded_config, config);
+        assert_eq!(params["width"], "800");
+        assert_eq!(params["height"], "400");
     }
 }

@@ -6,9 +6,9 @@ use std::time::Instant;
 use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
-use debordo_lib::config::{JobType, SimulationJob, format_results};
+use debordo_lib::config::{JobType, SimulationJob, format_reparo_results, format_results};
 use debordo_lib::discord::api::{send_followup, send_followup_with_image};
-use debordo_lib::quickchart::{build_chart_config, create_chart_url};
+use debordo_lib::quickchart::{build_chart_config, build_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
@@ -106,10 +106,12 @@ async fn process_reparo_job(
     http_client: &reqwest::Client,
 ) -> Result<(), Error> {
     let buildings = job.buildings.clone();
+    let buildings_count = buildings.len();
     let watch_def = config.defense;
     let tdg_interval = config.tdg_interval();
     let iterations = config.iterations;
 
+    let start = Instant::now();
     let result = timeout(
         Duration::from_secs(SIMULATION_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
@@ -140,23 +142,15 @@ async fn process_reparo_job(
             None,
         ),
         Ok(Ok(results)) => {
+            let ran_count = results.iter().filter(|(attack, _)| *attack > watch_def).count() as u64;
+            let total_runs = ran_count * iterations as u64;
+
+            let content =
+                format_reparo_results(&config, &results, start.elapsed().as_millis(), total_runs, buildings_count);
             let chart_config = build_chart_config(&results);
-            match create_chart_url(http_client, &chart_config).await {
-                Ok(url) => (
-                    format!(
-                        "🔧 **Réparations estimées** — défense: {}, attaque: {}-{} ({} itérations)",
-                        config.defense, config.tdg_min, config.tdg_max, config.iterations
-                    ),
-                    Some(url),
-                ),
-                Err(e) => {
-                    error!("Failed to create QuickChart chart: {}", e);
-                    (
-                        "❌ La simulation a réussi mais le graphique n'a pas pu être généré. Veuillez réessayer.".to_string(),
-                        None,
-                    )
-                }
-            }
+            let image_url = build_chart_url(&chart_config);
+
+            (content, Some(image_url))
         }
     };
 

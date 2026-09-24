@@ -72,6 +72,7 @@ pub async fn send_followup_with_image(
         "content": content,
         "embeds": [
             {
+                "type": "rich",
                 "image": { "url": image_url }
             }
         ]
