@@ -155,7 +155,10 @@ async fn process_reparo_job(
 
             let chart_config = build_chart_config(&results);
             let image_url = match create_chart_url(http_client, &chart_config).await {
-                Ok(url) => Some(url),
+                Ok(url) => {
+                    info!("QuickChart image URL: {}", url);
+                    Some(url)
+                }
                 Err(e) => {
                     error!("Failed to create QuickChart chart: {}", e);
                     content.push_str("\n-# ⚠️ Graphique indisponible.");
