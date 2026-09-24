@@ -698,11 +698,16 @@ async fn handle_reparo_command(
                         );
                         manual_fallback()
                     } else {
+                        // Watch defense ("veille"), not the aggregate `total` /debordo uses:
+                        // the game's building-damage formula only ever subtracts the defense
+                        // contributed by citizens currently on night-watch duty, which the API
+                        // exposes as its own component. 0 is a legitimate value (nobody on
+                        // watch), not a missing-data signal.
                         let api_defense = map
                             .city
                             .as_ref()
                             .and_then(|c| c.defense.as_ref())
-                            .map(|d| d.total)
+                            .map(|d| d.watchmen)
                             .unwrap_or(0);
                         let api_tdg_min = map
                             .city
@@ -758,7 +763,9 @@ async fn handle_reparo_command(
         None => manual_fallback(),
     };
 
-    if defense <= 0 || tdg_min <= 0 || tdg_max < tdg_min {
+    // defense == 0 is a legitimate value (nobody on watch), unlike /debordo's town defense —
+    // only reject a negative value or missing/invalid TDG data.
+    if defense < 0 || tdg_min <= 0 || tdg_max < tdg_min {
         let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `defense`, `tdg_min` et `tdg_max`.";
         let response = DiscordResponse {
             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
@@ -837,7 +844,8 @@ async fn handle_reparo_modal_submit(
     let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
     let (config, buildings) = parse_reparo_modal_text(buildings_val);
 
-    if config.defense <= 0
+    // config.defense == 0 is a legitimate watch-defense value (nobody on watch).
+    if config.defense < 0
         || config.tdg_min <= 0
         || config.tdg_max < config.tdg_min
         || config.iterations == 0

@@ -168,7 +168,7 @@ commands = [
         "options": [
             {
                 "name": "defense",
-                "description": "Valeur de défense de la garde",
+                "description": "Défense de la veille/garde (citoyens de garde), pas la défense totale. 0 si personne ne garde",
                 "type": 4,  # INTEGER
                 "required": False
             },

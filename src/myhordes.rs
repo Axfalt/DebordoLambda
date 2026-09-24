@@ -30,6 +30,11 @@ pub struct MHCity {
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHDefense {
     pub total: i32,
+    /// Défense de la garde de nuit (citoyens actuellement de garde), le composant utilisé par
+    /// le moteur du jeu pour les dégâts de réparation — distinct de `total`, qui agrège aussi
+    /// bâtiments/objets/maisons/etc. et sert au calcul de débordement (/debordo).
+    #[serde(default)]
+    pub watchmen: i32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -95,7 +100,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,hard,defense.fields(total),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,hard,defense.fields(total,watchmen),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -204,6 +209,21 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert_eq!(min_def, 12);
+    }
+
+    #[test]
+    fn test_parse_defense_watchmen_field() {
+        let defense: MHDefense =
+            serde_json::from_value(serde_json::json!({ "total": 125, "watchmen": 18 })).unwrap();
+        assert_eq!(defense.total, 125);
+        assert_eq!(defense.watchmen, 18);
+    }
+
+    #[test]
+    fn test_parse_defense_without_watchmen_field_defaults_zero() {
+        // Backward compatibility: /debordo's fields_param never requested "watchmen".
+        let defense: MHDefense = serde_json::from_value(serde_json::json!({ "total": 125 })).unwrap();
+        assert_eq!(defense.watchmen, 0);
     }
 
     #[test]

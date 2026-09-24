@@ -214,7 +214,7 @@ pub fn format_reparo_results(
     let mut output = String::new();
     output.push_str("## 🔧 Résultats de la simulation de réparation\n\n");
     output.push_str("**Paramètres:**\n");
-    output.push_str(&format!("• **🛡️ Défense**: {}\n", config.defense));
+    output.push_str(&format!("• **🛡️ Défense (veille)**: {}\n", config.defense));
     output.push_str(&format!(
         "• **🔭 TDG**: {} - {}\n",
         config.tdg_min, config.tdg_max
@@ -694,7 +694,7 @@ mod tests {
             .collect();
         let output = format_reparo_results(&config, &results, 42, 1000, &buildings);
 
-        assert!(output.contains("Défense**: 150"));
+        assert!(output.contains("Défense (veille)**: 150"));
         assert!(output.contains("TDG**: 200 - 202"));
         assert!(output.contains("Bâtiments pris en compte**: 60"));
         assert!(output.contains("Itérations**: 500"));
