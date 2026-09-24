@@ -8,7 +8,7 @@ use tracing::{error, info};
 
 use debordo_lib::config::{JobType, SimulationJob, format_reparo_results, format_results};
 use debordo_lib::discord::api::{send_followup, send_followup_with_image};
-use debordo_lib::quickchart::{build_chart_config, build_chart_url};
+use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
@@ -145,21 +145,47 @@ async fn process_reparo_job(
             let ran_count = results.iter().filter(|(attack, _)| *attack > watch_def).count() as u64;
             let total_runs = ran_count * iterations as u64;
 
-            let content =
-                format_reparo_results(&config, &results, start.elapsed().as_millis(), total_runs, buildings_count);
-            let chart_config = build_chart_config(&results);
-            let image_url = build_chart_url(&chart_config);
+            let mut content = format_reparo_results(
+                &config,
+                &results,
+                start.elapsed().as_millis(),
+                total_runs,
+                buildings_count,
+            );
 
-            (content, Some(image_url))
+            let chart_config = build_chart_config(&results);
+            let image_url = match create_chart_url(http_client, &chart_config).await {
+                Ok(url) => Some(url),
+                Err(e) => {
+                    error!("Failed to create QuickChart chart: {}", e);
+                    content.push_str("\n-# ⚠️ Graphique indisponible.");
+                    None
+                }
+            };
+
+            (content, image_url)
         }
     };
 
-    match image_url {
+    // A chart failure or an unexpected Discord rejection of the image embed must never leave
+    // the interaction with no response at all — always fall back to a plain-text followup with
+    // the real computed results rather than propagating the error straight through.
+    let send_result = match &image_url {
         Some(url) => {
-            send_followup_with_image(http_client, &job.application_id, &job.token, &content, &url)
-                .await?
+            send_followup_with_image(http_client, &job.application_id, &job.token, &content, url)
+                .await
         }
-        None => send_followup(http_client, &job.application_id, &job.token, &content).await?,
+        None => send_followup(http_client, &job.application_id, &job.token, &content).await,
+    };
+
+    if let Err(e) = send_result {
+        if image_url.is_some() {
+            error!("Failed to send followup with image, retrying as plain text: {}", e);
+            let fallback_content = format!("{content}\n-# ⚠️ Graphique indisponible.");
+            send_followup(http_client, &job.application_id, &job.token, &fallback_content).await?;
+        } else {
+            return Err(e.into());
+        }
     }
 
     info!("Reparo simulation results sent to Discord");
