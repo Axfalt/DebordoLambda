@@ -132,15 +132,17 @@ fn reparo_gen(
 
     while damage_counter > 0 && !scratch.is_empty() {
         let (life, max_life) = scratch.pop().unwrap();
-        let lower_damage_limit = (life as f64 * 0.1).ceil() as i32;
 
-        // Guard against an empty sampling range (e.g. a building already near destroyed,
-        // where lower_damage_limit >= max_life) — sampling such a range panics.
-        let raw_damage = if lower_damage_limit >= max_life {
-            life
-        } else {
-            rng.random_range(lower_damage_limit..max_life)
-        };
+        // Le jeu exclut les bâtiments sans PV de prototype (`getHp() <= 0`) des cibles.
+        if max_life <= 0 {
+            continue;
+        }
+
+        // `mt_rand(ceil(protoHp * 0.1), protoHp)` : les deux bornes dépendent des PV max du
+        // prototype (pas des PV actuels) et `mt_rand` inclut la borne haute. Comme
+        // max_life >= 1, ceil(max_life * 0.1) <= max_life : l'intervalle n'est jamais vide.
+        let lower_damage_limit = (max_life as f64 * 0.1).ceil() as i32;
+        let raw_damage = rng.random_range(lower_damage_limit..=max_life);
 
         let damages = min(life, raw_damage);
         let damages = min(damages, damage_counter);
@@ -332,6 +334,39 @@ mod tests {
             let damage = reparo_gen(200, &buildings, &mut rng, &mut scratch);
             assert!(damage >= 0);
         }
+    }
+
+    #[test]
+    fn test_reparo_gen_lower_bound_uses_max_life_not_current_life() {
+        // Game: damages = min(pool, life, mt_rand(ceil(10), 100)) → never below 10, even
+        // though ceil(life * 0.1) would be 5.
+        let mut rng = Mt64::new(3);
+        let buildings = [(50, 100)];
+        let mut scratch = Vec::new();
+        for _ in 0..2_000 {
+            let damage = reparo_gen(1_000, &buildings, &mut rng, &mut scratch);
+            assert!((10..=50).contains(&damage), "damage {damage} out of [10, 50]");
+        }
+    }
+
+    #[test]
+    fn test_reparo_gen_upper_bound_is_inclusive() {
+        // mt_rand(1, 2) can return 2; realDamage cap is ceil(2 * 0.7) = 2.
+        let mut rng = Mt64::new(11);
+        let buildings = [(2, 2)];
+        let mut scratch = Vec::new();
+        let seen: std::collections::HashSet<i32> = (0..500)
+            .map(|_| reparo_gen(1_000, &buildings, &mut rng, &mut scratch))
+            .collect();
+        assert_eq!(seen, [1, 2].into_iter().collect());
+    }
+
+    #[test]
+    fn test_reparo_gen_skips_buildings_without_max_life() {
+        let mut rng = Mt64::new(9);
+        let buildings = [(0, 0), (-1, -5)];
+        let mut scratch = Vec::new();
+        assert_eq!(reparo_gen(1_000, &buildings, &mut rng, &mut scratch), 0);
     }
 
     #[test]
