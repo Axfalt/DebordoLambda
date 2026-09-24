@@ -26,7 +26,7 @@ async fn handler(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let request = event.payload;
     let body = request.body.unwrap_or_default();
-    
+
     let headers = &request.headers;
     let signature = headers
         .get("x-signature-ed25519")
@@ -36,7 +36,7 @@ async fn handler(
         .get("x-signature-timestamp")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    
+
     let skip_signature = std::env::var("SKIP_SIGNATURE_CHECK")
         .map(|v| v == "true")
         .unwrap_or(false);
@@ -45,7 +45,7 @@ async fn handler(
         error!("Invalid Discord signature");
         return Ok(build_response(401, "Invalid signature"));
     }
-    
+
     let interaction: DiscordInteraction = match serde_json::from_str(&body) {
         Ok(i) => i,
         Err(e) => {
@@ -53,7 +53,7 @@ async fn handler(
             return Ok(build_response(400, "Invalid request body"));
         }
     };
-    
+
     match interaction.interaction_type {
         interaction_types::PING => handle_ping(),
         interaction_types::APPLICATION_COMMAND => {
@@ -511,7 +511,6 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
-                        // Si après la fusion, des paramètres critiques restent à 0, renvoyer une erreur
                         if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
                             let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
                             let response = DiscordResponse {
@@ -564,7 +563,6 @@ async fn handle_command(
 
                         finalize_and_dispatch(job, sqs_client, queue_url, true).await
                     } else {
-                        // Pas de ville active (map est None)
                         let error_msg = "Erreur MyHordes : Vous ne semblez pas être actuellement incarné dans une ville active. Veuillez vous incarner ou saisir les paramètres manuellement.";
                         let response = DiscordResponse {
                             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
@@ -578,8 +576,6 @@ async fn handle_command(
                 }
                 Err(e) => {
                     error!("MyHordes API call failed: {}", e);
-
-                    // Si l'API échoue, on ne peut continuer que si l'utilisateur a tout fourni manuellement
                     if user_defense.is_none()
                         || user_tdg_min.is_none()
                         || user_tdg_max.is_none()
@@ -639,9 +635,6 @@ async fn handle_command(
     }
 }
 
-/// Gère la commande /reparo : récupère (ou utilise par défaut) l'état des bâtiments de la
-/// ville et affiche un modal pré-rempli permettant de le relire/corriger avant de lancer la
-/// simulation.
 async fn handle_reparo_command(
     interaction: DiscordInteraction,
     dynamodb_client: &aws_sdk_dynamodb::Client,

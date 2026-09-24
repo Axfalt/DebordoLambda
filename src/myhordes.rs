@@ -22,8 +22,7 @@ pub struct MHCity {
     pub estimations: Option<MHEstimation>,
     pub chaos: Option<bool>,
     pub devast: Option<bool>,
-    /// Vrai si la ville actuelle est de type Pandemonium (le nom interne de la ville de
-    /// type "panda" dans le moteur MyHordes est historiquement exposé comme "hard").
+
     #[serde(default)]
     pub hard: bool,
 }
@@ -67,7 +66,6 @@ pub struct MHCitizen {
     pub job: Option<MHJob>,
 }
 
-/// Fetches current user map and city details from MyHordes JSON API.
 pub async fn fetch_mh_data(
     user_key: &str,
     ssm_client: &aws_sdk_ssm::Client,
