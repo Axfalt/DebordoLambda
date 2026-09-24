@@ -844,8 +844,13 @@ async fn handle_reparo_modal_submit(
     let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
     let (config, buildings) = parse_reparo_modal_text(buildings_val);
 
-    if config.defense <= 0 || config.tdg_min <= 0 || config.tdg_max < config.tdg_min || buildings.is_empty() {
-        let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `tdg` (min-max) et la liste des bâtiments (format `Nom: vie/vie_max`).";
+    if config.defense <= 0
+        || config.tdg_min <= 0
+        || config.tdg_max < config.tdg_min
+        || config.iterations == 0
+        || buildings.is_empty()
+    {
+        let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `tdg` (min-max), `iterations` (doit être > 0) et la liste des bâtiments (format `Nom: vie/vie_max`).";
         let response = DiscordResponse {
             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
             data: Some(serde_json::json!({

@@ -209,8 +209,19 @@ pub fn calculate_reparation_probabilities(
     (tdg_min..=tdg_max)
         .into_par_iter()
         .map(|attack| {
-            let results = reparostats(attack, watch_def, iterations, buildings);
-            let stats = compute_statistics(&results);
+            let stats = if attack <= watch_def {
+                Statistics {
+                    mean: 0.0,
+                    median: 0.0,
+                    min: 0,
+                    max: 0,
+                    q1: 0.0,
+                    q3: 0.0,
+                }
+            } else {
+                let results = reparostats(attack, watch_def, iterations, buildings);
+                compute_statistics(&results)
+            };
             (attack, stats)
         })
         .collect()
@@ -314,6 +325,30 @@ mod tests {
         let buildings = default_buildings();
         let results = calculate_reparation_probabilities(0, (10, 5), 10, &buildings);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_reparation_probabilities_zero_stats_when_attack_at_or_below_defense() {
+        let buildings = default_buildings();
+        // watch_def = 100: attack 90 and 100 give damage_inflicted <= 0 (no possible damage),
+        // attack 101 does deal damage. Every skipped value must report all-zero Statistics,
+        // matching what a real (wasted) Monte Carlo run would have deterministically produced.
+        let results = calculate_reparation_probabilities(100, (90, 101), 200, &buildings);
+        let by_attack: std::collections::HashMap<i32, Statistics> = results.into_iter().collect();
+
+        for attack in [90, 100] {
+            let stats = by_attack[&attack];
+            assert_eq!(stats.mean, 0.0);
+            assert_eq!(stats.median, 0.0);
+            assert_eq!(stats.min, 0);
+            assert_eq!(stats.max, 0);
+            assert_eq!(stats.q1, 0.0);
+            assert_eq!(stats.q3, 0.0);
+        }
+
+        // Sanity check the boundary actually differs once attack exceeds defense.
+        let above = by_attack[&101];
+        assert!(above.max > 0, "attack above defense should be able to deal damage");
     }
 
     #[test]
