@@ -208,7 +208,7 @@ pub fn format_reparo_results(
     results: &[(i32, reparo_lib::Statistics)],
     elapsed_ms: u128,
     total_runs: u64,
-    buildings_count: usize,
+    buildings: &[reparo_lib::SimBuilding],
 ) -> String {
     let mut output = String::new();
     output.push_str("## 🔧 Résultats de la simulation de réparation\n\n");
@@ -220,7 +220,7 @@ pub fn format_reparo_results(
     ));
     output.push_str(&format!(
         "• **🏚️ Bâtiments pris en compte**: {}\n",
-        buildings_count
+        buildings.len()
     ));
     output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
     output.push('\n');
@@ -247,6 +247,32 @@ pub fn format_reparo_results(
     output
 }
 
+/// Construit le bloc spoiler listant les bâtiments (vie/vie max), pour le bouton "Voir la
+/// configuration" de /reparo. Séparé de `format_reparo_results` pour que l'appelant contrôle où
+/// l'insérer par rapport au reste du message (ex : après le lien du graphique) et puisse
+/// tronquer le message final à la limite Discord (2000 caractères) sans risquer de couper une
+/// partie plus importante que la liste des bâtiments.
+pub fn format_reparo_buildings_spoiler(buildings: &[reparo_lib::SimBuilding]) -> String {
+    if buildings.is_empty() {
+        return String::new();
+    }
+
+    let mut buildings_sorted = buildings.to_vec();
+    buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
+
+    let mut output = String::new();
+    output.push_str("-# 🏚️ Configuration des bâtiments (cliquez pour afficher)\n||");
+    for (i, b) in buildings_sorted.iter().enumerate() {
+        if i > 0 {
+            output.push('\n');
+        }
+        output.push_str(&format!("{}: {}/{}", b.name, b.life, b.max_life));
+    }
+    output.push_str("||");
+
+    output
+}
+
 pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuilding]) -> String {
     let mut buildings_sorted = buildings.to_vec();
     buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
@@ -265,12 +291,15 @@ pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuildi
     lines.join("\n")
 }
 
-pub fn truncate_for_discord_modal(text: &str, max_length: usize) -> String {
+/// Tronque un texte à `max_length` caractères en coupant uniquement sur des frontières de
+/// ligne (pour ne pas couper une entrée au milieu), en ajoutant `notice` à la fin. Partagée par
+/// le modal Discord de /reparo (limite `max_length` du champ TEXT_INPUT) et le message de
+/// résultats (limite de 2000 caractères d'un message Discord).
+pub fn truncate_for_discord(text: &str, max_length: usize, notice: &str) -> String {
     if text.chars().count() <= max_length {
         return text.to_string();
     }
 
-    let notice = "\n… (liste tronquée, trop de bâtiments pour le modal)";
     let budget = max_length.saturating_sub(notice.chars().count());
 
     let mut truncated = String::new();
@@ -288,6 +317,32 @@ pub fn truncate_for_discord_modal(text: &str, max_length: usize) -> String {
     }
     truncated.push_str(notice);
     truncated
+}
+
+/// Parse une ligne `Nom: vie/vie_max` en `SimBuilding`, en rejetant les valeurs négatives ou
+/// nulles (elles feraient produire à `reparo_gen` un total de dégâts négatif au lieu d'une
+/// entrée de simulation valide). Partagée par `parse_reparo_modal_text` (texte du modal) et
+/// `parse_reparo_result_content` (bloc spoiler du message de résultats), qui utilisent toutes
+/// deux ce même format de ligne.
+fn parse_building_line(line: &str) -> Option<reparo_lib::SimBuilding> {
+    let pos = line.rfind(':')?;
+    let name = line[..pos].trim();
+    let rest = line[pos + 1..].trim();
+    let (life_str, max_str) = rest.split_once('/')?;
+    let life = life_str.trim().parse::<i32>().ok()?;
+    let max_life = max_str.trim().parse::<i32>().ok()?;
+
+    if life >= 0 && max_life > 0 {
+        Some(reparo_lib::SimBuilding {
+            name: name.to_string(),
+            life,
+            max_life,
+            breakable: true,
+            temporary: false,
+        })
+    } else {
+        None
+    }
 }
 
 pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBuilding>) {
@@ -310,25 +365,8 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
         }
 
         if in_buildings_section {
-            if let Some(pos) = line.rfind(':') {
-                let name = line[..pos].trim();
-                let rest = line[pos + 1..].trim();
-                if let Some((life_str, max_str)) = rest.split_once('/')
-                    && let (Ok(life), Ok(max_life)) =
-                        (life_str.trim().parse::<i32>(), max_str.trim().parse::<i32>())
-                    {
-                        // Reject negative/zero values: they would make reparo_gen produce a
-                        // negative repair total instead of a valid simulation input.
-                        if life >= 0 && max_life > 0 {
-                            buildings.push(reparo_lib::SimBuilding {
-                                name: name.to_string(),
-                                life,
-                                max_life,
-                                breakable: true,
-                                temporary: false,
-                            });
-                        }
-                    }
+            if let Some(building) = parse_building_line(line) {
+                buildings.push(building);
             }
             continue;
         }
@@ -365,6 +403,70 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
     (config, buildings)
 }
 
+/// Extrait la configuration et la liste des bâtiments à partir du texte d'un message de
+/// résultats /reparo (produit par `format_reparo_results`), pour le bouton "Voir la
+/// configuration" — miroir de `parse_result_message_content` côté /debordo.
+pub fn parse_reparo_result_content(content: &str) -> (SimConfig, Vec<reparo_lib::SimBuilding>) {
+    let mut config = SimConfig {
+        iterations: 10000,
+        ..Default::default()
+    };
+    let mut buildings = Vec::new();
+    let mut in_buildings_section = false;
+
+    for line in content.lines() {
+        let mut line = line.trim();
+
+        if !in_buildings_section && line.starts_with("-# 🏚️") {
+            in_buildings_section = true;
+            continue;
+        }
+
+        if in_buildings_section {
+            if let Some(rest) = line.strip_prefix("||") {
+                line = rest;
+            }
+            if let Some(rest) = line.strip_suffix("||") {
+                line = rest;
+            }
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(building) = parse_building_line(line) {
+                buildings.push(building);
+            }
+            continue;
+        }
+
+        if line.contains("Défense") && line.contains("•") {
+            if let Some(pos) = line.rfind(':')
+                && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+            {
+                config.defense = v;
+            }
+        } else if line.contains("TDG") {
+            if let Some(pos) = line.rfind(':') {
+                let val_str = line[pos + 1..].trim();
+                if let Some(dash_pos) = val_str.find('-') {
+                    if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() {
+                        config.tdg_min = mn;
+                    }
+                    if let Ok(mx) = val_str[dash_pos + 1..].trim().parse::<i32>() {
+                        config.tdg_max = mx;
+                    }
+                }
+            }
+        } else if line.contains("Itérations") {
+            if let Some(pos) = line.rfind(':')
+                && let Ok(v) = line[pos + 1..].trim().parse::<u32>()
+            {
+                config.iterations = v;
+            }
+        }
+    }
+
+    (config, buildings)
+}
 
 pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<SimulationCitizen>) {
 
@@ -602,7 +704,16 @@ mod tests {
                 reparo_lib::Statistics { mean: 20.0, median: 19.0, min: 8, max: 40, q1: 15.0, q3: 25.0 },
             ),
         ];
-        let output = format_reparo_results(&config, &results, 42, 1000, 60);
+        let buildings: Vec<reparo_lib::SimBuilding> = (0..60)
+            .map(|i| reparo_lib::SimBuilding {
+                name: format!("Bâtiment {i}"),
+                life: 10,
+                max_life: 10,
+                breakable: true,
+                temporary: false,
+            })
+            .collect();
+        let output = format_reparo_results(&config, &results, 42, 1000, &buildings);
 
         assert!(output.contains("Défense**: 150"));
         assert!(output.contains("TDG**: 200 - 202"));
@@ -613,6 +724,10 @@ mod tests {
         assert!(output.contains("min 2"));
         assert!(output.contains("max 40"));
         assert!(output.contains("1000 simulations en 42ms"));
+        // format_reparo_results no longer embeds the building spoiler itself — the caller
+        // appends format_reparo_buildings_spoiler() where it wants (see worker.rs), so the
+        // caller can control ordering and safely truncate to Discord's message length limit.
+        assert!(!output.contains("||"));
     }
 
     #[test]
@@ -624,8 +739,85 @@ mod tests {
             iterations: 500,
             ..Default::default()
         };
-        let output = format_reparo_results(&config, &[], 5, 0, 60);
+        let output = format_reparo_results(&config, &[], 5, 0, &[]);
         assert!(output.contains("Aucun dégât attendu"));
+        assert!(!output.contains("||"));
+    }
+
+    #[test]
+    fn test_format_reparo_buildings_spoiler() {
+        let buildings = vec![
+            reparo_lib::SimBuilding {
+                name: "Muraille".to_string(),
+                life: 6,
+                max_life: 25,
+                breakable: true,
+                temporary: false,
+            },
+            reparo_lib::SimBuilding {
+                name: "Atelier".to_string(),
+                life: 23,
+                max_life: 25,
+                breakable: true,
+                temporary: false,
+            },
+        ];
+        let spoiler = format_reparo_buildings_spoiler(&buildings);
+        assert!(spoiler.starts_with("-# 🏚️"));
+        assert!(spoiler.contains("||Atelier: 23/25"));
+        assert!(spoiler.contains("Muraille: 6/25||"));
+        assert_eq!(format_reparo_buildings_spoiler(&[]), "");
+    }
+
+    #[test]
+    fn test_parse_reparo_result_content_roundtrip() {
+        let config = SimConfig {
+            defense: 150,
+            tdg_min: 200,
+            tdg_max: 202,
+            iterations: 500,
+            ..Default::default()
+        };
+        let results = vec![(
+            200,
+            reparo_lib::Statistics { mean: 10.0, median: 9.0, min: 2, max: 20, q1: 5.0, q3: 15.0 },
+        )];
+        let buildings = vec![
+            reparo_lib::SimBuilding {
+                name: "Muraille".to_string(),
+                life: 6,
+                max_life: 25,
+                breakable: true,
+                temporary: false,
+            },
+            reparo_lib::SimBuilding {
+                name: "Atelier".to_string(),
+                life: 23,
+                max_life: 25,
+                breakable: true,
+                temporary: false,
+            },
+        ];
+        // Matches how worker.rs assembles the real message: results text, then the chart link,
+        // then the buildings spoiler appended last.
+        let mut content = format_reparo_results(&config, &results, 42, 1000, &buildings);
+        content.push_str("\n\n🖼️ **Graphique**: https://quickchart.io/chart/render/example");
+        content.push_str("\n\n");
+        content.push_str(&format_reparo_buildings_spoiler(&buildings));
+
+        let (parsed_config, mut parsed_buildings) = parse_reparo_result_content(&content);
+        assert_eq!(parsed_config.defense, 150);
+        assert_eq!(parsed_config.tdg_min, 200);
+        assert_eq!(parsed_config.tdg_max, 202);
+        assert_eq!(parsed_config.iterations, 500);
+
+        parsed_buildings.sort_by_key(|b| b.name.clone());
+        assert_eq!(parsed_buildings.len(), 2);
+        assert_eq!(parsed_buildings[0].name, "Atelier");
+        assert_eq!(parsed_buildings[0].life, 23);
+        assert_eq!(parsed_buildings[0].max_life, 25);
+        assert_eq!(parsed_buildings[1].name, "Muraille");
+        assert_eq!(parsed_buildings[1].life, 6);
     }
 
     #[test]
@@ -736,13 +928,13 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_for_discord_modal_leaves_short_text_untouched() {
+    fn test_truncate_for_discord_leaves_short_text_untouched() {
         let text = "defense: 100\ntdg: 10-20\n---\nMuraille: 25/25";
-        assert_eq!(truncate_for_discord_modal(text, 4000), text);
+        assert_eq!(truncate_for_discord(text, 4000, "\n… (tronqué)"), text);
     }
 
     #[test]
-    fn test_truncate_for_discord_modal_stays_under_limit_and_keeps_whole_lines() {
+    fn test_truncate_for_discord_stays_under_limit_and_keeps_whole_lines() {
         let mut lines = vec!["defense: 100".to_string(), "---".to_string()];
         for i in 0..500 {
             lines.push(format!("Bâtiment numéro {i}: 25/25"));
@@ -750,9 +942,9 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.chars().count() > 4000);
 
-        let truncated = truncate_for_discord_modal(&text, 4000);
+        let truncated = truncate_for_discord(&text, 4000, "\n… (tronqué)");
         assert!(truncated.chars().count() <= 4000);
-        assert!(truncated.contains("tronquée"));
+        assert!(truncated.contains("tronqué"));
         // Every kept building line must be a complete, untruncated original line.
         for line in truncated.lines() {
             if line.starts_with("Bâtiment numéro") {

@@ -6,13 +6,18 @@ use std::time::Instant;
 use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
-use debordo_lib::config::{JobType, SimulationJob, format_reparo_results, format_results};
+use debordo_lib::config::{
+    JobType, SimulationJob, format_reparo_buildings_spoiler, format_reparo_results,
+    format_results, truncate_for_discord,
+};
 use debordo_lib::discord::api::send_followup;
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Limite de longueur d'un message Discord (contenu de followup).
+const DISCORD_MESSAGE_MAX_LENGTH: usize = 2000;
 
 async fn handler(event: LambdaEvent<SqsEvent>, http_client: &reqwest::Client) -> Result<(), Error> {
     for record in event.payload.records {
@@ -106,7 +111,7 @@ async fn process_reparo_job(
     http_client: &reqwest::Client,
 ) -> Result<(), Error> {
     let buildings = job.buildings.clone();
-    let buildings_count = buildings.len();
+    let buildings_for_display = buildings.clone();
     let watch_def = config.defense;
     let tdg_interval = config.tdg_interval();
     let iterations = config.iterations;
@@ -146,7 +151,7 @@ async fn process_reparo_job(
                 &results,
                 start.elapsed().as_millis(),
                 total_runs,
-                buildings_count,
+                &buildings_for_display,
             );
 
             // Posted as a plain link rather than a constructed embed: Discord still unfurls it
@@ -164,9 +169,24 @@ async fn process_reparo_job(
                 }
             }
 
+            // Appended last, after the headline stats and chart link, so that if the message
+            // would exceed Discord's length limit, truncation below only ever trims this
+            // lowest-priority detail block instead of the more important content above it.
+            let spoiler = format_reparo_buildings_spoiler(&buildings_for_display);
+            if !spoiler.is_empty() {
+                content.push_str("\n\n");
+                content.push_str(&spoiler);
+            }
+
             content
         }
     };
+
+    let content = truncate_for_discord(
+        &content,
+        DISCORD_MESSAGE_MAX_LENGTH,
+        "\n… (message tronqué, réponse trop longue pour Discord)",
+    );
 
     send_followup(http_client, &job.application_id, &job.token, &content).await?;
 

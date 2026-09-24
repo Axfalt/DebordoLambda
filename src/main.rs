@@ -6,8 +6,9 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_result_message_content,
-    JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, SimConfig, SimulationCitizen, SimulationJob,
+    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
+    parse_result_message_content, JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, SimConfig,
+    SimulationCitizen, SimulationJob,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -112,6 +113,17 @@ fn handle_component_interaction(
 
         let (config, citizens) = parse_result_message_content(msg_content);
         return respond_with_defenses_modal(&config, false, &citizens);
+    }
+
+    if custom_id == "vconf_reparo" {
+        let msg_content = interaction
+            .message
+            .as_ref()
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or_default();
+
+        let (config, buildings) = parse_reparo_result_content(msg_content);
+        return respond_with_buildings_modal(&config, &buildings);
     }
 
     let response = DiscordResponse {
@@ -789,9 +801,10 @@ fn respond_with_buildings_modal(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Responding with reparo buildings edit modal");
 
-    let buildings_str = debordo_lib::config::truncate_for_discord_modal(
+    let buildings_str = debordo_lib::config::truncate_for_discord(
         &format_reparo_conf(config, buildings),
         REPARO_MODAL_MAX_LENGTH,
+        "\n… (liste tronquée, trop de bâtiments pour le modal)",
     );
 
     let response = DiscordResponse {
