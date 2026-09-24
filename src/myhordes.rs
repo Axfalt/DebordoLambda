@@ -1,5 +1,3 @@
-//! Client module for MyHordes External JSON API.
-
 use serde::Deserialize;
 use tracing::{error, info};
 
@@ -30,8 +28,6 @@ pub struct MHCity {
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHDefense {
     pub total: i32,
-    /// Défense de la garde de nuit (citoyens actuellement de garde) — distincte de `total`, qui
-    /// agrège aussi bâtiments/objets/maisons/etc. /reparo a besoin des deux.
     #[serde(default)]
     pub watchmen: i32,
 }
@@ -177,14 +173,12 @@ mod tests {
         let city = map.city.unwrap();
         assert_eq!(city.defense.unwrap().total, 125);
 
-        // Test reactor check
         let has_reactor = city.buildings.iter().any(|b| {
             let name = b.name.to_lowercase();
             name.contains("réacteur") || name.contains("reactor")
         });
         assert!(has_reactor);
 
-        // Test fortifications check
         let has_fortifications = city.buildings.iter().any(|b| {
             let name = b.name.to_lowercase();
             name == "habitations fortifiées" || name == "habitations fortifiees"
@@ -195,11 +189,9 @@ mod tests {
         assert_eq!(estimations.min, 250);
         assert_eq!(estimations.max, 400);
 
-        // Test alive count
         let nb_hab = map.citizens.iter().filter(|c| !c.dead).count();
         assert_eq!(nb_hab, 2);
 
-        // Test min_def among alive citizens
         let min_def = map
             .citizens
             .iter()
@@ -220,7 +212,6 @@ mod tests {
 
     #[test]
     fn test_parse_defense_without_watchmen_field_defaults_zero() {
-        // Backward compatibility: /debordo's fields_param never requested "watchmen".
         let defense: MHDefense = serde_json::from_value(serde_json::json!({ "total": 125 })).unwrap();
         assert_eq!(defense.watchmen, 0);
     }
@@ -244,7 +235,6 @@ mod tests {
 
     #[test]
     fn test_parse_city_without_hard_field_defaults_false() {
-        // Backward compatibility: city payloads fetched via the old fields_param (no "hard").
         let city: MHCity = serde_json::from_value(serde_json::json!({ "buildings": [] })).unwrap();
         assert!(!city.hard);
     }
@@ -268,8 +258,6 @@ mod tests {
 
     #[test]
     fn test_parse_building_without_life_fields_defaults() {
-        // Backward compatibility: buildings fetched via the old debordo-only fields_param
-        // (name only) must still parse.
         let json_data = serde_json::json!({ "name": "Réacteur chimique" });
         let building: MHBuilding = serde_json::from_value(json_data).unwrap();
         assert_eq!(building.name, "Réacteur chimique");

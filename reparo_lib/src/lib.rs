@@ -98,25 +98,12 @@ pub fn default_buildings() -> Vec<SimBuilding> {
     .collect()
 }
 
-/// Calcule le budget de dégâts de réparation pour une valeur d'attaque donnée, en reproduisant
-/// la résolution de défense à deux étapes du vrai jeu (`NightlyHandler::stage2_attack`), porte
-/// toujours considérée fermée :
-/// 1. La défense totale réduit l'attaque en premier (`overflow = max(0, attack - total)`).
-/// 2. La veille réduit ensuite ce qui reste (`blocked = min(overflow, watch_def)`).
-/// 3. `round((attack - blocked) * 0.2)` devient le budget de dégâts des bâtiments — la base est
-///    `attack`, pas `overflow` : la défense totale ne fait que limiter ce que la veille peut
-///    arrêter, elle ne réduit pas elle-même les dégâts aux bâtiments.
 pub fn damage_pool(attack: i32, total_defense: i32, watch_def: i32) -> i32 {
     let initial_overflow = (attack - total_defense).max(0);
     let blocked_by_watch = initial_overflow.min(watch_def.max(0));
     ((attack - blocked_by_watch) as f64 * 0.2).round() as i32
 }
 
-/// Une seule simulation : répartit un budget de dégâts déjà calculé (voir `damage_pool`) sur
-/// les bâtiments de la ville et retourne le total de points de vie endommagés (à réparer).
-///
-/// Prend `(life, max_life)` plutôt que `&[SimBuilding]` pour éviter de cloner le nom (String)
-/// de chaque bâtiment à chaque itération — seuls ces deux entiers varient dans la boucle.
 fn reparo_gen(
     damage_inflicted: i32,
     buildings: &[(i32, i32)],
@@ -138,9 +125,6 @@ fn reparo_gen(
             continue;
         }
 
-        // `mt_rand(ceil(protoHp * 0.1), protoHp)` : les deux bornes dépendent des PV max du
-        // prototype (pas des PV actuels) et `mt_rand` inclut la borne haute. Comme
-        // max_life >= 1, ceil(max_life * 0.1) <= max_life : l'intervalle n'est jamais vide.
         let lower_damage_limit = (max_life as f64 * 0.1).ceil() as i32;
         let raw_damage = rng.random_range(lower_damage_limit..=max_life);
 
@@ -214,9 +198,6 @@ fn compute_statistics(data: &[i32]) -> Statistics {
     }
 }
 
-/// Calcule les statistiques de dégâts de réparation pour chaque valeur d'attaque possible dans
-/// l'intervalle de TDG donné. `total_defense` et `watch_def` sont tous deux nécessaires pour
-/// reproduire fidèlement la résolution à deux étapes du vrai jeu (voir `damage_pool`).
 pub fn calculate_reparation_probabilities(
     total_defense: i32,
     watch_def: i32,
@@ -233,8 +214,6 @@ pub fn calculate_reparation_probabilities(
         .into_par_iter()
         .map(|attack| {
             let damage_inflicted = damage_pool(attack, total_defense, watch_def);
-            // Skip the Monte Carlo run entirely when there's no damage budget — every
-            // iteration would deterministically return 0 anyway.
             let stats = if damage_inflicted <= 0 {
                 Statistics {
                     mean: 0.0,

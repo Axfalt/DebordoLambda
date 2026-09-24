@@ -27,7 +27,6 @@ pub struct SimConfig {
     pub is_interactive: bool,
     pub custom_defenses: Option<String>,
     pub home_bonus: i32,
-    /// Défense de veille (/reparo uniquement) — distincte de `defense`, la défense totale.
     #[serde(default)]
     pub veille: i32,
 }

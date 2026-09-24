@@ -681,8 +681,6 @@ async fn handle_reparo_command(
             .unwrap_or(None)
     };
     
-    // Without API data, total defense must be supplied explicitly: defaulting it to 0 would
-    // silently mean "walls stop nothing". Veille defaults to 0 (nobody on watch).
     let manual_fallback = || {
         (
             user_defense,
@@ -704,9 +702,6 @@ async fn handle_reparo_command(
                         );
                         manual_fallback()
                     } else {
-                        // Mirrors NightlyHandler::stage2_attack:
-                        // `$def = $town->getDevastated() ? 0 : $def_summary->sum();` — the API's
-                        // `total` doesn't apply that override itself.
                         let is_devastated =
                             map.city.as_ref().and_then(|c| c.devast).unwrap_or(false);
                         let api_defense = if is_devastated {
@@ -718,7 +713,6 @@ async fn handle_reparo_command(
                                 .map(|d| d.total)
                                 .unwrap_or(0)
                         };
-                        // Night-watch component only; 0 is legitimate (nobody on watch).
                         let api_veille = map
                             .city
                             .as_ref()
@@ -780,8 +774,6 @@ async fn handle_reparo_command(
         None => manual_fallback(),
     };
 
-    // 0 is legitimate for both (devastated town / nobody on watch) — only reject a missing
-    // total defense, negative values, or missing/invalid TDG data.
     let defense = match defense {
         Some(d) if d >= 0 && veille >= 0 && tdg_min > 0 && tdg_max >= tdg_min => d,
         _ => {
@@ -864,8 +856,7 @@ async fn handle_reparo_modal_submit(
 
     let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
     let (config, buildings) = parse_reparo_modal_text(buildings_val);
-
-    // 0 is legitimate for both defense (devastated town) and veille (nobody on watch).
+    
     if config.defense < 0
         || config.veille < 0
         || config.tdg_min <= 0
