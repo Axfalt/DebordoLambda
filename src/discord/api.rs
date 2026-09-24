@@ -43,7 +43,7 @@ async fn patch_followup(
     body: &serde_json::Value,
 ) -> Result<(), reqwest::Error> {
     client
-        .patch(&followup_message_url(application_id, token))
+        .patch(followup_message_url(application_id, token))
         .json(body)
         .send()
         .await?

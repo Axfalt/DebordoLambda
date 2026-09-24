@@ -9,7 +9,7 @@ use tracing::{error, info};
 
 use debordo_lib::config::{
     format_conf, format_reparo_conf, parse_reparo_modal_text, parse_result_message_content,
-    JobType, SimConfig, SimulationCitizen, SimulationJob, MAX_ITERATIONS,
+    JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, SimConfig, SimulationCitizen, SimulationJob,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -355,8 +355,7 @@ async fn handle_command(
             application_id,
             config,
             citizens,
-            job_type: JobType::Debordo,
-            buildings: Vec::new(),
+            ..Default::default()
         };
 
         return finalize_and_dispatch(job, sqs_client, queue_url, false).await;
@@ -421,8 +420,7 @@ async fn handle_command(
                 application_id,
                 config,
                 citizens,
-                job_type: JobType::Debordo,
-                buildings: Vec::new(),
+                ..Default::default()
             };
 
             finalize_and_dispatch(job, sqs_client, queue_url, false).await
@@ -573,8 +571,7 @@ async fn handle_command(
                             application_id,
                             config,
                             citizens,
-                            job_type: JobType::Debordo,
-                            buildings: Vec::new(),
+                            ..Default::default()
                         };
 
                         finalize_and_dispatch(job, sqs_client, queue_url, true).await
@@ -644,8 +641,7 @@ async fn handle_command(
                         application_id,
                         config,
                         citizens,
-                        job_type: JobType::Debordo,
-                        buildings: Vec::new(),
+                        ..Default::default()
                     };
 
                     finalize_and_dispatch(job, sqs_client, queue_url, false).await
@@ -862,6 +858,23 @@ async fn handle_reparo_modal_submit(
 
     if config.defense <= 0 || config.tdg_min <= 0 || config.tdg_max < config.tdg_min || buildings.is_empty() {
         let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `tdg` (min-max) et la liste des bâtiments (format `Nom: vie/vie_max`).";
+        let response = DiscordResponse {
+            response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+            data: Some(serde_json::json!({
+                "content": error_msg,
+                "flags": 64
+            })),
+        };
+        return Ok(build_json_response(200, &response));
+    }
+
+    let tdg_range_width = (config.tdg_max - config.tdg_min + 1) as u64;
+    let total_work = config.iterations as u64 * tdg_range_width;
+    if total_work > MAX_REPARO_TOTAL_WORK {
+        let error_msg = format!(
+            "Erreur : itérations ({}) × plage TDG ({}-{}, largeur {}) dépasse la limite autorisée. Réduisez le nombre d'itérations ou resserrez la plage TDG.",
+            config.iterations, config.tdg_min, config.tdg_max, tdg_range_width
+        );
         let response = DiscordResponse {
             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
             data: Some(serde_json::json!({
@@ -1253,8 +1266,7 @@ async fn handle_debordo_modal_submit(
         application_id,
         config,
         citizens,
-        job_type: JobType::Debordo,
-        buildings: Vec::new(),
+        ..Default::default()
     };
 
     enqueue_simulation(&job, sqs_client, queue_url).await

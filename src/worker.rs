@@ -12,6 +12,7 @@ use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
+const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 async fn handler(event: LambdaEvent<SqsEvent>, http_client: &reqwest::Client) -> Result<(), Error> {
     for record in event.payload.records {
@@ -178,7 +179,10 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+        .build()
+        .expect("failed to build reqwest client");
     info!("Starting DebordoLambda Worker");
     lambda_runtime::run(service_fn(move |event| {
         let client = http_client.clone();

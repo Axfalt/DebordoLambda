@@ -111,21 +111,23 @@ pub fn default_buildings() -> Vec<SimBuilding> {
     .collect()
 }
 
-/// Une seule simulation: répartit les dégâts d'une attaque sur les bâtiments de la ville
-/// et retourne le total de points de vie endommagés (à réparer).
-///
-/// Prend `(life, max_life)` plutôt que `&[SimBuilding]` pour éviter de cloner le nom (String)
-/// de chaque bâtiment à chaque itération — seuls ces deux entiers varient dans la boucle.
-fn reparo_gen(attack: i32, watch_def: i32, buildings: &[(i32, i32)], rng: &mut Mt64) -> i32 {
+fn reparo_gen(
+    attack: i32,
+    watch_def: i32,
+    buildings: &[(i32, i32)],
+    rng: &mut Mt64,
+    scratch: &mut Vec<(i32, i32)>,
+) -> i32 {
     let damage_inflicted = ((attack - watch_def) as f64 * 0.2).ceil() as i32;
     let mut damage_counter = damage_inflicted;
-    let mut bs = buildings.to_vec();
     let mut total_damaged_hp = 0;
 
-    bs.shuffle(rng);
+    scratch.clear();
+    scratch.extend_from_slice(buildings);
+    scratch.shuffle(rng);
 
-    while damage_counter > 0 && !bs.is_empty() {
-        let (life, max_life) = bs.pop().unwrap();
+    while damage_counter > 0 && !scratch.is_empty() {
+        let (life, max_life) = scratch.pop().unwrap();
         let lower_damage_limit = (life as f64 * 0.1).ceil() as i32;
 
         // Guard against an empty sampling range (e.g. a building already near destroyed,
@@ -152,8 +154,9 @@ fn reparostats(attack: i32, watch_def: i32, iterations: u32, buildings: &[SimBui
     // Converted once per attack value rather than per iteration — reparo_gen only needs the
     // (life, max_life) pair, a cheap Copy tuple, not the whole SimBuilding (with its String).
     let life_pairs: Vec<(i32, i32)> = buildings.iter().map(|b| (b.life, b.max_life)).collect();
+    let mut scratch = Vec::with_capacity(life_pairs.len());
     (0..iterations)
-        .map(|_| reparo_gen(attack, watch_def, &life_pairs, &mut rng))
+        .map(|_| reparo_gen(attack, watch_def, &life_pairs, &mut rng, &mut scratch))
         .collect()
 }
 
@@ -176,7 +179,7 @@ fn compute_statistics(data: &[i32]) -> Statistics {
     let sum: i32 = sorted_data.iter().sum();
     let mean = sum as f64 / len as f64;
 
-    let median = if len % 2 == 0 {
+    let median = if len.is_multiple_of(2) {
         (sorted_data[len / 2 - 1] + sorted_data[len / 2]) as f64 / 2.0
     } else {
         sorted_data[len / 2] as f64
@@ -185,13 +188,13 @@ fn compute_statistics(data: &[i32]) -> Statistics {
     let min = *sorted_data.first().unwrap();
     let max = *sorted_data.last().unwrap();
 
-    let q1 = if len % 4 == 0 {
+    let q1 = if len.is_multiple_of(4) {
         (sorted_data[len / 4 - 1] + sorted_data[len / 4]) as f64 / 2.0
     } else {
         sorted_data[len / 4] as f64
     };
 
-    let q3 = if (len * 3) % 4 == 0 {
+    let q3 = if (len * 3).is_multiple_of(4) {
         (sorted_data[(len * 3) / 4 - 1] + sorted_data[(len * 3) / 4]) as f64 / 2.0
     } else {
         sorted_data[(len * 3) / 4] as f64
@@ -253,8 +256,9 @@ mod tests {
         // life=1, max_life=1 => lower_damage_limit=ceil(0.1)=1 == max_life => empty range guard.
         let mut rng = Mt64::new(42);
         let buildings = life_pairs(&[building("Ruine", 1, 1)]);
+        let mut scratch = Vec::new();
         for _ in 0..100 {
-            let damage = reparo_gen(1000, 0, &buildings, &mut rng);
+            let damage = reparo_gen(1000, 0, &buildings, &mut rng, &mut scratch);
             assert!(damage >= 0);
         }
     }
@@ -263,8 +267,9 @@ mod tests {
     fn test_reparo_gen_zero_overflow_gives_zero_damage() {
         let mut rng = Mt64::new(1);
         let buildings = life_pairs(&default_buildings());
+        let mut scratch = Vec::new();
         // attack <= watch_def => no damage budget.
-        let damage = reparo_gen(50, 100, &buildings, &mut rng);
+        let damage = reparo_gen(50, 100, &buildings, &mut rng, &mut scratch);
         assert_eq!(damage, 0);
     }
 
@@ -273,13 +278,14 @@ mod tests {
         let mut rng = Mt64::new(7);
         let default_bs = default_buildings();
         let buildings = life_pairs(&default_bs);
+        let mut scratch = Vec::new();
         let max_tank = default_bs
             .iter()
             .map(|b| min(b.life, (b.max_life as f64 * 0.7).ceil() as i32))
             .sum::<i32>();
 
         for _ in 0..50 {
-            let damage = reparo_gen(100_000, 0, &buildings, &mut rng);
+            let damage = reparo_gen(100_000, 0, &buildings, &mut rng, &mut scratch);
             assert!(damage >= 0);
             assert!(
                 damage <= max_tank,

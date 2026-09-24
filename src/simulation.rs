@@ -247,7 +247,6 @@ fn complete_debordo_sequential(
         return (0.0, vec![0.0; citizens.len()], None);
     }
 
-    let threshold = citizens.iter().map(|c| c.defense).min().unwrap_or(0);
     let b_level_resolved = resolve_b_level(config, citizens);
 
     let mut town_hits = 0;
@@ -279,10 +278,7 @@ fn complete_debordo_sequential(
             capped_iterations += 1;
         }
 
-        if allocated.iter().any(|&x| x > threshold) {
-            town_hits += 1;
-        }
-
+        let mut any_citizen_died = false;
         if !citizens.is_empty() {
             use rand::seq::SliceRandom;
             indices.shuffle(&mut rng);
@@ -292,8 +288,12 @@ fn complete_debordo_sequential(
                 let zombies = allocated[j];
                 if zombies > citizens[idx].defense {
                     citizen_hits[idx] += 1;
+                    any_citizen_died = true;
                 }
             }
+        }
+        if any_citizen_died {
+            town_hits += 1;
         }
     }
 
@@ -1031,6 +1031,48 @@ mod tests {
         assert!(
             citizen_probs[1] > 0.0,
             "Bob (0 defense) should have a positive death rate"
+        );
+    }
+
+    #[test]
+    fn test_town_prob_matches_actual_citizen_deaths() {
+        // Regression test: the town-wide "Probabilité de mort" must reflect whether a
+        // real citizen (matched by their own defense) actually died, not whether some
+        // target slot merely exceeded the weakest citizen's defense as a generic
+        // threshold. With a single vulnerable citizen among many invincible ones,
+        // town_prob should equal that citizen's own death probability exactly.
+        use crate::config::SimulationCitizen;
+
+        let mut citizens = vec![SimulationCitizen {
+            name: "Vulnerable".to_string(),
+            defense: 0,
+        }];
+        for i in 0..38 {
+            citizens.push(SimulationCitizen {
+                name: format!("Tank{}", i),
+                defense: 1_000_000,
+            });
+        }
+
+        let (town_prob, _total_runs, citizen_probs, _avg_max_active) =
+            complete_overflow_probability(
+                &SimConfig {
+                    defense: 50,
+                    tdg_min: 200,
+                    tdg_max: 200,
+                    day: 13,
+                    iterations: 2000,
+                    nb_hab: 39,
+                    ..Default::default()
+                },
+                &citizens,
+            );
+
+        assert!(
+            (town_prob - citizen_probs[0]).abs() < 0.0001,
+            "town_prob ({}) should equal the only vulnerable citizen's death prob ({})",
+            town_prob,
+            citizen_probs[0]
         );
     }
 

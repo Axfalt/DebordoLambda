@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_ITERATIONS: u32 = 10_000_000;
+pub const MAX_REPARO_TOTAL_WORK: u64 = 20_000_000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommandOption {
@@ -90,7 +91,7 @@ pub enum JobType {
 }
 
 /// Payload envoyé via SQS au worker Lambda pour exécuter une simulation.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct SimulationJob {
     pub token: String,
     pub application_id: String,
@@ -164,6 +165,18 @@ pub fn format_results(
     }
     output.push_str(&fmt_line("📅 Jour", config.day));
     output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
+    if config.nb_drapo > 0 {
+        output.push_str(&fmt_line("🚩 Drapeaux", config.nb_drapo));
+    }
+    if config.is_reactor_built {
+        output.push_str("• **⚛️ Réacteur**: Oui\n");
+    }
+    if config.is_chaos {
+        output.push_str("• **☣️ Chaos**: Oui\n");
+    }
+    if config.is_devastated {
+        output.push_str("• **🏚️ Dévastée**: Oui\n");
+    }
     if let Some(avg_active) = avg_max_active {
         output.push_str(&format!(
             "• **🧟 Max zombies actifs (moyenne)**: {:.1}\n",
@@ -273,8 +286,8 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
             if let Some(pos) = line.rfind(':') {
                 let name = line[..pos].trim();
                 let rest = line[pos + 1..].trim();
-                if let Some((life_str, max_str)) = rest.split_once('/') {
-                    if let (Ok(life), Ok(max_life)) =
+                if let Some((life_str, max_str)) = rest.split_once('/')
+                    && let (Ok(life), Ok(max_life)) =
                         (life_str.trim().parse::<i32>(), max_str.trim().parse::<i32>())
                     {
                         // Reject negative/zero values: they would make reparo_gen produce a
@@ -289,7 +302,6 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
                             });
                         }
                     }
-                }
             }
             continue;
         }
@@ -355,33 +367,29 @@ pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<Simulation
                 continue;
             }
             // Format: • **Name**: 25 🛡️ — **5.000%**
-            if line.starts_with("• **") {
-                if let Some(colon_pos) = line.find(':') {
+            if line.starts_with("• **")
+                && let Some(colon_pos) = line.find(':') {
                     let name = line[4..colon_pos].trim_matches('*').trim();
                     let rest = line[colon_pos + 1..].trim();
-                    if let Some(def_str) = rest.split_whitespace().next() {
-                        if let Ok(def) = def_str.parse::<i32>() {
+                    if let Some(def_str) = rest.split_whitespace().next()
+                        && let Ok(def) = def_str.parse::<i32>() {
                             citizens.push(SimulationCitizen {
                                 name: name.to_string(),
                                 defense: def,
                             });
                         }
-                    }
                 }
-            }
         } else {
             if line.contains("Défense min") {
-                if let Some(pos) = line.rfind(':') {
-                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                if let Some(pos) = line.rfind(':')
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
                         config.min_def = v;
                     }
-                }
             } else if line.contains("Défense") && line.contains("•") {
-                if let Some(pos) = line.rfind(':') {
-                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                if let Some(pos) = line.rfind(':')
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
                         config.defense = v;
                     }
-                }
             } else if line.contains("TDG") {
                 if let Some(pos) = line.rfind(':') {
                     let val_str = line[pos + 1..].trim();
@@ -395,23 +403,31 @@ pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<Simulation
                     }
                 }
             } else if line.contains("Personnes en ville") {
-                if let Some(pos) = line.rfind(':') {
-                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                if let Some(pos) = line.rfind(':')
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
                         config.nb_hab = v;
                     }
-                }
             } else if line.contains("Jour") {
-                if let Some(pos) = line.rfind(':') {
-                    if let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                if let Some(pos) = line.rfind(':')
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
                         config.day = v;
                     }
-                }
             } else if line.contains("Itérations") {
-                if let Some(pos) = line.rfind(':') {
-                    if let Ok(v) = line[pos + 1..].trim().parse::<u32>() {
+                if let Some(pos) = line.rfind(':')
+                    && let Ok(v) = line[pos + 1..].trim().parse::<u32>() {
                         config.iterations = v;
                     }
-                }
+            } else if line.contains("Drapeaux") {
+                if let Some(pos) = line.rfind(':')
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
+                        config.nb_drapo = v;
+                    }
+            } else if line.contains("Réacteur") {
+                config.is_reactor_built = true;
+            } else if line.contains("Chaos") {
+                config.is_chaos = true;
+            } else if line.contains("Dévastée") {
+                config.is_devastated = true;
             }
         }
     }
@@ -734,5 +750,54 @@ mod tests {
         assert_eq!(parsed_citizens[0].defense, 30);
         assert_eq!(parsed_citizens[1].name, "Bob");
         assert_eq!(parsed_citizens[1].defense, 25);
+    }
+
+    #[test]
+    fn test_parse_result_message_content_roundtrips_reactor_chaos_devastated_flags() {
+        // Regression test: "Voir la configuration" reconstructs the SimConfig by parsing the
+        // results message text, so a flag that isn't printed there always resets to false.
+        let config = SimConfig {
+            defense: 200,
+            tdg_min: 60,
+            tdg_max: 90,
+            day: 3,
+            iterations: 1000,
+            nb_hab: 35,
+            nb_drapo: 2,
+            is_reactor_built: true,
+            is_chaos: true,
+            is_devastated: true,
+            ..Default::default()
+        };
+        let result_text = format_results(&config, 12.5, 42, 1000, None, &[], &[]);
+
+        let (parsed_config, _) = parse_result_message_content(&result_text);
+        assert_eq!(parsed_config.nb_drapo, 2);
+        assert!(
+            parsed_config.is_reactor_built,
+            "reactor flag should survive the round-trip through the results message"
+        );
+        assert!(parsed_config.is_chaos);
+        assert!(parsed_config.is_devastated);
+    }
+
+    #[test]
+    fn test_parse_result_message_content_defaults_flags_to_false_when_absent() {
+        let config = SimConfig {
+            defense: 100,
+            tdg_min: 50,
+            tdg_max: 60,
+            day: 1,
+            iterations: 100,
+            nb_hab: 40,
+            ..Default::default()
+        };
+        let result_text = format_results(&config, 1.0, 1, 100, None, &[], &[]);
+
+        let (parsed_config, _) = parse_result_message_content(&result_text);
+        assert_eq!(parsed_config.nb_drapo, 0);
+        assert!(!parsed_config.is_reactor_built);
+        assert!(!parsed_config.is_chaos);
+        assert!(!parsed_config.is_devastated);
     }
 }
