@@ -1,6 +1,3 @@
-//! Simulation Monte-Carlo des dégâts de réparation infligés aux bâtiments d'une ville
-//! lors d'une attaque de zombies. Porté depuis le prototype ReparoStats.
-
 use rand::RngExt;
 use rand::seq::SliceRandom;
 use rand_mt::Mt64;
@@ -27,16 +24,6 @@ pub struct SimBuilding {
     pub temporary: bool,
 }
 
-/// Liste de bâtiments par défaut (pleine vie) utilisée quand aucune donnée MyHordes n'est
-/// disponible pour l'utilisateur. Restreinte aux prototypes réellement déblocables en mode
-/// Pandemonium (`panda`), d'après la clé `unlocked_buildings` de la ville de type `panda` dans
-/// `config/app/rules.yml` du moteur MyHordes (88 codenames — pas de `disabled_buildings` propre
-/// à ce mode) recoupée avec le catalogue complet des prototypes relevé via un appel réel à
-/// l'API MyHordes (`GET /api/x/json/buildings`, indépendant de toute ville — contrairement à
-/// `city.buildings` sur `/api/x/json/me` qui ne liste que les bâtiments déjà construits dans la
-/// ville courante). Les 88 codenames se sont tous résolus dans le catalogue ; filtré aux
-/// bâtiments `breakable && !temporary`, à l'image du filtre appliqué lors de la récupération
-/// live dans `handle_reparo_command`.
 pub fn default_buildings() -> Vec<SimBuilding> {
     vec![
         ("Aqua-tourelles", 50),
@@ -151,8 +138,6 @@ fn reparo_gen(
 
 fn reparostats(attack: i32, watch_def: i32, iterations: u32, buildings: &[SimBuilding]) -> Vec<i32> {
     let mut rng = Mt64::new(rand::random());
-    // Converted once per attack value rather than per iteration — reparo_gen only needs the
-    // (life, max_life) pair, a cheap Copy tuple, not the whole SimBuilding (with its String).
     let life_pairs: Vec<(i32, i32)> = buildings.iter().map(|b| (b.life, b.max_life)).collect();
     let mut scratch = Vec::with_capacity(life_pairs.len());
     (0..iterations)
@@ -210,8 +195,6 @@ fn compute_statistics(data: &[i32]) -> Statistics {
     }
 }
 
-/// Calcule les statistiques de dégâts de réparation pour chaque valeur d'attaque possible
-/// dans l'intervalle de TDG donné.
 pub fn calculate_reparation_probabilities(
     watch_def: i32,
     tdg_interval: (i32, i32),

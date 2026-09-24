@@ -28,7 +28,6 @@ fn build_followup_body(content: &str) -> serde_json::Value {
     }
 }
 
-/// URL du webhook de réponse différée ("@original"), partagée par tous les envois de followup.
 fn followup_message_url(application_id: &str, token: &str) -> String {
     format!(
         "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
@@ -62,8 +61,6 @@ pub async fn send_followup(
     patch_followup(client, application_id, token, &body).await
 }
 
-/// Envoie une réponse différée contenant une image (embed) en plus du texte, utilisé par la
-/// commande /reparo pour joindre le graphique QuickChart.
 pub async fn send_followup_with_image(
     client: &reqwest::Client,
     application_id: &str,

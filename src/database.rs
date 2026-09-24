@@ -1,6 +1,3 @@
-//! Helper module to encrypt and save user keys in DynamoDB using local AES-256-GCM client-side,
-//! with the key passphrase fetched dynamically at runtime from AWS SSM Parameter Store.
-
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
@@ -11,7 +8,6 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
-/// Helper function to retrieve the encryption passphrase from SSM and derive a 32-byte key.
 async fn derive_key(ssm_client: &aws_sdk_ssm::Client) -> Result<[u8; 32], lambda_runtime::Error> {
     let param_name =
         std::env::var("SSM_PARAMETER_NAME").unwrap_or_else(|_| "MH_EID_ENCRYPTION_KEY".to_string());
@@ -51,8 +47,6 @@ async fn derive_key(ssm_client: &aws_sdk_ssm::Client) -> Result<[u8; 32], lambda
     Ok(key_hash)
 }
 
-/// Encrypts a plaintext key using local AES-256-GCM (with key fetched from AWS SSM Parameter Store)
-/// and stores it in the DynamoDB UserExternalIds table.
 pub async fn store_user_key(
     user_id: &str,
     plaintext_key: &str,
@@ -116,7 +110,6 @@ pub async fn store_user_key(
     Ok(())
 }
 
-/// Retrieves and decrypts the API key for a user from DynamoDB.
 pub async fn get_user_key(
     user_id: &str,
     db_client: &aws_sdk_dynamodb::Client,

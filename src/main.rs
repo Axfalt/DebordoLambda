@@ -1,5 +1,3 @@
-//! DebordoLambda - Commande Discord slash pour simulations de débordements
-
 use aws_lambda_events::apigw::{ApiGatewayV2httpRequest, ApiGatewayV2httpResponse};
 use aws_lambda_events::http::HeaderMap;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
@@ -17,11 +15,6 @@ use debordo_lib::discord::{
 };
 use debordo_lib::{database, myhordes};
 
-// ============================================================================
-// LAMBDA HANDLER
-// ============================================================================
-
-/// Handler principal pour les requêtes Lambda via API Gateway.
 async fn handler(
     event: LambdaEvent<ApiGatewayV2httpRequest>,
     sqs_client: aws_sdk_sqs::Client,
@@ -33,8 +26,7 @@ async fn handler(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let request = event.payload;
     let body = request.body.unwrap_or_default();
-
-    // Récupérer les headers pour la vérification de signature
+    
     let headers = &request.headers;
     let signature = headers
         .get("x-signature-ed25519")
@@ -44,8 +36,7 @@ async fn handler(
         .get("x-signature-timestamp")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-
-    // Vérifier la signature Discord (skip en mode test si la variable d'env est définie)
+    
     let skip_signature = std::env::var("SKIP_SIGNATURE_CHECK")
         .map(|v| v == "true")
         .unwrap_or(false);
@@ -54,8 +45,7 @@ async fn handler(
         error!("Invalid Discord signature");
         return Ok(build_response(401, "Invalid signature"));
     }
-
-    // Parser l'interaction Discord
+    
     let interaction: DiscordInteraction = match serde_json::from_str(&body) {
         Ok(i) => i,
         Err(e) => {
@@ -63,8 +53,7 @@ async fn handler(
             return Ok(build_response(400, "Invalid request body"));
         }
     };
-
-    // Router selon le type d'interaction
+    
     match interaction.interaction_type {
         interaction_types::PING => handle_ping(),
         interaction_types::APPLICATION_COMMAND => {
@@ -105,7 +94,6 @@ async fn handler(
     }
 }
 
-/// Gère le clic sur un bouton Discord.
 fn handle_component_interaction(
     interaction: DiscordInteraction,
 ) -> Result<ApiGatewayV2httpResponse, Error> {

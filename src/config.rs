@@ -193,7 +193,6 @@ pub fn format_results(
             .iter()
             .zip(citizen_percentages.iter().copied())
             .collect();
-        // Sort alphabetically by name (case-insensitive)
         list.sort_by_key(|a| a.0.name.to_lowercase());
 
         for &(citizen, c_prob) in &list {
