@@ -155,7 +155,6 @@ pub fn format_results(
         output.push_str(&fmt_line("🏠 Défense min", config.min_def));
     }
     output.push_str(&fmt_line("📅 Jour", config.day));
-    output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
     if config.nb_drapo > 0 {
         output.push_str(&fmt_line("🚩 Drapeaux", config.nb_drapo));
     }
@@ -174,6 +173,8 @@ pub fn format_results(
             avg_active
         ));
     }
+    // Always last, regardless of which optional lines above were printed.
+    output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
     output.push('\n');
 
     output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
@@ -622,6 +623,45 @@ mod tests {
         assert!(!res_comp.contains("Défense min"));
         assert!(!res_comp.contains("Bonus maison"));
         assert!(!res_comp.contains("Max zombies actifs (moyenne)"));
+    }
+
+    #[test]
+    fn test_format_results_iterations_always_last_parameter_line() {
+        // With every optional parameter line enabled at once, "Itérations" must still be the
+        // last bullet in the **Paramètres:** list, regardless of which combination is active.
+        let config = SimConfig {
+            defense: 100,
+            tdg_min: 50,
+            tdg_max: 60,
+            min_def: 15,
+            nb_drapo: 3,
+            is_reactor_built: true,
+            is_chaos: true,
+            is_devastated: true,
+            iterations: 12345,
+            ..Default::default()
+        };
+        let output = format_results(&config, 5.0, 10, 1000, Some(25.0), &[], &[]);
+
+        let iterations_pos = output.find("Itérations").expect("Itérations line missing");
+        for label in [
+            "Défense min",
+            "Drapeaux",
+            "Réacteur",
+            "Chaos",
+            "Dévastée",
+            "Max zombies actifs",
+        ] {
+            let label_pos = output.find(label).unwrap_or_else(|| panic!("{label} line missing"));
+            assert!(
+                iterations_pos > label_pos,
+                "Itérations (at {iterations_pos}) should come after {label} (at {label_pos})"
+            );
+        }
+
+        // Iterations must still appear before the blank line that ends the parameter block.
+        let params_end = output.find("💀 **Probabilité").expect("probability line missing");
+        assert!(iterations_pos < params_end);
     }
 
     #[test]
