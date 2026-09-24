@@ -83,12 +83,6 @@ struct QuickChartCreateResponse {
     url: Option<String>,
 }
 
-/// Crée un graphique hébergé via l'API QuickChart.io et retourne son URL (courte, ~60
-/// caractères, indépendante de la taille de la config). Contrairement à un lien
-/// `GET /chart?c=<config encodée>` direct, cette URL reste toujours sous la limite de longueur
-/// acceptée par Discord pour une image d'embed, quelle que soit la largeur de la plage TDG — une
-/// plage de 240 valeurs produit une URL directe d'environ 10 000 caractères, que Discord rejette
-/// avec un 400 Bad Request sur le PATCH du followup.
 pub async fn create_chart_url(
     http_client: &reqwest::Client,
     chart_config: &serde_json::Value,

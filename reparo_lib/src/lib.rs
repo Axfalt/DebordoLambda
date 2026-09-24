@@ -117,8 +117,6 @@ fn reparo_gen(
         let (life, max_life) = scratch.pop().unwrap();
         let lower_damage_limit = (life as f64 * 0.1).ceil() as i32;
 
-        // Guard against an empty sampling range (e.g. a building already near destroyed,
-        // where lower_damage_limit >= max_life) — sampling such a range panics.
         let raw_damage = if lower_damage_limit >= max_life {
             life
         } else {
@@ -247,7 +245,6 @@ mod tests {
 
     #[test]
     fn test_reparo_gen_does_not_panic_on_near_destroyed_building() {
-        // life=1, max_life=1 => lower_damage_limit=ceil(0.1)=1 == max_life => empty range guard.
         let mut rng = Mt64::new(42);
         let buildings = life_pairs(&[building("Ruine", 1, 1)]);
         let mut scratch = Vec::new();
@@ -262,7 +259,6 @@ mod tests {
         let mut rng = Mt64::new(1);
         let buildings = life_pairs(&default_buildings());
         let mut scratch = Vec::new();
-        // attack <= watch_def => no damage budget.
         let damage = reparo_gen(50, 100, &buildings, &mut rng, &mut scratch);
         assert_eq!(damage, 0);
     }
@@ -330,9 +326,6 @@ mod tests {
     #[test]
     fn test_calculate_reparation_probabilities_zero_stats_when_attack_at_or_below_defense() {
         let buildings = default_buildings();
-        // watch_def = 100: attack 90 and 100 give damage_inflicted <= 0 (no possible damage),
-        // attack 101 does deal damage. Every skipped value must report all-zero Statistics,
-        // matching what a real (wasted) Monte Carlo run would have deterministically produced.
         let results = calculate_reparation_probabilities(100, (90, 101), 200, &buildings);
         let by_attack: std::collections::HashMap<i32, Statistics> = results.into_iter().collect();
 
@@ -346,7 +339,6 @@ mod tests {
             assert_eq!(stats.q3, 0.0);
         }
 
-        // Sanity check the boundary actually differs once attack exceeds defense.
         let above = by_attack[&101];
         assert!(above.max > 0, "attack above defense should be able to deal damage");
     }

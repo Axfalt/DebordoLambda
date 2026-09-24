@@ -1,5 +1,3 @@
-//! Configuration de simulation extraite des paramètres Discord.
-
 use serde::{Deserialize, Serialize};
 
 pub const MAX_ITERATIONS: u32 = 10_000_000;
@@ -11,7 +9,6 @@ pub struct CommandOption {
     pub value: serde_json::Value,
 }
 
-/// Configuration de simulation avec tous les paramètres nécessaires.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SimConfig {
     pub defense: i32,
@@ -33,7 +30,6 @@ pub struct SimConfig {
 }
 
 impl SimConfig {
-    /// Crée une configuration à partir des options de commande Discord.
     pub fn from_options(options: &[CommandOption]) -> Self {
         let mut config = SimConfig {
             iterations: 10000,
@@ -75,14 +71,12 @@ impl SimConfig {
     }
 }
 
-/// Citoyen modélisé pour la simulation de survie détaillée.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimulationCitizen {
     pub name: String,
     pub defense: i32,
 }
 
-/// Type de simulation à exécuter dans le worker.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub enum JobType {
     #[default]
@@ -90,7 +84,6 @@ pub enum JobType {
     Reparation,
 }
 
-/// Payload envoyé via SQS au worker Lambda pour exécuter une simulation.
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct SimulationJob {
     pub token: String,
@@ -104,7 +97,6 @@ pub struct SimulationJob {
     pub buildings: Vec<reparo_lib::SimBuilding>,
 }
 
-/// Formate la configuration sous forme textuelle clé: valeur, réutilisable pour le copier/coller en mode interactif.
 pub fn format_conf(config: &SimConfig, citizens: &[SimulationCitizen]) -> String {
     let mut citizens_sorted = citizens.to_vec();
     citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
@@ -138,7 +130,6 @@ pub fn format_conf(config: &SimConfig, citizens: &[SimulationCitizen]) -> String
     config_lines.join("\n")
 }
 
-/// Formate les résultats de simulation pour l'affichage Discord.
 pub fn format_results(
     config: &SimConfig,
     prob: f64,
@@ -212,8 +203,6 @@ pub fn format_results(
     output
 }
 
-/// Formate les résultats de la simulation /reparo pour l'affichage Discord, dans le même style
-/// que `format_results` (débordement).
 pub fn format_reparo_results(
     config: &SimConfig,
     results: &[(i32, reparo_lib::Statistics)],
@@ -258,8 +247,6 @@ pub fn format_reparo_results(
     output
 }
 
-/// Formate la configuration et la liste des bâtiments pour le modal Discord de /reparo,
-/// permettant à l'utilisateur de relire/modifier l'état de sa ville avant de lancer la simulation.
 pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuilding]) -> String {
     let mut buildings_sorted = buildings.to_vec();
     buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
@@ -278,9 +265,6 @@ pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuildi
     lines.join("\n")
 }
 
-/// Tronque un texte à `max_length` caractères pour respecter la limite `max_length` d'un champ
-/// TEXT_INPUT de modal Discord, en coupant uniquement sur des frontières de ligne (pour ne pas
-/// couper une entrée `Nom: vie/vie_max` au milieu) et en ajoutant un avertissement visible.
 pub fn truncate_for_discord_modal(text: &str, max_length: usize) -> String {
     if text.chars().count() <= max_length {
         return text.to_string();
@@ -306,8 +290,6 @@ pub fn truncate_for_discord_modal(text: &str, max_length: usize) -> String {
     truncated
 }
 
-/// Extrait la configuration SimConfig et la liste des bâtiments à partir du texte soumis via
-/// le modal Discord de /reparo.
 pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBuilding>) {
     let mut config = SimConfig {
         iterations: 10000,
@@ -383,7 +365,7 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
     (config, buildings)
 }
 
-/// Extrait la configuration SimConfig et les citoyens à partir du texte d'un message de résultats Discord.
+
 pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<SimulationCitizen>) {
 
     let mut config = SimConfig {
@@ -789,7 +771,6 @@ mod tests {
 
     #[test]
     fn test_simulation_job_deserializes_without_new_fields() {
-        // Old-shape SQS payload from before job_type/buildings existed must still parse.
         let old_json = serde_json::json!({
             "token": "tok",
             "application_id": "app",
@@ -844,8 +825,6 @@ mod tests {
 
     #[test]
     fn test_parse_result_message_content_roundtrips_reactor_chaos_devastated_flags() {
-        // Regression test: "Voir la configuration" reconstructs the SimConfig by parsing the
-        // results message text, so a flag that isn't printed there always resets to false.
         let config = SimConfig {
             defense: 200,
             tdg_min: 60,
