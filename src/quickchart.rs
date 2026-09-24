@@ -1,9 +1,10 @@
 use reparo_lib::Statistics;
 use serde::Deserialize;
 
-/// Nombre maximal de points par série envoyés à QuickChart : au-delà, le graphique devient
-/// illisible et la requête trop lourde (une plage TDG large donne un point par valeur d'attaque).
-const MAX_CHART_POINTS: usize = 100;
+/// Nombre maximal de points par série accepté par l'offre gratuite de QuickChart : au-delà, le
+/// rendu échoue en 400 ("maximum chart data exceeded"), quel que soit le nombre de séries.
+/// Source : https://community.quickchart.io/t/maximum-chart-data-exceeded/727
+const MAX_CHART_POINTS: usize = 250;
 
 /// Sélectionne au plus `max_points` éléments régulièrement espacés, en conservant toujours le
 /// premier et le dernier (les bornes de la TDG).
