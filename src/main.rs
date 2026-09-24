@@ -647,7 +647,7 @@ async fn handle_reparo_command(
     ssm_client: &aws_sdk_ssm::Client,
     http_client: &reqwest::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
-    let mut user_defense: Option<i32> = None;
+    let mut user_veille: Option<i32> = None;
     let mut user_tdg_min: Option<i32> = None;
     let mut user_tdg_max: Option<i32> = None;
     let mut user_iterations: Option<i32> = None;
@@ -657,7 +657,7 @@ async fn handle_reparo_command(
     if let Some(opts) = options {
         for opt in opts {
             match opt.name.as_str() {
-                "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
+                "veille" => user_veille = opt.value.as_i64().map(|v| v as i32),
                 "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
                 "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
                 "iterations" => user_iterations = opt.value.as_i64().map(|v| v.max(0) as i32),
@@ -680,14 +680,14 @@ async fn handle_reparo_command(
     
     let manual_fallback = || {
         (
-            user_defense.unwrap_or(0),
+            user_veille.unwrap_or(0),
             user_tdg_min.unwrap_or(0),
             user_tdg_max.unwrap_or(0),
             reparo_lib::default_buildings(),
         )
     };
 
-    let (defense, tdg_min, tdg_max, buildings) = match user_key {
+    let (veille, tdg_min, tdg_max, buildings) = match user_key {
         Some(key) => match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
             Ok(mh_data) => match mh_data.map {
                 Some(map) => {
@@ -703,7 +703,7 @@ async fn handle_reparo_command(
                         // contributed by citizens currently on night-watch duty, which the API
                         // exposes as its own component. 0 is a legitimate value (nobody on
                         // watch), not a missing-data signal.
-                        let api_defense = map
+                        let api_veille = map
                             .city
                             .as_ref()
                             .and_then(|c| c.defense.as_ref())
@@ -746,7 +746,7 @@ async fn handle_reparo_command(
                         };
 
                         (
-                            user_defense.unwrap_or(api_defense),
+                            user_veille.unwrap_or(api_veille),
                             user_tdg_min.unwrap_or(api_tdg_min),
                             user_tdg_max.unwrap_or(api_tdg_max),
                             buildings,
@@ -763,10 +763,10 @@ async fn handle_reparo_command(
         None => manual_fallback(),
     };
 
-    // defense == 0 is a legitimate value (nobody on watch), unlike /debordo's town defense —
+    // veille == 0 is a legitimate value (nobody on watch), unlike /debordo's town defense —
     // only reject a negative value or missing/invalid TDG data.
-    if defense < 0 || tdg_min <= 0 || tdg_max < tdg_min {
-        let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `defense`, `tdg_min` et `tdg_max`.";
+    if veille < 0 || tdg_min <= 0 || tdg_max < tdg_min {
+        let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez utiliser `/register-key` ou fournir manuellement les paramètres `veille`, `tdg_min` et `tdg_max`.";
         let response = DiscordResponse {
             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
             data: Some(serde_json::json!({
@@ -778,7 +778,7 @@ async fn handle_reparo_command(
     }
 
     let config = SimConfig {
-        defense,
+        defense: veille,
         tdg_min,
         tdg_max,
         iterations,
@@ -851,7 +851,7 @@ async fn handle_reparo_modal_submit(
         || config.iterations == 0
         || buildings.is_empty()
     {
-        let error_msg = "Erreur : configuration invalide. Vérifiez `defense`, `tdg` (min-max), `iterations` (doit être > 0) et la liste des bâtiments (format `Nom: vie/vie_max`).";
+        let error_msg = "Erreur : configuration invalide. Vérifiez `veille`, `tdg` (min-max), `iterations` (doit être > 0) et la liste des bâtiments (format `Nom: vie/vie_max`).";
         let response = DiscordResponse {
             response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
             data: Some(serde_json::json!({

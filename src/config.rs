@@ -214,7 +214,7 @@ pub fn format_reparo_results(
     let mut output = String::new();
     output.push_str("## 🔧 Résultats de la simulation de réparation\n\n");
     output.push_str("**Paramètres:**\n");
-    output.push_str(&format!("• **🛡️ Défense (veille)**: {}\n", config.defense));
+    output.push_str(&format!("• **👁️ Veille**: {}\n", config.defense));
     output.push_str(&format!(
         "• **🔭 TDG**: {} - {}\n",
         config.tdg_min, config.tdg_max
@@ -253,7 +253,7 @@ pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuildi
     buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
 
     let mut lines = vec![
-        format!("defense: {}", config.defense),
+        format!("veille: {}", config.defense),
         format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
         format!("iterations: {}", config.iterations),
         "---".to_string(),
@@ -341,7 +341,9 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
             let key = line[..pos].trim().to_lowercase();
             let val = line[pos + 1..].trim();
             match key.as_str() {
-                "defense" | "défense" => {
+                // "defense"/"défense" kept as aliases for backward compatibility with any
+                // modal text generated before the field was renamed to "veille".
+                "veille" | "defense" | "défense" => {
                     if let Ok(v) = val.parse::<i32>() {
                         config.defense = v;
                     }
@@ -378,7 +380,7 @@ pub fn parse_reparo_result_content(content: &str) -> SimConfig {
     for line in content.lines() {
         let line = line.trim();
 
-        if line.contains("Défense") && line.contains("•") {
+        if line.contains("Veille") && line.contains("•") {
             if let Some(pos) = line.rfind(':')
                 && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
             {
@@ -694,7 +696,7 @@ mod tests {
             .collect();
         let output = format_reparo_results(&config, &results, 42, 1000, &buildings);
 
-        assert!(output.contains("Défense (veille)**: 150"));
+        assert!(output.contains("Veille**: 150"));
         assert!(output.contains("TDG**: 200 - 202"));
         assert!(output.contains("Bâtiments pris en compte**: 60"));
         assert!(output.contains("Itérations**: 500"));
@@ -818,7 +820,7 @@ mod tests {
         ];
 
         let text = format_reparo_conf(&config, &buildings);
-        assert!(text.contains("defense: 150"));
+        assert!(text.contains("veille: 150"));
         assert!(text.contains("tdg: 50-80"));
         assert!(text.contains("iterations: 5000"));
         assert!(text.contains("Atelier: 19/25"));
@@ -841,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_parse_reparo_modal_text_ignores_malformed_building_lines() {
-        let text = "defense: 100\ntdg: 10-20\niterations: 1000\n---\nGoodBuilding: 5/10\nBadLine without slash\nAnother: notanumber/10";
+        let text = "veille: 100\ntdg: 10-20\niterations: 1000\n---\nGoodBuilding: 5/10\nBadLine without slash\nAnother: notanumber/10";
         let (config, buildings) = parse_reparo_modal_text(text);
         assert_eq!(config.defense, 100);
         assert_eq!(buildings.len(), 1);
@@ -850,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_parse_reparo_modal_text_rejects_negative_or_zero_building_values() {
-        let text = "defense: 100\ntdg: 10-20\niterations: 1000\n---\nNegativeLife: -5/10\nNegativeMax: 10/-5\nZeroMax: 5/0\nValid: 5/10";
+        let text = "veille: 100\ntdg: 10-20\niterations: 1000\n---\nNegativeLife: -5/10\nNegativeMax: 10/-5\nZeroMax: 5/0\nValid: 5/10";
         let (_, buildings) = parse_reparo_modal_text(text);
         assert_eq!(buildings.len(), 1);
         assert_eq!(buildings[0].name, "Valid");
@@ -888,6 +890,21 @@ mod tests {
         let (config, _) = parse_reparo_modal_text(text);
         assert_eq!(config.defense, 150);
         assert_eq!(config.iterations, 500);
+    }
+
+    #[test]
+    fn test_parse_reparo_modal_text_veille_is_the_primary_key() {
+        let text = "veille: 42\ntdg: 10-20\niterations: 500\n---";
+        let (config, _) = parse_reparo_modal_text(text);
+        assert_eq!(config.defense, 42);
+    }
+
+    #[test]
+    fn test_parse_reparo_modal_text_accepts_legacy_defense_key() {
+        // "defense"/"défense" kept as aliases after the field was renamed to "veille".
+        let text = "defense: 42\ntdg: 10-20\niterations: 500\n---";
+        let (config, _) = parse_reparo_modal_text(text);
+        assert_eq!(config.defense, 42);
     }
 
     #[test]
