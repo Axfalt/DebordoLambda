@@ -18,6 +18,14 @@ pub struct DiscordInteraction {
 #[derive(Debug, Deserialize)]
 pub struct DiscordMessage {
     pub content: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<DiscordAttachment>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscordAttachment {
+    pub filename: String,
+    pub url: String,
 }
 
 #[derive(Debug, Deserialize)]

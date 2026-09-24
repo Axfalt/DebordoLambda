@@ -7,10 +7,10 @@ use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    JobType, SimulationJob, format_reparo_buildings_spoiler, format_reparo_results,
+    JobType, SimulationJob, format_reparo_buildings_attachment, format_reparo_results,
     format_results, truncate_for_discord,
 };
-use debordo_lib::discord::api::send_followup;
+use debordo_lib::discord::api::{send_followup, send_followup_with_attachment};
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
 
@@ -130,18 +130,22 @@ async fn process_reparo_job(
     )
     .await;
 
-    let content = match result {
+    let (content, attachment) = match result {
         Err(_elapsed) => {
             error!("Reparo simulation timed out after {}s", SIMULATION_TIMEOUT_SECS);
-            "⏱️ La simulation a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string()
+            (
+                "⏱️ La simulation a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string(),
+                None,
+            )
         }
         Ok(Err(e)) => {
             error!("Reparo simulation panicked: {}", e);
-            "❌ La simulation a échoué. Veuillez réessayer.".to_string()
+            ("❌ La simulation a échoué. Veuillez réessayer.".to_string(), None)
         }
-        Ok(Ok(results)) if results.is_empty() => {
-            "❌ Aucun résultat : vérifiez que tdg_min <= tdg_max.".to_string()
-        }
+        Ok(Ok(results)) if results.is_empty() => (
+            "❌ Aucun résultat : vérifiez que tdg_min <= tdg_max.".to_string(),
+            None,
+        ),
         Ok(Ok(results)) => {
             let ran_count = results.iter().filter(|(attack, _)| *attack > watch_def).count() as u64;
             let total_runs = ran_count * iterations as u64;
@@ -169,16 +173,13 @@ async fn process_reparo_job(
                 }
             }
 
-            // Appended last, after the headline stats and chart link, so that if the message
-            // would exceed Discord's length limit, truncation below only ever trims this
-            // lowest-priority detail block instead of the more important content above it.
-            let spoiler = format_reparo_buildings_spoiler(&buildings_for_display);
-            if !spoiler.is_empty() {
-                content.push_str("\n\n");
-                content.push_str(&spoiler);
-            }
+            // The building list is never shown by default in the message — it's posted as a
+            // separate, collapsed file attachment instead (opened on click), so it has no
+            // practical length limit and never risks pushing the message over Discord's
+            // 2000-character cap the way an inline block would.
+            let buildings_text = format_reparo_buildings_attachment(&buildings_for_display);
 
-            content
+            (content, Some(buildings_text))
         }
     };
 
@@ -188,7 +189,20 @@ async fn process_reparo_job(
         "\n… (message tronqué, réponse trop longue pour Discord)",
     );
 
-    send_followup(http_client, &job.application_id, &job.token, &content).await?;
+    match attachment {
+        Some(buildings_text) => {
+            send_followup_with_attachment(
+                http_client,
+                &job.application_id,
+                &job.token,
+                &content,
+                "buildings.txt",
+                buildings_text,
+            )
+            .await?
+        }
+        None => send_followup(http_client, &job.application_id, &job.token, &content).await?,
+    }
 
     info!("Reparo simulation results sent to Discord");
     Ok(())

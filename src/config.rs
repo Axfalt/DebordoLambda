@@ -247,30 +247,27 @@ pub fn format_reparo_results(
     output
 }
 
-/// Construit le bloc spoiler listant les bâtiments (vie/vie max), pour le bouton "Voir la
-/// configuration" de /reparo. Séparé de `format_reparo_results` pour que l'appelant contrôle où
-/// l'insérer par rapport au reste du message (ex : après le lien du graphique) et puisse
-/// tronquer le message final à la limite Discord (2000 caractères) sans risquer de couper une
-/// partie plus importante que la liste des bâtiments.
-pub fn format_reparo_buildings_spoiler(buildings: &[reparo_lib::SimBuilding]) -> String {
-    if buildings.is_empty() {
-        return String::new();
-    }
-
+/// Construit le contenu texte (une entrée `Nom: vie/vie_max` par ligne) de la pièce jointe
+/// `buildings.txt` accompagnant le message de résultats /reparo : jamais affichée par défaut
+/// (pièce jointe repliée, à ouvrir sur clic) et sans limite de longueur pratique, contrairement
+/// à un bloc intégré au contenu du message. Relue par le bouton "Voir la configuration" pour
+/// pré-remplir le modal — voir `parse_reparo_buildings_attachment`.
+pub fn format_reparo_buildings_attachment(buildings: &[reparo_lib::SimBuilding]) -> String {
     let mut buildings_sorted = buildings.to_vec();
     buildings_sorted.sort_by_key(|b| b.name.to_lowercase());
 
-    let mut output = String::new();
-    output.push_str("-# 🏚️ Configuration des bâtiments (cliquez pour afficher)\n||");
-    for (i, b) in buildings_sorted.iter().enumerate() {
-        if i > 0 {
-            output.push('\n');
-        }
-        output.push_str(&format!("{}: {}/{}", b.name, b.life, b.max_life));
-    }
-    output.push_str("||");
+    buildings_sorted
+        .iter()
+        .map(|b| format!("{}: {}/{}", b.name, b.life, b.max_life))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    output
+/// Extrait la liste des bâtiments à partir du contenu texte de la pièce jointe `buildings.txt`
+/// (voir `format_reparo_buildings_attachment`), pour le bouton "Voir la configuration" de
+/// /reparo.
+pub fn parse_reparo_buildings_attachment(text: &str) -> Vec<reparo_lib::SimBuilding> {
+    text.lines().filter_map(parse_building_line).collect()
 }
 
 pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuilding]) -> String {
@@ -322,8 +319,8 @@ pub fn truncate_for_discord(text: &str, max_length: usize, notice: &str) -> Stri
 /// Parse une ligne `Nom: vie/vie_max` en `SimBuilding`, en rejetant les valeurs négatives ou
 /// nulles (elles feraient produire à `reparo_gen` un total de dégâts négatif au lieu d'une
 /// entrée de simulation valide). Partagée par `parse_reparo_modal_text` (texte du modal) et
-/// `parse_reparo_result_content` (bloc spoiler du message de résultats), qui utilisent toutes
-/// deux ce même format de ligne.
+/// `parse_reparo_buildings_attachment` (pièce jointe `buildings.txt`), qui utilisent toutes deux
+/// ce même format de ligne.
 fn parse_building_line(line: &str) -> Option<reparo_lib::SimBuilding> {
     let pos = line.rfind(':')?;
     let name = line[..pos].trim();
@@ -403,40 +400,18 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
     (config, buildings)
 }
 
-/// Extrait la configuration et la liste des bâtiments à partir du texte d'un message de
-/// résultats /reparo (produit par `format_reparo_results`), pour le bouton "Voir la
-/// configuration" — miroir de `parse_result_message_content` côté /debordo.
-pub fn parse_reparo_result_content(content: &str) -> (SimConfig, Vec<reparo_lib::SimBuilding>) {
+/// Extrait la configuration à partir du texte d'un message de résultats /reparo (produit par
+/// `format_reparo_results`), pour le bouton "Voir la configuration" — miroir de
+/// `parse_result_message_content` côté /debordo. La liste des bâtiments n'est pas dans ce texte
+/// (voir `parse_reparo_buildings_attachment`, relue depuis la pièce jointe `buildings.txt`).
+pub fn parse_reparo_result_content(content: &str) -> SimConfig {
     let mut config = SimConfig {
         iterations: 10000,
         ..Default::default()
     };
-    let mut buildings = Vec::new();
-    let mut in_buildings_section = false;
 
     for line in content.lines() {
-        let mut line = line.trim();
-
-        if !in_buildings_section && line.starts_with("-# 🏚️") {
-            in_buildings_section = true;
-            continue;
-        }
-
-        if in_buildings_section {
-            if let Some(rest) = line.strip_prefix("||") {
-                line = rest;
-            }
-            if let Some(rest) = line.strip_suffix("||") {
-                line = rest;
-            }
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(building) = parse_building_line(line) {
-                buildings.push(building);
-            }
-            continue;
-        }
+        let line = line.trim();
 
         if line.contains("Défense") && line.contains("•") {
             if let Some(pos) = line.rfind(':')
@@ -465,7 +440,7 @@ pub fn parse_reparo_result_content(content: &str) -> (SimConfig, Vec<reparo_lib:
         }
     }
 
-    (config, buildings)
+    config
 }
 
 pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<SimulationCitizen>) {
@@ -724,9 +699,9 @@ mod tests {
         assert!(output.contains("min 2"));
         assert!(output.contains("max 40"));
         assert!(output.contains("1000 simulations en 42ms"));
-        // format_reparo_results no longer embeds the building spoiler itself — the caller
-        // appends format_reparo_buildings_spoiler() where it wants (see worker.rs), so the
-        // caller can control ordering and safely truncate to Discord's message length limit.
+        // format_reparo_results never embeds the building list itself — it's posted as a
+        // separate file attachment (see worker.rs / format_reparo_buildings_attachment), not
+        // shown inline in the message.
         assert!(!output.contains("||"));
     }
 
@@ -745,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_reparo_buildings_spoiler() {
+    fn test_format_and_parse_reparo_buildings_attachment_roundtrip() {
         let buildings = vec![
             reparo_lib::SimBuilding {
                 name: "Muraille".to_string(),
@@ -762,11 +737,26 @@ mod tests {
                 temporary: false,
             },
         ];
-        let spoiler = format_reparo_buildings_spoiler(&buildings);
-        assert!(spoiler.starts_with("-# 🏚️"));
-        assert!(spoiler.contains("||Atelier: 23/25"));
-        assert!(spoiler.contains("Muraille: 6/25||"));
-        assert_eq!(format_reparo_buildings_spoiler(&[]), "");
+        let attachment_text = format_reparo_buildings_attachment(&buildings);
+        assert_eq!(attachment_text, "Atelier: 23/25\nMuraille: 6/25");
+        assert_eq!(format_reparo_buildings_attachment(&[]), "");
+
+        let mut parsed = parse_reparo_buildings_attachment(&attachment_text);
+        parsed.sort_by_key(|b| b.name.clone());
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Atelier");
+        assert_eq!(parsed[0].life, 23);
+        assert_eq!(parsed[0].max_life, 25);
+        assert_eq!(parsed[1].name, "Muraille");
+        assert_eq!(parsed[1].life, 6);
+    }
+
+    #[test]
+    fn test_parse_reparo_buildings_attachment_ignores_malformed_lines() {
+        let text = "GoodBuilding: 5/10\nBadLine without slash\nNegative: -5/10";
+        let parsed = parse_reparo_buildings_attachment(text);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "GoodBuilding");
     }
 
     #[test]
@@ -782,42 +772,23 @@ mod tests {
             200,
             reparo_lib::Statistics { mean: 10.0, median: 9.0, min: 2, max: 20, q1: 5.0, q3: 15.0 },
         )];
-        let buildings = vec![
-            reparo_lib::SimBuilding {
-                name: "Muraille".to_string(),
-                life: 6,
-                max_life: 25,
-                breakable: true,
-                temporary: false,
-            },
-            reparo_lib::SimBuilding {
-                name: "Atelier".to_string(),
-                life: 23,
-                max_life: 25,
-                breakable: true,
-                temporary: false,
-            },
-        ];
-        // Matches how worker.rs assembles the real message: results text, then the chart link,
-        // then the buildings spoiler appended last.
+        let buildings = vec![reparo_lib::SimBuilding {
+            name: "Muraille".to_string(),
+            life: 6,
+            max_life: 25,
+            breakable: true,
+            temporary: false,
+        }];
+        // Matches how worker.rs assembles the real message: results text, then the chart link.
+        // The buildings list is never part of this text (it's the separate attachment).
         let mut content = format_reparo_results(&config, &results, 42, 1000, &buildings);
         content.push_str("\n\n🖼️ **Graphique**: https://quickchart.io/chart/render/example");
-        content.push_str("\n\n");
-        content.push_str(&format_reparo_buildings_spoiler(&buildings));
 
-        let (parsed_config, mut parsed_buildings) = parse_reparo_result_content(&content);
+        let parsed_config = parse_reparo_result_content(&content);
         assert_eq!(parsed_config.defense, 150);
         assert_eq!(parsed_config.tdg_min, 200);
         assert_eq!(parsed_config.tdg_max, 202);
         assert_eq!(parsed_config.iterations, 500);
-
-        parsed_buildings.sort_by_key(|b| b.name.clone());
-        assert_eq!(parsed_buildings.len(), 2);
-        assert_eq!(parsed_buildings[0].name, "Atelier");
-        assert_eq!(parsed_buildings[0].life, 23);
-        assert_eq!(parsed_buildings[0].max_life, 25);
-        assert_eq!(parsed_buildings[1].name, "Muraille");
-        assert_eq!(parsed_buildings[1].life, 6);
     }
 
     #[test]

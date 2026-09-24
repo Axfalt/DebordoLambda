@@ -67,6 +67,40 @@ pub async fn send_followup(
     patch_followup(client, application_id, token, &body).await
 }
 
+/// Envoie une réponse différée avec une pièce jointe texte (utilisé par /reparo pour la liste
+/// des bâtiments) au lieu de l'inclure dans le contenu du message : pas affichée par défaut
+/// (pièce jointe repliée, à ouvrir sur clic) et sans risque de dépasser la limite de longueur
+/// d'un message Discord, quelle que soit la taille de la ville.
+pub async fn send_followup_with_attachment(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+    filename: &str,
+    file_content: String,
+) -> Result<(), reqwest::Error> {
+    let mut body = build_followup_body(content);
+    body["attachments"] = serde_json::json!([{ "id": 0, "filename": filename }]);
+
+    let part = reqwest::multipart::Part::text(file_content)
+        .file_name(filename.to_string())
+        .mime_str("text/plain")
+        .expect("text/plain is a valid mime type");
+
+    let form = reqwest::multipart::Form::new()
+        .text("payload_json", body.to_string())
+        .part("files[0]", part);
+
+    client
+        .patch(followup_message_url(application_id, token))
+        .multipart(form)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    Ok(())
+}
+
 pub async fn create_followup_message(
     client: &reqwest::Client,
     application_id: &str,

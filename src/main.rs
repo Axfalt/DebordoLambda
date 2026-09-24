@@ -6,9 +6,9 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
-    parse_result_message_content, JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, SimConfig,
-    SimulationCitizen, SimulationJob,
+    format_conf, format_reparo_conf, parse_reparo_buildings_attachment, parse_reparo_modal_text,
+    parse_reparo_result_content, parse_result_message_content, JobType, MAX_ITERATIONS,
+    MAX_REPARO_TOTAL_WORK, SimConfig, SimulationCitizen, SimulationJob,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -90,13 +90,50 @@ async fn handler(
             )
             .await
         }
-        interaction_types::MESSAGE_COMPONENT => handle_component_interaction(interaction),
+        interaction_types::MESSAGE_COMPONENT => {
+            handle_component_interaction(interaction, http_client).await
+        }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
 }
 
-fn handle_component_interaction(
+/// Récupère et parse la pièce jointe `buildings.txt` d'un message de résultats /reparo, pour
+/// pré-remplir le modal du bouton "Voir la configuration". Retourne un message d'erreur
+/// utilisateur (déjà loggé côté serveur) en cas d'échec plutôt que de propager l'erreur brute.
+async fn fetch_reparo_buildings(
+    http_client: &reqwest::Client,
+    interaction: &DiscordInteraction,
+) -> Result<Vec<reparo_lib::SimBuilding>, &'static str> {
+    let url = interaction
+        .message
+        .as_ref()
+        .and_then(|m| m.attachments.iter().find(|a| a.filename == "buildings.txt"))
+        .map(|a| a.url.clone())
+        .ok_or(
+            "Erreur : liste des bâtiments introuvable pour ce message. Veuillez relancer /reparo.",
+        )?;
+
+    let resp = http_client.get(&url).send().await.map_err(|e| {
+        error!("Failed to fetch buildings attachment: {}", e);
+        "Erreur : impossible de récupérer la liste des bâtiments. Veuillez relancer /reparo."
+    })?;
+
+    let resp = resp.error_for_status().map_err(|e| {
+        error!("Buildings attachment fetch returned an error status: {}", e);
+        "Erreur : la pièce jointe des bâtiments n'est plus disponible. Veuillez relancer /reparo."
+    })?;
+
+    let text = resp.text().await.map_err(|e| {
+        error!("Failed to read buildings attachment body: {}", e);
+        "Erreur : impossible de lire la liste des bâtiments. Veuillez relancer /reparo."
+    })?;
+
+    Ok(parse_reparo_buildings_attachment(&text))
+}
+
+async fn handle_component_interaction(
     interaction: DiscordInteraction,
+    http_client: &reqwest::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let custom_id = interaction
         .data
@@ -121,8 +158,22 @@ fn handle_component_interaction(
             .as_ref()
             .and_then(|m| m.content.as_deref())
             .unwrap_or_default();
+        let config = parse_reparo_result_content(msg_content);
 
-        let (config, buildings) = parse_reparo_result_content(msg_content);
+        let buildings = match fetch_reparo_buildings(http_client, &interaction).await {
+            Ok(buildings) => buildings,
+            Err(error_msg) => {
+                let response = DiscordResponse {
+                    response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+                    data: Some(serde_json::json!({
+                        "content": error_msg,
+                        "flags": 64
+                    })),
+                };
+                return Ok(build_json_response(200, &response));
+            }
+        };
+
         return respond_with_buildings_modal(&config, &buildings);
     }
 
