@@ -1,13 +1,34 @@
 use reparo_lib::Statistics;
 use serde::Deserialize;
 
+/// Nombre maximal de points par série envoyés à QuickChart : au-delà, le graphique devient
+/// illisible et la requête trop lourde (une plage TDG large donne un point par valeur d'attaque).
+const MAX_CHART_POINTS: usize = 100;
+
+/// Sélectionne au plus `max_points` éléments régulièrement espacés, en conservant toujours le
+/// premier et le dernier (les bornes de la TDG).
+fn downsample<T>(items: &[T], max_points: usize) -> Vec<&T> {
+    if items.len() <= max_points || max_points < 2 {
+        return items.iter().collect();
+    }
+    let last = items.len() - 1;
+    (0..max_points)
+        .map(|i| &items[i * last / (max_points - 1)])
+        .collect()
+}
+
+fn round1(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
 pub fn build_chart_config(results: &[(i32, Statistics)]) -> serde_json::Value {
-    let labels: Vec<i32> = results.iter().map(|(attack, _)| *attack).collect();
-    let q1: Vec<f64> = results.iter().map(|(_, s)| s.q1).collect();
-    let q3: Vec<f64> = results.iter().map(|(_, s)| s.q3).collect();
-    let mean: Vec<f64> = results.iter().map(|(_, s)| s.mean).collect();
-    let min: Vec<i32> = results.iter().map(|(_, s)| s.min).collect();
-    let max: Vec<i32> = results.iter().map(|(_, s)| s.max).collect();
+    let points = downsample(results, MAX_CHART_POINTS);
+    let labels: Vec<i32> = points.iter().map(|(attack, _)| *attack).collect();
+    let q1: Vec<f64> = points.iter().map(|(_, s)| round1(s.q1)).collect();
+    let q3: Vec<f64> = points.iter().map(|(_, s)| round1(s.q3)).collect();
+    let mean: Vec<f64> = points.iter().map(|(_, s)| round1(s.mean)).collect();
+    let min: Vec<i32> = points.iter().map(|(_, s)| s.min).collect();
+    let max: Vec<i32> = points.iter().map(|(_, s)| s.max).collect();
 
     serde_json::json!({
         "type": "line",
@@ -175,4 +196,44 @@ mod tests {
         assert_eq!(config["type"], "line");
     }
 
+    #[test]
+    fn downsample_keeps_small_inputs_untouched() {
+        let items: Vec<i32> = (0..10).collect();
+        let sampled: Vec<i32> = downsample(&items, 100).into_iter().copied().collect();
+        assert_eq!(sampled, items);
+    }
+
+    #[test]
+    fn downsample_caps_points_and_keeps_bounds() {
+        let items: Vec<i32> = (2275..=2514).collect();
+        let sampled: Vec<i32> = downsample(&items, 100).into_iter().copied().collect();
+        assert_eq!(sampled.len(), 100);
+        assert_eq!(sampled.first(), Some(&2275));
+        assert_eq!(sampled.last(), Some(&2514));
+        assert!(sampled.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn build_chart_config_caps_points_for_wide_tdg_range() {
+        let stats = sample_results()[0].1.clone();
+        let results: Vec<(i32, Statistics)> =
+            (1000..=3000).map(|attack| (attack, stats.clone())).collect();
+        let config = build_chart_config(&results);
+
+        let labels = config["data"]["labels"].as_array().unwrap();
+        assert_eq!(labels.len(), MAX_CHART_POINTS);
+        assert_eq!(labels[0], 1000);
+        assert_eq!(labels[MAX_CHART_POINTS - 1], 3000);
+        for dataset in config["data"]["datasets"].as_array().unwrap() {
+            assert_eq!(dataset["data"].as_array().unwrap().len(), MAX_CHART_POINTS);
+        }
+    }
+
+    #[test]
+    fn build_chart_config_rounds_float_series() {
+        let mut stats = sample_results()[0].1.clone();
+        stats.mean = 12.345_678;
+        let config = build_chart_config(&[(100, stats)]);
+        assert_eq!(config["data"]["datasets"][2]["data"][0], 12.3);
+    }
 }
