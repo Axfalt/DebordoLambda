@@ -1,5 +1,3 @@
-//! Client module for MyHordes External JSON API.
-
 use serde::Deserialize;
 use tracing::{error, info};
 
@@ -30,6 +28,8 @@ pub struct MHCity {
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHDefense {
     pub total: i32,
+    #[serde(default)]
+    pub watchmen: i32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -95,7 +95,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,hard,defense.fields(total),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
+    let fields_param = "map.fields(days,city.fields(chaos,devast,hard,defense.fields(total,watchmen),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -173,14 +173,12 @@ mod tests {
         let city = map.city.unwrap();
         assert_eq!(city.defense.unwrap().total, 125);
 
-        // Test reactor check
         let has_reactor = city.buildings.iter().any(|b| {
             let name = b.name.to_lowercase();
             name.contains("réacteur") || name.contains("reactor")
         });
         assert!(has_reactor);
 
-        // Test fortifications check
         let has_fortifications = city.buildings.iter().any(|b| {
             let name = b.name.to_lowercase();
             name == "habitations fortifiées" || name == "habitations fortifiees"
@@ -191,11 +189,9 @@ mod tests {
         assert_eq!(estimations.min, 250);
         assert_eq!(estimations.max, 400);
 
-        // Test alive count
         let nb_hab = map.citizens.iter().filter(|c| !c.dead).count();
         assert_eq!(nb_hab, 2);
 
-        // Test min_def among alive citizens
         let min_def = map
             .citizens
             .iter()
@@ -204,6 +200,20 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert_eq!(min_def, 12);
+    }
+
+    #[test]
+    fn test_parse_defense_watchmen_field() {
+        let defense: MHDefense =
+            serde_json::from_value(serde_json::json!({ "total": 125, "watchmen": 18 })).unwrap();
+        assert_eq!(defense.total, 125);
+        assert_eq!(defense.watchmen, 18);
+    }
+
+    #[test]
+    fn test_parse_defense_without_watchmen_field_defaults_zero() {
+        let defense: MHDefense = serde_json::from_value(serde_json::json!({ "total": 125 })).unwrap();
+        assert_eq!(defense.watchmen, 0);
     }
 
     #[test]
@@ -225,7 +235,6 @@ mod tests {
 
     #[test]
     fn test_parse_city_without_hard_field_defaults_false() {
-        // Backward compatibility: city payloads fetched via the old fields_param (no "hard").
         let city: MHCity = serde_json::from_value(serde_json::json!({ "buildings": [] })).unwrap();
         assert!(!city.hard);
     }
@@ -249,8 +258,6 @@ mod tests {
 
     #[test]
     fn test_parse_building_without_life_fields_defaults() {
-        // Backward compatibility: buildings fetched via the old debordo-only fields_param
-        // (name only) must still parse.
         let json_data = serde_json::json!({ "name": "Réacteur chimique" });
         let building: MHBuilding = serde_json::from_value(json_data).unwrap();
         assert_eq!(building.name, "Réacteur chimique");

@@ -27,6 +27,8 @@ pub struct SimConfig {
     pub is_interactive: bool,
     pub custom_defenses: Option<String>,
     pub home_bonus: i32,
+    #[serde(default)]
+    pub veille: i32,
 }
 
 impl SimConfig {
@@ -215,6 +217,7 @@ pub fn format_reparo_results(
     output.push_str("## 🔧 Résultats de la simulation de réparation\n\n");
     output.push_str("**Paramètres:**\n");
     output.push_str(&format!("• **🛡️ Défense**: {}\n", config.defense));
+    output.push_str(&format!("• **⚔️ Veille**: {}\n", config.veille));
     output.push_str(&format!(
         "• **🔭 TDG**: {} - {}\n",
         config.tdg_min, config.tdg_max
@@ -241,6 +244,11 @@ pub fn format_reparo_results(
     }
 
     output.push_str(&format!(
+        "🧱 **Cap d'absorption des bâtiments: {} PV**\n\n",
+        reparo_lib::damage_capacity(buildings)
+    ));
+
+    output.push_str(&format!(
         "-# ⏱️ {} simulations en {}ms",
         total_runs, elapsed_ms
     ));
@@ -254,6 +262,7 @@ pub fn format_reparo_conf(config: &SimConfig, buildings: &[reparo_lib::SimBuildi
 
     let mut lines = vec![
         format!("defense: {}", config.defense),
+        format!("veille: {}", config.veille),
         format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
         format!("iterations: {}", config.iterations),
         "---".to_string(),
@@ -346,6 +355,11 @@ pub fn parse_reparo_modal_text(text: &str) -> (SimConfig, Vec<reparo_lib::SimBui
                         config.defense = v;
                     }
                 }
+                "veille" => {
+                    if let Ok(v) = val.parse::<i32>() {
+                        config.veille = v;
+                    }
+                }
                 "tdg" => {
                     if let Some((mn, mx)) = val.split_once('-') {
                         if let Ok(v) = mn.trim().parse::<i32>() {
@@ -383,6 +397,12 @@ pub fn parse_reparo_result_content(content: &str) -> SimConfig {
                 && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
             {
                 config.defense = v;
+            }
+        } else if line.contains("Veille") && line.contains("•") {
+            if let Some(pos) = line.rfind(':')
+                && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+            {
+                config.veille = v;
             }
         } else if line.contains("TDG") {
             if let Some(pos) = line.rfind(':') {
@@ -668,6 +688,7 @@ mod tests {
     fn test_format_reparo_results_headline_stats() {
         let config = SimConfig {
             defense: 150,
+            veille: 35,
             tdg_min: 200,
             tdg_max: 202,
             iterations: 500,
@@ -695,6 +716,7 @@ mod tests {
         let output = format_reparo_results(&config, &results, 42, 1000, &buildings);
 
         assert!(output.contains("Défense**: 150"));
+        assert!(output.contains("Veille**: 35"));
         assert!(output.contains("TDG**: 200 - 202"));
         assert!(output.contains("Bâtiments pris en compte**: 60"));
         assert!(output.contains("Itérations**: 500"));
@@ -702,6 +724,8 @@ mod tests {
         assert!(output.contains("min 2"));
         assert!(output.contains("max 40"));
         assert!(output.contains("1000 simulations en 42ms"));
+        // 60 buildings at 10/10: each absorbs at most ceil(10 * 0.7) = 7.
+        assert!(output.contains("Capacité d'absorption des bâtiments: 420 PV"));
         assert!(!output.contains("||"));
     }
 
@@ -716,6 +740,7 @@ mod tests {
         };
         let output = format_reparo_results(&config, &[], 5, 0, &[]);
         assert!(output.contains("Aucun dégât attendu"));
+        assert!(output.contains("Capacité d'absorption des bâtiments: 0 PV"));
         assert!(!output.contains("||"));
     }
 
@@ -723,6 +748,7 @@ mod tests {
     fn test_parse_reparo_result_content_roundtrip() {
         let config = SimConfig {
             defense: 150,
+            veille: 35,
             tdg_min: 200,
             tdg_max: 202,
             iterations: 500,
@@ -744,6 +770,7 @@ mod tests {
 
         let parsed_config = parse_reparo_result_content(&content);
         assert_eq!(parsed_config.defense, 150);
+        assert_eq!(parsed_config.veille, 35);
         assert_eq!(parsed_config.tdg_min, 200);
         assert_eq!(parsed_config.tdg_max, 202);
         assert_eq!(parsed_config.iterations, 500);
@@ -795,6 +822,7 @@ mod tests {
     fn test_format_reparo_conf_and_parse_roundtrip() {
         let config = SimConfig {
             defense: 150,
+            veille: 35,
             tdg_min: 50,
             tdg_max: 80,
             iterations: 5000,
@@ -819,6 +847,7 @@ mod tests {
 
         let text = format_reparo_conf(&config, &buildings);
         assert!(text.contains("defense: 150"));
+        assert!(text.contains("veille: 35"));
         assert!(text.contains("tdg: 50-80"));
         assert!(text.contains("iterations: 5000"));
         assert!(text.contains("Atelier: 19/25"));
@@ -826,6 +855,7 @@ mod tests {
 
         let (parsed_config, mut parsed_buildings) = parse_reparo_modal_text(&text);
         assert_eq!(parsed_config.defense, 150);
+        assert_eq!(parsed_config.veille, 35);
         assert_eq!(parsed_config.tdg_min, 50);
         assert_eq!(parsed_config.tdg_max, 80);
         assert_eq!(parsed_config.iterations, 5000);
@@ -841,16 +871,17 @@ mod tests {
 
     #[test]
     fn test_parse_reparo_modal_text_ignores_malformed_building_lines() {
-        let text = "defense: 100\ntdg: 10-20\niterations: 1000\n---\nGoodBuilding: 5/10\nBadLine without slash\nAnother: notanumber/10";
+        let text = "defense: 100\nveille: 10\ntdg: 10-20\niterations: 1000\n---\nGoodBuilding: 5/10\nBadLine without slash\nAnother: notanumber/10";
         let (config, buildings) = parse_reparo_modal_text(text);
         assert_eq!(config.defense, 100);
+        assert_eq!(config.veille, 10);
         assert_eq!(buildings.len(), 1);
         assert_eq!(buildings[0].name, "GoodBuilding");
     }
 
     #[test]
     fn test_parse_reparo_modal_text_rejects_negative_or_zero_building_values() {
-        let text = "defense: 100\ntdg: 10-20\niterations: 1000\n---\nNegativeLife: -5/10\nNegativeMax: 10/-5\nZeroMax: 5/0\nValid: 5/10";
+        let text = "defense: 100\nveille: 10\ntdg: 10-20\niterations: 1000\n---\nNegativeLife: -5/10\nNegativeMax: 10/-5\nZeroMax: 5/0\nValid: 5/10";
         let (_, buildings) = parse_reparo_modal_text(text);
         assert_eq!(buildings.len(), 1);
         assert_eq!(buildings[0].name, "Valid");
@@ -888,6 +919,14 @@ mod tests {
         let (config, _) = parse_reparo_modal_text(text);
         assert_eq!(config.defense, 150);
         assert_eq!(config.iterations, 500);
+    }
+
+    #[test]
+    fn test_parse_reparo_modal_text_defense_and_veille_are_separate_fields() {
+        let text = "defense: 1463\nveille: 42\ntdg: 10-20\niterations: 500\n---";
+        let (config, _) = parse_reparo_modal_text(text);
+        assert_eq!(config.defense, 1463);
+        assert_eq!(config.veille, 42);
     }
 
     #[test]

@@ -168,7 +168,13 @@ commands = [
         "options": [
             {
                 "name": "defense",
-                "description": "Valeur de défense de la garde",
+                "description": "Défense totale de la ville (requise sans clé API)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "veille",
+                "description": "Défense apportée par les citoyens de garde cette nuit (défaut: 0, personne ne garde)",
                 "type": 4,  # INTEGER
                 "required": False
             },
