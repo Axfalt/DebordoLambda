@@ -22,8 +22,38 @@ fn round1(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
+/// Une seule valeur d'attaque (tdg_min == tdg_max) : une ligne a besoin de deux points, donc
+/// avec `pointRadius: 0` rien n'est dessiné. On affiche à la place des marqueurs centrés façon
+/// boîte à moustaches : traits pour min/max et Q1/Q3, point pour la moyenne.
+fn apply_single_point_style(config: &mut serde_json::Value) {
+    let markers = [
+        ("Q1", "line", 40, "rgb(54, 162, 235)"),
+        ("Q3", "line", 40, "rgb(54, 162, 235)"),
+        ("Moyenne", "circle", 6, "rgb(54, 162, 235)"),
+        ("Min", "line", 25, "rgba(120, 120, 120, 0.6)"),
+        ("Max", "line", 25, "rgba(120, 120, 120, 0.6)"),
+    ];
+    if let Some(datasets) = config["data"]["datasets"].as_array_mut() {
+        for (dataset, (label, style, radius, color)) in datasets.iter_mut().zip(markers) {
+            dataset["label"] = label.into();
+            dataset["showLine"] = false.into();
+            dataset["fill"] = false.into();
+            dataset["pointStyle"] = style.into();
+            dataset["pointRadius"] = radius.into();
+            dataset["borderWidth"] = 2.into();
+            dataset["borderColor"] = color.into();
+            dataset["backgroundColor"] = color.into();
+            if let Some(d) = dataset.as_object_mut() {
+                d.remove("borderDash");
+            }
+        }
+    }
+    config["options"]["scales"]["xAxes"][0]["offset"] = true.into();
+}
+
 pub fn build_chart_config(results: &[(i32, Statistics)]) -> serde_json::Value {
     let points = downsample(results, MAX_CHART_POINTS);
+    let single_point = points.len() == 1;
     let labels: Vec<i32> = points.iter().map(|(attack, _)| *attack).collect();
     let q1: Vec<f64> = points.iter().map(|(_, s)| round1(s.q1)).collect();
     let q3: Vec<f64> = points.iter().map(|(_, s)| round1(s.q3)).collect();
@@ -31,7 +61,7 @@ pub fn build_chart_config(results: &[(i32, Statistics)]) -> serde_json::Value {
     let min: Vec<i32> = points.iter().map(|(_, s)| s.min).collect();
     let max: Vec<i32> = points.iter().map(|(_, s)| s.max).collect();
 
-    serde_json::json!({
+    let mut config = serde_json::json!({
         "type": "line",
         "data": {
             "labels": labels,
@@ -91,7 +121,12 @@ pub fn build_chart_config(results: &[(i32, Statistics)]) -> serde_json::Value {
                 "yAxes": [{ "scaleLabel": { "display": true, "labelString": "Dommages" } }]
             }
         }
-    })
+    });
+
+    if single_point {
+        apply_single_point_style(&mut config);
+    }
+    config
 }
 
 #[derive(Deserialize)]
@@ -198,6 +233,31 @@ mod tests {
     }
 
     #[test]
+    fn build_chart_config_single_attack_value_uses_visible_markers() {
+        let config = build_chart_config(&sample_results()[..1]);
+
+        let datasets = config["data"]["datasets"].as_array().unwrap();
+        let labels: Vec<&str> = datasets.iter().map(|d| d["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Q1", "Q3", "Moyenne", "Min", "Max"]);
+        for dataset in datasets {
+            assert_eq!(dataset["showLine"], false);
+            assert!(dataset["pointRadius"].as_i64().unwrap() > 0);
+            assert_ne!(dataset["borderColor"], "transparent");
+        }
+        assert_eq!(config["options"]["scales"]["xAxes"][0]["offset"], true);
+    }
+
+    #[test]
+    fn build_chart_config_multiple_attack_values_keep_line_style() {
+        let config = build_chart_config(&sample_results());
+        for dataset in config["data"]["datasets"].as_array().unwrap() {
+            assert_eq!(dataset["pointRadius"], 0);
+            assert!(dataset.get("showLine").is_none());
+        }
+        assert!(config["options"]["scales"]["xAxes"][0].get("offset").is_none());
+    }
+
+    #[test]
     fn downsample_keeps_small_inputs_untouched() {
         let items: Vec<i32> = (0..10).collect();
         let sampled: Vec<i32> = downsample(&items, 100).into_iter().copied().collect();
@@ -216,9 +276,9 @@ mod tests {
 
     #[test]
     fn build_chart_config_caps_points_for_wide_tdg_range() {
-        let stats = sample_results()[0].1.clone();
+        let stats = sample_results()[0].1;
         let results: Vec<(i32, Statistics)> =
-            (1000..=3000).map(|attack| (attack, stats.clone())).collect();
+            (1000..=3000).map(|attack| (attack, stats)).collect();
         let config = build_chart_config(&results);
 
         let labels = config["data"]["labels"].as_array().unwrap();
@@ -232,7 +292,7 @@ mod tests {
 
     #[test]
     fn build_chart_config_rounds_float_series() {
-        let mut stats = sample_results()[0].1.clone();
+        let mut stats = sample_results()[0].1;
         stats.mean = 12.345_678;
         let config = build_chart_config(&[(100, stats)]);
         assert_eq!(config["data"]["datasets"][2]["data"][0], 12.3);
