@@ -212,7 +212,7 @@ commands = [
     },
     {
         "name": "estimation25",
-        "description": "Trouve le seed de la tour de guet et la plage d'attaque exacte",
+        "description": "Trouve la seed de la tour de guet et la plage d'attaque exacte",
         "options": [
             {
                 "name": "town_id",
