@@ -279,42 +279,124 @@ pub async fn get_estimation_config(
         .cloned())
 }
 
-/// Whether part `index` may still update the waiting message: the run has not posted its
-/// result and this part was not recorded before (a redelivered copy of a finished part must not
-/// overwrite the result posted since).
-pub async fn may_show_progress(
+/// Attribute holding the number of seeds part `index` has searched.
+fn searched_attribute(index: u32) -> String {
+    format!("searched_p{index}")
+}
+
+/// Where a run stands after a part reported its progress.
+#[derive(Debug)]
+pub struct RunProgress {
+    /// Seeds searched by all parts so far.
+    pub searched: u64,
+    /// Number of this waiting-message edit when the part won the right to edit it now (at most
+    /// one edit per `min_gap_secs` across the parts), `None` otherwise.
+    pub edit: Option<u64>,
+}
+
+/// Records that part `index` has searched `searched` seeds and tells whether it should edit the
+/// waiting message now. Returns `None` once the run has posted its result or this part was
+/// recorded (a redelivered copy of a finished part): the waiting message must not be touched
+/// any more. The result is only posted once every part is recorded, so a part that awaits its
+/// edit before recording itself can never overwrite the result.
+pub async fn report_estimation_progress(
     run_id: &str,
     index: u32,
+    searched: u64,
+    min_gap_secs: u64,
     db_client: &aws_sdk_dynamodb::Client,
-) -> Result<bool, lambda_runtime::Error> {
-    let checked = db_client
+) -> Result<Option<RunProgress>, lambda_runtime::Error> {
+    const LIVE: &str = "attribute_exists(run_id) AND attribute_not_exists(posted) \
+                        AND NOT contains(done, :part)";
+    let table = estimation_table();
+    let key = AttributeValue::S(run_id.to_string());
+    let part = AttributeValue::N(index.to_string());
+
+    let reported = db_client
         .update_item()
-        .table_name(estimation_table())
-        .key("run_id", AttributeValue::S(run_id.to_string()))
-        .update_expression("SET last_progress = :part")
-        .condition_expression(
-            "attribute_exists(run_id) AND attribute_not_exists(posted) \
-             AND NOT contains(done, :part)",
-        )
-        .expression_attribute_values(":part", AttributeValue::N(index.to_string()))
+        .table_name(&table)
+        .key("run_id", key.clone())
+        .update_expression("SET #searched = :searched")
+        .condition_expression(LIVE)
+        .expression_attribute_names("#searched", searched_attribute(index))
+        .expression_attribute_values(":searched", AttributeValue::N(searched.to_string()))
+        .expression_attribute_values(":part", part.clone())
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
         .send()
         .await;
-    match checked {
-        Ok(_) => Ok(true),
+    let attrs = match reported {
+        Ok(out) => out.attributes.unwrap_or_default(),
         Err(e)
             if e.as_service_error()
                 .is_some_and(|s| s.is_conditional_check_failed_exception()) =>
         {
-            Ok(false)
+            return Ok(None);
         }
         Err(e) => {
             error!("DynamoDB update_item (estimation progress) failed: {}", e);
-            Err(lambda_runtime::Error::from(format!(
+            return Err(lambda_runtime::Error::from(format!(
                 "Database write failed: {}",
                 e
-            )))
+            )));
         }
+    };
+    let number = |v: &AttributeValue| v.as_n().ok().and_then(|n| n.parse::<u64>().ok());
+    let total = attrs
+        .iter()
+        .filter(|(name, _)| name.starts_with("searched_p"))
+        .filter_map(|(_, v)| number(v))
+        .sum();
+
+    let now = now_secs();
+    let cutoff = now.saturating_sub(min_gap_secs);
+    if attrs
+        .get("last_edit_at")
+        .and_then(number)
+        .is_some_and(|at| at > cutoff)
+    {
+        return Ok(Some(RunProgress {
+            searched: total,
+            edit: None,
+        }));
     }
+
+    // Claim the edit: several parts may see the gap elapsed at once, only one wins.
+    let claimed = db_client
+        .update_item()
+        .table_name(&table)
+        .key("run_id", key)
+        .update_expression("SET last_edit_at = :now ADD edits :one")
+        .condition_expression(format!(
+            "{LIVE} AND (attribute_not_exists(last_edit_at) OR last_edit_at <= :cutoff)"
+        ))
+        .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
+        .expression_attribute_values(":cutoff", AttributeValue::N(cutoff.to_string()))
+        .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+        .expression_attribute_values(":part", part)
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+        .send()
+        .await;
+    let edit = match claimed {
+        Ok(out) => out
+            .attributes
+            .as_ref()
+            .and_then(|a| a.get("edits"))
+            .and_then(number),
+        Err(e)
+            if e.as_service_error()
+                .is_some_and(|s| s.is_conditional_check_failed_exception()) =>
+        {
+            None
+        }
+        Err(e) => {
+            error!("DynamoDB update_item (estimation edit claim) failed: {}", e);
+            None
+        }
+    };
+    Ok(Some(RunProgress {
+        searched: total,
+        edit,
+    }))
 }
 
 /// All parts of a run are done: the merged matches, handed to exactly one caller.
@@ -324,11 +406,12 @@ pub struct CompletedRun {
     pub started_at: u64,
 }
 
-/// Records the matches of part `index`; returns the whole run once every part is recorded, to
-/// the single caller that wins the right to post the result.
+/// Records the matches of part `index` (which searched `searched` seeds); returns the whole run
+/// once every part is recorded, to the single caller that wins the right to post the result.
 pub async fn record_estimation_part(
     run_id: &str,
     index: u32,
+    searched: u64,
     matches: &[estimation25_lib::SeedMatch],
     db_client: &aws_sdk_dynamodb::Client,
 ) -> Result<Option<CompletedRun>, lambda_runtime::Error> {
@@ -341,8 +424,10 @@ pub async fn record_estimation_part(
         .update_item()
         .table_name(&table)
         .key("run_id", key.clone())
-        .update_expression("ADD done :part SET matches.#part = :matches")
+        .update_expression("ADD done :part SET matches.#part = :matches, #searched = :searched")
         .expression_attribute_names("#part", format!("p{index}"))
+        .expression_attribute_names("#searched", searched_attribute(index))
+        .expression_attribute_values(":searched", AttributeValue::N(searched.to_string()))
         .expression_attribute_values(":part", AttributeValue::Ns(vec![index.to_string()]))
         .expression_attribute_values(":matches", AttributeValue::S(json))
         .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)

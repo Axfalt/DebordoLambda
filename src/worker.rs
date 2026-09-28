@@ -3,9 +3,10 @@
 use aws_lambda_events::sqs::SqsEvent;
 use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
-use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, MissedTickBehavior, interval_at, sleep, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
@@ -41,15 +42,26 @@ const DEFAULT_ESTIMATION_PARTS: u32 = 8;
 const ESTIMATION_WATCHDOG_SECS: i32 = 600;
 /// `modifiers.red_soul_max_factor` of Pandemonium towns.
 const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
+/// Seeds of a whole `/estimation25` run (2^32).
+const ESTIMATION_SEEDS: u64 = 1 << 32;
+/// How often each part reports how many seeds it has searched.
+const PROGRESS_REPORT_SECS: u64 = 5;
+/// Minimum delay between two edits of the waiting message, across all the parts of a run
+/// (well within Discord's rate limit).
+const PROGRESS_EDIT_GAP_SECS: u64 = 5;
+/// Waiting-message edits per phrase: the bar moves every edit, the phrase every other one.
+const EDITS_PER_PHRASE: u64 = 2;
+/// Cells of the progress bar.
+const PROGRESS_BAR_CELLS: u64 = 10;
 
-/// Waiting messages of an `/estimation25` run, rotated as the parts finish.
-const PROGRESS_MESSAGES: [&str; 14] = [
+/// Waiting messages of an `/estimation25` run, rotated as the search goes.
+const PROGRESS_MESSAGES: [&str; 15] = [
     "⏳ Recompte les zombies avec attention...",
     "⏳ Nettoie la lunette de la tour...",
     "⏳ Demande à Cubique si on sera Top2...",
     "⏳ Ajoute de l'huile de frein dans le réacteur...",
     "⏳ Cherche qui va faire l'os...",
-    "⏳ Ooops j'ai compté de traver, boarf c'est pas si grave...",
+    "⏳ Ooops j'ai compté de travers, boarf c'est pas si grave...",
     "⏳ Planque un VTT sur le puit abandonné...",
     "⏳ Recompte les oignons pour préparer la soupe...",
     "⏳ Recalcule la probabilité de monter une table...",
@@ -58,16 +70,32 @@ const PROGRESS_MESSAGES: [&str; 14] = [
     "⏳ Recompte les graines...",
     "⏳ Oui bah fallait pas oublier une estimations...",
     "⏳ Analyse du ~~sanctuaire~~ zoo en cours...",
+    "⏳ Compte les grains de sable pour voir",
 ];
 
 /// Waiting message number `step` of a run. Each run starts at its own place in the list (taken
 /// from its id), so consecutive runs do not all open with the same line.
-fn progress_message(run_id: &str, step: u32) -> &'static str {
+fn progress_message(run_id: &str, step: u64) -> &'static str {
     let offset = run_id
         .get(..8)
-        .and_then(|hex| usize::from_str_radix(hex, 16).ok())
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
         .unwrap_or(0);
-    PROGRESS_MESSAGES[(offset + step as usize) % PROGRESS_MESSAGES.len()]
+    let len = PROGRESS_MESSAGES.len() as u64;
+    PROGRESS_MESSAGES[((offset % len + step % len) % len) as usize]
+}
+
+/// Waiting message after `searched` seeds: phrase `step` and a progress bar.
+fn waiting_message(run_id: &str, step: u64, searched: u64) -> String {
+    // Capped at 99 %: the search is only over once the result replaces the message.
+    let pct = (searched.min(ESTIMATION_SEEDS) * 100 / ESTIMATION_SEEDS).min(99);
+    let full = (pct * PROGRESS_BAR_CELLS / 100) as usize;
+    let empty = PROGRESS_BAR_CELLS as usize - full;
+    format!(
+        "{}\n`{}{}` {pct} %",
+        progress_message(run_id, step),
+        "▰".repeat(full),
+        "▱".repeat(empty)
+    )
 }
 
 /// Clients shared by every invocation, built once per cold start (cheap to clone).
@@ -543,7 +571,7 @@ async fn plan_estimation(
             .await;
         }
     }
-    reply(job, clients, progress_message(&run_id, 0)).await?;
+    reply(job, clients, &waiting_message(&run_id, 0, 0)).await?;
 
     let indices: Vec<u32> = (0..parts).collect();
     for chunk in indices.chunks(10) {
@@ -640,23 +668,40 @@ async fn run_estimation_part(
     };
 
     let start = Instant::now();
+    let slice_len = u64::from(slice.end() - slice.start()) + 1;
+    let progress = Arc::new(AtomicU64::new(0));
     let search_input = input.clone();
-    let searched = timeout(
-        Duration::from_secs(ESTIMATION_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            estimation25_lib::search_seeds(
-                &search_input,
-                &EstimConf::default(),
-                slice,
-                &AtomicU64::new(0),
-            )
-        }),
-    )
-    .await;
+    let search_progress = Arc::clone(&progress);
+    let search = tokio::task::spawn_blocking(move || {
+        estimation25_lib::search_seeds(
+            &search_input,
+            &EstimConf::default(),
+            slice,
+            &search_progress,
+        )
+    });
+    let deadline = sleep(Duration::from_secs(ESTIMATION_TIMEOUT_SECS));
+    tokio::pin!(search, deadline);
+    let period = Duration::from_secs(PROGRESS_REPORT_SECS);
+    let mut ticks = interval_at(tokio::time::Instant::now() + period, period);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Progress is reported from this task, between polls of the search: an edit is always
+    // finished before the part is recorded, hence before the result can be posted.
+    let mut live = true;
+    let searched = loop {
+        tokio::select! {
+            joined = &mut search => break Some(joined),
+            () = &mut deadline => break None,
+            _ = ticks.tick(), if live => {
+                let searched = progress.load(Ordering::Relaxed);
+                live = show_progress(job, clients, run_id, index, searched).await;
+            }
+        }
+    };
     let matches = match searched {
-        Ok(Ok(Ok(matches))) => matches,
-        Ok(Ok(Err(e))) => return deliver(job, clients, &format!("❌ Erreur : {e}"), None).await,
-        Ok(Err(e)) => {
+        Some(Ok(Ok(matches))) => matches,
+        Some(Ok(Err(e))) => return deliver(job, clients, &format!("❌ Erreur : {e}"), None).await,
+        Some(Err(e)) => {
             error!("Estimation part {} of {} panicked: {}", index, run_id, e);
             return deliver(
                 job,
@@ -666,7 +711,7 @@ async fn run_estimation_part(
             )
             .await;
         }
-        Err(_elapsed) => {
+        None => {
             error!("Estimation part {} of {} timed out", index, run_id);
             return deliver(
                 job,
@@ -686,49 +731,28 @@ async fn run_estimation_part(
         start.elapsed().as_secs_f64()
     );
 
-    // Rotate the waiting message *before* recording the part: the result is only posted once
-    // every part is recorded, so a first delivery can never overwrite it. A redelivered copy of
-    // an already recorded part (or any part once the result is posted) must not touch the
-    // message: `may_show_progress` checks both atomically.
-    // Best effort: parts finishing together may hit Discord's rate limit.
-    match database::may_show_progress(run_id, index, &clients.dynamodb).await {
-        Ok(true) => {
-            if let Err(e) = send_followup(
-                &clients.http,
-                &job.application_id,
-                &job.token,
-                progress_message(run_id, index + 1),
+    let done = match database::record_estimation_part(
+        run_id,
+        index,
+        slice_len,
+        &matches,
+        &clients.dynamodb,
+    )
+    .await
+    {
+        Ok(Some(done)) => done,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            error!("Failed to record part {} of run {}: {}", index, run_id, e);
+            return deliver(
+                job,
+                clients,
+                "❌ La recherche a échoué (enregistrement impossible). Veuillez réessayer.",
+                None,
             )
-            .await
-            {
-                info!("Progress update of part {} skipped: {}", index, e);
-            }
+            .await;
         }
-        Ok(false) => info!(
-            "Part {} of run {} already recorded or run posted: no progress update",
-            index, run_id
-        ),
-        Err(e) => info!(
-            "Progress check of part {} failed, skipping update: {}",
-            index, e
-        ),
-    }
-
-    let done =
-        match database::record_estimation_part(run_id, index, &matches, &clients.dynamodb).await {
-            Ok(Some(done)) => done,
-            Ok(None) => return Ok(()),
-            Err(e) => {
-                error!("Failed to record part {} of run {}: {}", index, run_id, e);
-                return deliver(
-                    job,
-                    clients,
-                    "❌ La recherche a échoué (enregistrement impossible). Veuillez réessayer.",
-                    None,
-                )
-                .await;
-            }
-        };
+    };
     let button = config_button_id(run_id);
     let (content, button) =
         match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
@@ -745,6 +769,44 @@ async fn run_estimation_part(
     deliver(job, clients, &content, button).await?;
     info!("Estimation run {} result sent to Discord", run_id);
     Ok(())
+}
+
+/// Reports the seeds part `index` has searched and, when it is this part's turn, edits the
+/// waiting message with the run's progress. Returns `false` once the waiting message must no
+/// longer be touched (result posted, or this part already recorded by an earlier delivery).
+async fn show_progress(
+    job: &SimulationJob,
+    clients: &Clients,
+    run_id: &str,
+    index: u32,
+    searched: u64,
+) -> bool {
+    let reported = database::report_estimation_progress(
+        run_id,
+        index,
+        searched,
+        PROGRESS_EDIT_GAP_SECS,
+        &clients.dynamodb,
+    )
+    .await;
+    let progress = match reported {
+        Ok(Some(progress)) => progress,
+        Ok(None) => return false,
+        Err(e) => {
+            info!("Progress report of part {} failed: {}", index, e);
+            return true;
+        }
+    };
+    if let Some(edit) = progress.edit {
+        let step = edit.div_ceil(EDITS_PER_PHRASE);
+        let content = waiting_message(run_id, step, progress.searched);
+        if let Err(e) =
+            send_followup(&clients.http, &job.application_id, &job.token, &content).await
+        {
+            info!("Progress update of part {} skipped: {}", index, e);
+        }
+    }
+    true
 }
 
 #[tokio::main]
@@ -782,9 +844,22 @@ mod tests {
         let first = progress_message(&run_id, 0);
         assert!(PROGRESS_MESSAGES.contains(&first));
         assert_ne!(first, progress_message(&run_id, 1));
-        let len = u32::try_from(PROGRESS_MESSAGES.len()).unwrap();
+        let len = PROGRESS_MESSAGES.len() as u64;
         assert_eq!(first, progress_message(&run_id, len));
         // A malformed id falls back to the start of the list.
         assert_eq!(progress_message("", 0), PROGRESS_MESSAGES[0]);
+    }
+
+    #[test]
+    fn test_waiting_message_shows_the_progress_bar() {
+        assert_eq!(
+            waiting_message("", 0, 0),
+            format!("{}\n`▱▱▱▱▱▱▱▱▱▱` 0 %", PROGRESS_MESSAGES[0])
+        );
+        assert_eq!(
+            waiting_message("", 1, ESTIMATION_SEEDS * 42 / 100 + 1),
+            format!("{}\n`▰▰▰▰▱▱▱▱▱▱` 42 %", PROGRESS_MESSAGES[1])
+        );
+        assert!(waiting_message("", 0, ESTIMATION_SEEDS).ends_with("` 99 %"));
     }
 }
