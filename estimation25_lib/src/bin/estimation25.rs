@@ -230,17 +230,23 @@ fn fetch_town(client: &reqwest::blocking::Client, user_key: &str) -> Result<Town
     })
 }
 
+/// What the watchtower showed on `day` according to `MyHordes` Optimizer (`None` before day 1).
 fn fetch_estimations(
     client: &reqwest::blocking::Client,
     day: i64,
     town_id: i64,
-) -> Result<MhoEstimations, String> {
+) -> Result<Option<MhoEstimations>, String> {
+    if day < 1 {
+        return Ok(None);
+    }
     let (header, origin) = mho::ORIGIN_HEADER;
     let request = client
         .get(mho::estimations_url(day, town_id))
         .header(header, origin);
     let body = get(request, "MyHordes Optimizer")?;
-    MhoEstimations::from_json(&body).map_err(|e| format!("réponse MHO inattendue : {e}"))
+    MhoEstimations::from_json(&body)
+        .map(Some)
+        .map_err(|e| format!("réponse MHO inattendue : {e}"))
 }
 
 /// `--api`: readings of the attack from `MyHordes` Optimizer.
@@ -274,14 +280,16 @@ fn api_input(args: &Args) -> Result<EstimationInput, String> {
         }
     };
 
-    let future = args.overrides.future.unwrap_or(false);
-    let attack_day = town.day + i64::from(future);
-    let estimations = fetch_estimations(&client, attack_day, town.id)?;
+    // The attack's readings are `estim` of its day and `planif` (J+1) of the day before.
+    let attack_day = town.day + i64::from(args.overrides.future.unwrap_or(false));
+    let [attack_payload, eve_payload] = mho::payload_days(attack_day);
+    let attack = fetch_estimations(&client, attack_payload, town.id)?;
+    let eve = fetch_estimations(&client, eve_payload, town.id)?;
     eprintln!(
-        "MHO : ville {}, attaque du J{attack_day} : {} relevés du jour, {} relevés J+1{}",
+        "MHO : ville {}, attaque du J{attack_day} : {} relevés du J{attack_payload}, {} relevés J+1 du J{eve_payload}{}",
         town.id,
-        estimations.today().len(),
-        estimations.planner().len(),
+        attack.as_ref().map_or(0, |e| e.today().len()),
+        eve.as_ref().map_or(0, |e| e.planner().len()),
         if town.pandemonium {
             " (Pandémonium)"
         } else {
@@ -293,8 +301,7 @@ fn api_input(args: &Args) -> Result<EstimationInput, String> {
     if town.pandemonium && overrides.soul_max.is_none() {
         overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
     }
-    estimations
-        .into_input(future, &overrides)
+    mho::attack_input(attack_day, attack.as_ref(), eve.as_ref(), &overrides)
         .map_err(|e| match e {
             estimation25_lib::EstimationError::NoReadings => format!(
                 "Erreur : MyHordes Optimizer n'a aucun relevé pour la ville {} (attaque du J{attack_day}).",

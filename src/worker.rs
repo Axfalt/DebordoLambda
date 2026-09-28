@@ -320,11 +320,41 @@ async fn resolve_readings(
         } => (town_id, day, pandemonium),
     };
 
-    let future = overrides.future.unwrap_or(false);
-    let attack_day = day + i64::from(future);
+    // The attack's readings are `estim` of its day and `planif` (J+1) of the day before.
+    let attack_day = day + i64::from(overrides.future.unwrap_or(false));
+    let [attack_payload, eve_payload] = mho::payload_days(attack_day);
+    let (attack, eve) = tokio::join!(
+        fetch_mho(http, attack_payload, town_id),
+        fetch_mho(http, eve_payload, town_id)
+    );
+    let (attack, eve) = (attack?, eve?);
+
+    let mut overrides = overrides.clone();
+    if pandemonium && overrides.soul_max.is_none() {
+        overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
+    }
+    mho::attack_input(attack_day, attack.as_ref(), eve.as_ref(), &overrides).map_err(|e| {
+        match e {
+            EstimationError::NoReadings => format!(
+                "❌ MyHordes Optimizer n'a aucun relevé pour la ville {town_id} (attaque du J{attack_day})."
+            ),
+            e => format!("❌ Erreur : {e}"),
+        }
+    })
+}
+
+/// What the watchtower showed on `day` according to MyHordes Optimizer (`None` before day 1).
+async fn fetch_mho(
+    http: &reqwest::Client,
+    day: i64,
+    town_id: i64,
+) -> Result<Option<MhoEstimations>, String> {
+    if day < 1 {
+        return Ok(None);
+    }
     let (header, origin) = mho::ORIGIN_HEADER;
     let response = http
-        .get(mho::estimations_url(attack_day, town_id))
+        .get(mho::estimations_url(day, town_id))
         .header(header, origin)
         .send()
         .await
@@ -337,21 +367,9 @@ async fn resolve_readings(
     if !status.is_success() {
         return Err(format!("❌ MyHordes Optimizer a répondu {status}."));
     }
-    let estimations = MhoEstimations::from_json(&body)
-        .map_err(|e| format!("❌ Réponse de MyHordes Optimizer inattendue : {e}"))?;
-
-    let mut overrides = overrides.clone();
-    if pandemonium && overrides.soul_max.is_none() {
-        overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
-    }
-    estimations
-        .into_input(future, &overrides)
-        .map_err(|e| match e {
-            EstimationError::NoReadings => format!(
-                "❌ MyHordes Optimizer n'a aucun relevé pour la ville {town_id} (attaque du J{attack_day})."
-            ),
-            e => format!("❌ Erreur : {e}"),
-        })
+    MhoEstimations::from_json(&body)
+        .map(Some)
+        .map_err(|e| format!("❌ Réponse de MyHordes Optimizer inattendue : {e}"))
 }
 
 async fn plan_estimation(
