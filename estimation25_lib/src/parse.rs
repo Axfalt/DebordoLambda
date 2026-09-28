@@ -1,5 +1,6 @@
 //! Parsing of pasted watchtower readings, e.g. `[b][33%][/b] 2047 - 2749 🧟`,
-//! with optional `jour: 14`, `demain: oui`, `âmes: 1`, `pénalité: 0.02` lines.
+//! with optional `jour: 14`, `demain: oui`, `âmes: 1`, `pénalité: 0.02`, `pénalité veille: 0.04`
+//! lines.
 //!
 //! A paste may hold two sections: `Planificateur J17` (J+1 readings taken on day 17) and
 //! `Estimation J18` (today's readings). Readings before any header are today's; an `âmes: N`
@@ -17,6 +18,9 @@ pub struct InputOverrides {
     pub red_souls: Option<u32>,
     pub planner_red_souls: Option<u32>,
     pub soul_penalty: Option<f64>,
+    /// Penalty per red soul when the planner (J+1) readings were taken, when it differs from
+    /// today's (the level-2 blue soul building was voted in between).
+    pub planner_soul_penalty: Option<f64>,
     pub soul_max: Option<f64>,
 }
 
@@ -32,8 +36,10 @@ pub struct ParsedText {
     /// Red souls in town today / when the planner readings were taken.
     pub red_souls: Option<u32>,
     pub planner_red_souls: Option<u32>,
-    /// Penalty per red soul (0.04, or 0.02 with the level-2 blue soul building).
+    /// Penalty per red soul (0.04, or 0.02 with the level-2 blue soul building), today / when
+    /// the planner readings were taken (defaults to today's).
     pub soul_penalty: Option<f64>,
+    pub planner_soul_penalty: Option<f64>,
     /// Cap of the red-soul factor (1.2, or 666 in Pandemonium).
     pub soul_max: Option<f64>,
     /// Non-empty lines that were neither a reading nor a known key.
@@ -57,10 +63,16 @@ impl ParsedText {
             .soul_penalty
             .or(self.soul_penalty)
             .unwrap_or(DEFAULT_SOUL_PENALTY);
+        let planner_penalty = o
+            .planner_soul_penalty
+            .or(self.planner_soul_penalty)
+            .unwrap_or(penalty);
         let max = o.soul_max.or(self.soul_max).unwrap_or(DEFAULT_SOUL_MAX);
         let factor = |souls: u32| soul_factor(souls, penalty, max);
+        let planner_factor = |souls: u32| soul_factor(souls, planner_penalty, max);
         let souls = o.red_souls.or(self.red_souls);
-        let planner_souls = o.planner_red_souls.or(self.planner_red_souls);
+        // The red souls of the planner day default to today's.
+        let planner_souls = o.planner_red_souls.or(self.planner_red_souls).or(souls);
 
         if self.readings.is_empty() && !self.planner.is_empty() {
             return Ok(EstimationInput {
@@ -73,7 +85,7 @@ impl ParsedText {
                 mode,
                 readings: self.planner,
                 planner: Vec::new(),
-                soul_factor: factor(planner_souls.or(souls).unwrap_or(0)),
+                soul_factor: planner_factor(planner_souls.unwrap_or(0)),
                 planner_soul_factor: None,
             });
         }
@@ -88,7 +100,7 @@ impl ParsedText {
             readings: self.readings,
             planner: self.planner,
             soul_factor: factor(souls.unwrap_or(0)),
-            planner_soul_factor: planner_souls.map(factor),
+            planner_soul_factor: planner_souls.map(planner_factor),
         })
     }
 }
@@ -165,6 +177,9 @@ pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) ->
     }
     if let Some(p) = overrides.soul_penalty {
         let _ = writeln!(out, "pénalité: {p}");
+    }
+    if let Some(p) = overrides.planner_soul_penalty {
+        let _ = writeln!(out, "pénalité veille: {p}");
     }
     if let Some(m) = overrides.soul_max {
         let _ = writeln!(out, "âmes max: {m}");
@@ -251,6 +266,11 @@ pub fn parse_text(text: &str) -> ParsedText {
                 "penalite" | "penalite ames" => decimal(value)
                     .map(|p| parsed.soul_penalty = Some(p))
                     .is_some(),
+                "penalite veille" | "penalite ames veille" | "penalite planificateur" => {
+                    decimal(value)
+                        .map(|p| parsed.planner_soul_penalty = Some(p))
+                        .is_some()
+                }
                 "ames max" | "ames rouges max" | "plafond ames" => {
                     decimal(value).map(|m| parsed.soul_max = Some(m)).is_some()
                 }
@@ -377,6 +397,28 @@ mod tests {
     }
 
     #[test]
+    fn test_eve_penalty_applies_to_the_planner_only() {
+        // The level-2 blue soul building was voted on day 17: 0.04 per soul on day 16's J+1
+        // readings, 0.02 on day 17's.
+        let text = "Planificateur J16\n0% : 3460 - 4640\nEstimation J17\nâmes: 2\n\
+                    pénalité: 0,02\npénalité veille: 0,04\n33% : 3666 - 4555\n";
+        let parsed = parse_text(text);
+        assert_eq!(parsed.planner_soul_penalty, Some(0.04));
+        let input = parsed.into_input(&InputOverrides::default()).unwrap();
+        assert!((input.soul_factor - 1.04).abs() < 1e-12);
+        assert!((input.planner_soul_factor.unwrap() - 1.08).abs() < 1e-12);
+
+        // Without it, both days use the same penalty.
+        let input = parse_text(
+            "Planificateur J16\n0% : 3460 - 4640\nEstimation J17\nâmes: 2\n\
+                                pénalité: 0,02\n33% : 3666 - 4555\n",
+        )
+        .into_input(&InputOverrides::default())
+        .unwrap();
+        assert!((input.planner_soul_factor.unwrap() - 1.04).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_soul_cap_key() {
         let parsed = parse_text("jour: 25\nâmes: 10\nâmes max: 666\n33% : 9236 - 10804\n");
         assert_eq!(parsed.soul_max, Some(666.0));
@@ -389,6 +431,8 @@ mod tests {
     fn test_input_text_roundtrips() {
         let overrides = InputOverrides {
             red_souls: Some(1),
+            soul_penalty: Some(0.02),
+            planner_soul_penalty: Some(0.04),
             soul_max: Some(666.0),
             ..InputOverrides::default()
         };

@@ -63,8 +63,17 @@ fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estima
     if input.mode != AttackMode::Normal {
         writeln!(out, "• **⚔️ Mode**: {}", input.mode.label())?;
     }
-    if input.has_red_souls() {
-        writeln!(out, "• **👻 Âmes rouges**: ×{}", input.soul_factor)?;
+    // The J+1 readings of the eve can have their own factor (souls or penalty changed since).
+    let eve = input
+        .planner_soul_factor
+        .filter(|_| !input.future && !input.planner.is_empty())
+        .filter(|f| (f - input.soul_factor).abs() > f64::EPSILON);
+    if input.has_red_souls() || eve.is_some() {
+        write!(out, "• **👻 Âmes rouges**: ×{}", input.soul_factor)?;
+        if let Some(f) = eve {
+            write!(out, " (veille ×{f})")?;
+        }
+        out.push('\n');
     }
     out.push('\n');
     Ok(())
@@ -97,7 +106,7 @@ fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::{Observation, SeedEstimate};
+    use crate::inference::{Observation, Reading, SeedEstimate};
     use crate::seed::SeedMatch;
 
     fn estimate(seeds: usize) -> Estimate {
@@ -156,6 +165,23 @@ mod tests {
         assert!(text.contains("🎯 **Attaque: 4107 - 4130**\n"));
         assert!(text.contains("-# Attaque avant âmes rouges : 3949 - 3971\n"));
         assert!(text.contains("• **👻 Âmes rouges**: ×1.04\n"));
+    }
+
+    #[test]
+    fn test_eve_soul_factor_is_shown_when_it_differs() {
+        let input = EstimationInput {
+            day: 17,
+            soul_factor: 1.04,
+            planner_soul_factor: Some(1.08),
+            planner: vec![Reading {
+                pct: 0,
+                min: 3460,
+                max: 4640,
+            }],
+            ..EstimationInput::default()
+        };
+        let text = format_summary(&input, &estimate(1));
+        assert!(text.contains("• **👻 Âmes rouges**: ×1.04 (veille ×1.08)\n"));
     }
 
     #[test]

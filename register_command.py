@@ -251,6 +251,12 @@ commands = [
                 "required": False
             },
             {
+                "name": "penalite_veille",
+                "description": "Pénalité par âme rouge lors des relevés J+1 de la veille (défaut: comme penalite)",
+                "type": 10,  # NUMBER
+                "required": False
+            },
+            {
                 "name": "ames_max",
                 "description": "Plafond du facteur des âmes rouges (défaut: 1.2, 666 en Pandémonium)",
                 "type": 10,  # NUMBER

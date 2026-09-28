@@ -192,6 +192,7 @@ impl EstimationOptions {
                 "ames" => o.overrides.red_souls = count(v),
                 "ames_veille" => o.overrides.planner_red_souls = count(v),
                 "penalite" => o.overrides.soul_penalty = v.as_f64(),
+                "penalite_veille" => o.overrides.planner_soul_penalty = v.as_f64(),
                 "ames_max" => o.overrides.soul_max = v.as_f64(),
                 "no_api" => o.no_api = v.as_bool().unwrap_or(false),
                 "coller" => o.paste = v.as_bool().unwrap_or(false),
@@ -1125,6 +1126,7 @@ mod tests {
             make_opt("ames", serde_json::json!(2)),
             make_opt("ames_veille", serde_json::json!(1)),
             make_opt("penalite", serde_json::json!(0.02)),
+            make_opt("penalite_veille", serde_json::json!(0.04)),
             make_opt("ames_max", serde_json::json!(666)),
             make_opt("no_api", serde_json::json!(true)),
             make_opt("coller", serde_json::json!(true)),
@@ -1135,6 +1137,7 @@ mod tests {
         assert_eq!((o.day, o.future), (Some(25), Some(true)));
         assert_eq!((o.red_souls, o.planner_red_souls), (Some(2), Some(1)));
         assert_eq!((o.soul_penalty, o.soul_max), (Some(0.02), Some(666.0)));
+        assert_eq!(o.planner_soul_penalty, Some(0.04));
 
         let empty = EstimationOptions::from_options(&[]);
         assert_eq!(empty, EstimationOptions::default());

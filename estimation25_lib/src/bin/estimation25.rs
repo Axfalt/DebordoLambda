@@ -1,5 +1,5 @@
 //! Local CLI: `estimation25 [--api [--userkey K]] [--town_id ID] [--jour N] [--demain]
-//! [--seeds A-B] [--ames N] [--ames-veille N] [--penalite P] [--ames-max M] [FICHIER]`.
+//! [--seeds A-B] [--ames N] [--ames-veille N] [--penalite P] [--penalite-veille P] [--ames-max M] [FICHIER]`.
 //!
 //! Readings come from one of:
 //! - `--town_id ID --jour N`: `MyHordes` Optimizer, no `MyHordes` key needed;
@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 // `concat!` keeps the indentation (a trailing `\` in a string literal would strip it).
 const USAGE: &str = concat!(
     "Usage : estimation25 [--api [--userkey CLÉ]] [--town_id ID] [--jour N] [--demain] ",
-    "[--seeds A-B] [--ames N] [--ames-veille N] [--penalite 0.04] [--ames-max 1.2] [RELEVÉS]\n",
+    "[--seeds A-B] [--ames N] [--ames-veille N] [--penalite 0.04] [--penalite-veille 0.04] ",
+    "[--ames-max 1.2] [RELEVÉS]\n",
     "Source des relevés :\n",
     "  --town_id ID --jour N  MyHordes Optimizer, sans clé MyHordes ",
     "(Pandémonium : ajoutez --ames-max 666)\n",
@@ -100,6 +101,10 @@ fn parse_args() -> Result<Args, String> {
             "--penalite" => {
                 let v = value("--penalite")?.replace(',', ".");
                 o.soul_penalty = Some(parse_value("--penalite", &v)?);
+            }
+            "--penalite-veille" => {
+                let v = value("--penalite-veille")?.replace(',', ".");
+                o.planner_soul_penalty = Some(parse_value("--penalite-veille", &v)?);
             }
             "--ames-max" => o.soul_max = Some(parse_value("--ames-max", &value("--ames-max")?)?),
             "--seeds" => args.seeds = parse_seed_range(&value("--seeds")?)?,

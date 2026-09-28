@@ -1089,6 +1089,9 @@ fn estimation_modal_prefill(o: &InputOverrides) -> String {
     if let Some(p) = o.soul_penalty {
         lines.push(format!("pénalité: {p}"));
     }
+    if let Some(p) = o.planner_soul_penalty {
+        lines.push(format!("pénalité veille: {p}"));
+    }
     if let Some(m) = o.soul_max {
         lines.push(format!("âmes max: {m}"));
     }
