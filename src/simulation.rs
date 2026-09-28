@@ -13,6 +13,7 @@ const BASE_LEVEL_MAX: u32 = 55;
 const UNLUCKY_BOOST: f64 = 0.3;
 const REACTOR_DAMAGE_MIN: i32 = 100;
 const REACTOR_DAMAGE_MAX: i32 = 250;
+const ROUGH_SEARCH_ITERATIONS: u32 = 1000;
 
 #[derive(Clone)]
 pub struct AttackSimulator {
@@ -21,7 +22,6 @@ pub struct AttackSimulator {
     allocated_buf: Vec<i32>,
 }
 
-/// Result of the active-zombie roll, before any repartition is drawn.
 struct ActiveRoll {
     targets: usize,
     max_active: i32,
@@ -30,7 +30,6 @@ struct ActiveRoll {
     flag_bonus: i32,
 }
 
-/// Active-zombie roll for a given base level (drawn in BASE_LEVEL_MIN..=BASE_LEVEL_MAX).
 fn active_roll(
     config: &SimConfig,
     total_attack: i32,
@@ -166,9 +165,6 @@ impl AttackSimulator {
         }
     }
 
-    /// Rolls an attack but only draws the repartition when some target can
-    /// receive more than `threshold` zombies. Returns whether `allocated_buf`
-    /// holds a fresh allocation, and `max_active` (0 when nothing attacks).
     fn roll_attack_above(
         &mut self,
         config: &SimConfig,
@@ -257,7 +253,6 @@ fn attack_can_overflow(config: &SimConfig, attack: i32) -> bool {
     attack + max_reactor_damage > config.defense
 }
 
-/// A total attack (TDG value + reactor damage) that can kill someone.
 struct AttackPoint {
     total_attack: i32,
     weight: f64,
@@ -266,14 +261,10 @@ struct AttackPoint {
 
 struct AttackPlan {
     points: Vec<AttackPoint>,
-    /// `iterations` for each TDG value that can overflow, shared between the points.
     budget: u64,
     avg_max_active: Option<f64>,
 }
 
-/// Probability of each total attack, sorted by total attack. The reactor adds a
-/// uniform damage in REACTOR_DAMAGE_MIN..=REACTOR_DAMAGE_MAX, so each total attack
-/// gets 1/151 of the probability of every TDG value within that window below it.
 fn total_attack_distribution(config: &SimConfig) -> Vec<(i32, f64)> {
     let (tdg_min, tdg_max) = config.tdg_interval();
     let dist = attack_distribution(tdg_min, tdg_max, config.day);
@@ -286,7 +277,6 @@ fn total_attack_distribution(config: &SimConfig) -> Vec<(i32, f64)> {
         return points;
     }
 
-    // prefix[i] = P(tdg_min) + ... + P(tdg_min + i - 1)
     let mut prefix = Vec::with_capacity((tdg_max - tdg_min + 2) as usize);
     prefix.push(0.0);
     let mut acc = 0.0;
@@ -306,9 +296,6 @@ fn total_attack_distribution(config: &SimConfig) -> Vec<(i32, f64)> {
         .collect()
 }
 
-/// Keeps the total attacks where some target can receive more than `threshold`
-/// zombies, splits the run budget between them by probability, and averages
-/// `max_active` exactly over the base levels.
 fn plan_attack_points(config: &SimConfig, b_level: i32, threshold: i32) -> AttackPlan {
     let (tdg_min, tdg_max) = config.tdg_interval();
     let overflowing_values = (tdg_min..=tdg_max)
@@ -343,7 +330,6 @@ fn plan_attack_points(config: &SimConfig, b_level: i32, threshold: i32) -> Attac
             }
         }
 
-        // The highest base level leaves the most zombies to spread.
         let can_kill = active_roll(
             config,
             total_attack,
@@ -391,7 +377,7 @@ fn debordo_point(
     hits
 }
 
-/// `indices` must hold a permutation of `0..citizens.len()`.
+#[allow(clippy::too_many_arguments)]
 fn complete_point(
     simulator: &mut AttackSimulator,
     indices: &mut [usize],
@@ -400,10 +386,10 @@ fn complete_point(
     point: &AttackPoint,
     citizens: &[crate::config::SimulationCitizen],
     min_citizen_defense: i32,
-) -> (u64, Vec<u64>) {
+    mut citizen_hits: Option<&mut [u64]>,
+) -> u64 {
     let overflow = point.total_attack - config.defense;
     let mut town_hits = 0;
-    let mut citizen_hits = vec![0u64; citizens.len()];
 
     for _ in 0..point.runs {
         let (death_possible, _) = simulator.roll_attack_above(
@@ -424,8 +410,11 @@ fn complete_point(
         let mut any_citizen_died = false;
         for (&idx, &zombies) in chosen.iter().zip(allocated) {
             if zombies > citizens[idx].defense {
-                citizen_hits[idx] += 1;
                 any_citizen_died = true;
+                match citizen_hits.as_deref_mut() {
+                    Some(hits) => hits[idx] += 1,
+                    None => break,
+                }
             }
         }
 
@@ -434,7 +423,7 @@ fn complete_point(
         }
     }
 
-    (town_hits, citizen_hits)
+    town_hits
 }
 
 fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64> {
@@ -484,33 +473,99 @@ pub fn overflow_probability(config: &SimConfig) -> (f64, u64, Option<f64>) {
         })
         .collect();
 
-    let overflow_prob: f64 = plan
-        .points
-        .iter()
-        .zip(&hits)
-        .map(|(point, &hits)| point.weight * hits as f64 / point.runs as f64)
-        .sum();
-
     (
-        (overflow_prob.min(1.0) * 100.0).max(0.0),
+        death_percentage(&plan.points, hits),
         plan.budget,
         plan.avg_max_active,
     )
 }
 
-pub fn complete_overflow_probability(
+fn death_percentage(points: &[AttackPoint], hits: impl IntoIterator<Item = u64>) -> f64 {
+    let prob: f64 = points
+        .iter()
+        .zip(hits)
+        .map(|(point, hits)| point.weight * hits as f64 / point.runs as f64)
+        .sum();
+    (prob.min(1.0) * 100.0).max(0.0)
+}
+
+fn complete_setup(
     config: &SimConfig,
     citizens: &[crate::config::SimulationCitizen],
-) -> (f64, u64, Vec<f64>, Option<f64>) {
+) -> (SimConfig, i32, i32) {
     let mut effective_config = config.clone();
     if !citizens.is_empty() {
         effective_config.nb_hab = citizens.len() as i32;
     }
     let b_level = resolve_b_level(&effective_config, citizens);
     let min_citizen_defense = citizens.iter().map(|c| c.defense).min().unwrap_or(i32::MAX);
+    (effective_config, b_level, min_citizen_defense)
+}
+
+pub fn complete_overflow_probability(
+    config: &SimConfig,
+    citizens: &[crate::config::SimulationCitizen],
+) -> (f64, u64, Vec<f64>, Option<f64>) {
+    let (effective_config, b_level, min_citizen_defense) = complete_setup(config, citizens);
     let plan = plan_attack_points(&effective_config, b_level, min_citizen_defense);
 
     let results: Vec<(u64, Vec<u64>)> = plan
+        .points
+        .par_iter()
+        .map_init(
+            || {
+                let indices: Vec<usize> = (0..citizens.len()).collect();
+                (AttackSimulator::new(), indices)
+            },
+            |(simulator, indices), point| {
+                let mut citizen_hits = vec![0u64; citizens.len()];
+                let town_hits = complete_point(
+                    simulator,
+                    indices,
+                    &effective_config,
+                    b_level,
+                    point,
+                    citizens,
+                    min_citizen_defense,
+                    Some(&mut citizen_hits),
+                );
+                (town_hits, citizen_hits)
+            },
+        )
+        .collect();
+
+    let mut citizen_probs = vec![0.0; citizens.len()];
+    for (point, (_, citizen_hits)) in plan.points.iter().zip(&results) {
+        let scale = point.weight / point.runs as f64;
+        for (prob, &hits) in citizen_probs.iter_mut().zip(citizen_hits) {
+            *prob += scale * hits as f64;
+        }
+    }
+
+    let citizen_percentages = citizen_probs
+        .iter()
+        .map(|&p| (p.min(1.0) * 100.0).max(0.0))
+        .collect();
+
+    (
+        death_percentage(
+            &plan.points,
+            results.iter().map(|&(town_hits, _)| town_hits),
+        ),
+        plan.budget,
+        citizen_percentages,
+        plan.avg_max_active,
+    )
+}
+
+fn complete_town_probability(
+    config: &SimConfig,
+    citizens: &[crate::config::SimulationCitizen],
+) -> (f64, u64) {
+    let (effective_config, b_level, min_citizen_defense) = complete_setup(config, citizens);
+    let plan = plan_attack_points(&effective_config, b_level, min_citizen_defense);
+
+    let hits: Vec<u64> = plan
         .points
         .par_iter()
         .map_init(
@@ -527,41 +582,150 @@ pub fn complete_overflow_probability(
                     point,
                     citizens,
                     min_citizen_defense,
+                    None,
                 )
             },
         )
         .collect();
 
-    let mut overflow_prob = 0.0;
-    let mut citizen_probs = vec![0.0; citizens.len()];
-    for (point, (town_hits, citizen_hits)) in plan.points.iter().zip(&results) {
-        let scale = point.weight / point.runs as f64;
-        overflow_prob += scale * *town_hits as f64;
-        for (prob, &hits) in citizen_probs.iter_mut().zip(citizen_hits) {
-            *prob += scale * hits as f64;
-        }
+    (death_percentage(&plan.points, hits), plan.budget)
+}
+
+pub struct DefenseSearch {
+    pub defense: i32,
+    pub prob_at_defense: f64,
+    pub safe_defense: i32,
+    pub total_runs: u64,
+}
+
+pub fn required_defense(
+    config: &SimConfig,
+    citizens: &[crate::config::SimulationCitizen],
+    target_pct: f64,
+) -> DefenseSearch {
+    let (setup_config, b_level, threshold) = if config.is_complete {
+        complete_setup(config, citizens)
+    } else {
+        (config.clone(), resolve_b_level(config, &[]), config.min_def)
+    };
+    let can_die = |defense: i32| {
+        let setup = SimConfig {
+            defense,
+            ..setup_config.clone()
+        };
+        !plan_attack_points(&setup, b_level, threshold)
+            .points
+            .is_empty()
+    };
+    let max_reactor_damage = if config.is_reactor_built {
+        REACTOR_DAMAGE_MAX
+    } else {
+        0
+    };
+    let safe_defense =
+        lowest_passing_defense(0, (config.tdg_max + max_reactor_damage).max(0), |d| {
+            !can_die(d)
+        });
+
+    if target_pct <= 0.0 {
+        return DefenseSearch {
+            defense: safe_defense,
+            prob_at_defense: 0.0,
+            safe_defense,
+            total_runs: 0,
+        };
     }
 
-    let citizen_percentages = citizen_probs
-        .iter()
-        .map(|&p| (p.min(1.0) * 100.0).max(0.0))
-        .collect();
+    let mut total_runs = 0;
+    let mut estimate = |iterations: u32, defense: i32| {
+        let config = SimConfig {
+            defense,
+            iterations,
+            ..config.clone()
+        };
+        let (prob, runs) = if config.is_complete {
+            complete_town_probability(&config, citizens)
+        } else {
+            let (prob, runs, _) = overflow_probability(&config);
+            (prob, runs)
+        };
+        total_runs += runs;
+        prob
+    };
 
-    (
-        (overflow_prob.min(1.0) * 100.0).max(0.0),
-        plan.budget,
-        citizen_percentages,
-        plan.avg_max_active,
-    )
+    let rough_guess = (config.iterations > ROUGH_SEARCH_ITERATIONS).then(|| {
+        lowest_passing_defense(0, safe_defense, |defense| {
+            estimate(ROUGH_SEARCH_ITERATIONS, defense) <= target_pct
+        })
+    });
+
+    let mut prob_at_defense = 0.0;
+    let mut passes = |defense: i32| {
+        let prob = estimate(config.iterations, defense);
+        let passes = prob <= target_pct;
+        if passes {
+            prob_at_defense = prob;
+        }
+        passes
+    };
+    let defense = match rough_guess {
+        Some(guess) => lowest_passing_defense_near(guess, safe_defense, &mut passes),
+        None => lowest_passing_defense(0, safe_defense, &mut passes),
+    };
+
+    DefenseSearch {
+        defense,
+        prob_at_defense,
+        safe_defense,
+        total_runs,
+    }
+}
+
+fn lowest_passing_defense(mut lo: i32, mut hi: i32, mut passes: impl FnMut(i32) -> bool) -> i32 {
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if passes(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    hi
+}
+
+fn lowest_passing_defense_near(guess: i32, max: i32, mut passes: impl FnMut(i32) -> bool) -> i32 {
+    let guess = guess.clamp(0, max);
+    let mut step = 1;
+    let (lo, hi) = if guess == max || passes(guess) {
+        let mut hi = guess;
+        loop {
+            if hi == 0 {
+                break (0, 0);
+            }
+            let d = (hi - step).max(0);
+            if !passes(d) {
+                break (d + 1, hi);
+            }
+            hi = d;
+            step *= 2;
+        }
+    } else {
+        let mut lo = guess + 1;
+        loop {
+            let d = (lo - 1 + step).min(max);
+            if d == max || passes(d) {
+                break (lo, d);
+            }
+            lo = d + 1;
+            step *= 2;
+        }
+    };
+    lowest_passing_defense(lo, hi, passes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // Reference: one Monte Carlo batch for a single raw attack value.
-    // =========================================================================
 
     fn debordo_sequential(
         config: &SimConfig,
@@ -1635,5 +1799,206 @@ mod tests {
         }
         let total: u64 = plan.points.iter().map(|p| p.runs).sum();
         assert!(total <= plan.budget + plan.points.len() as u64);
+    }
+
+    // =========================================================================
+    // Required defense for a target death risk
+    // =========================================================================
+
+    fn search_config() -> SimConfig {
+        SimConfig {
+            tdg_min: 1000,
+            tdg_max: 1004,
+            min_def: 30,
+            day: 10,
+            nb_hab: 40,
+            is_reactor_built: true,
+            iterations: 50_000,
+            ..Default::default()
+        }
+    }
+
+    fn can_die_at(config: &SimConfig, defense: i32) -> bool {
+        let config = SimConfig {
+            defense,
+            ..config.clone()
+        };
+        !plan_attack_points(&config, resolve_b_level(&config, &[]), config.min_def)
+            .points
+            .is_empty()
+    }
+
+    #[test]
+    fn test_safe_defense_is_the_lowest_defense_where_nobody_can_die() {
+        let config = search_config();
+        let search = required_defense(&config, &[], 0.0);
+        assert!(!can_die_at(&config, search.safe_defense));
+        assert!(can_die_at(&config, search.safe_defense - 1));
+    }
+
+    #[test]
+    fn test_required_defense_for_zero_risk_is_safe_defense() {
+        let search = required_defense(&search_config(), &[], 0.0);
+        assert_eq!(search.defense, search.safe_defense);
+        assert_eq!(search.prob_at_defense, 0.0);
+        assert_eq!(search.total_runs, 0, "a 0% target needs no simulation");
+    }
+
+    #[test]
+    fn test_required_defense_meets_target_and_is_minimal() {
+        let config = search_config();
+        let target = 20.0;
+        let search = required_defense(&config, &[], target);
+
+        assert!(search.defense < search.safe_defense);
+        assert!(search.prob_at_defense <= target);
+        assert!(search.total_runs > 0);
+
+        // Independent estimates on both sides of the answer, within noise.
+        let at = |defense: i32| {
+            overflow_probability(&SimConfig {
+                defense,
+                ..config.clone()
+            })
+            .0
+        };
+        let at_answer = at(search.defense);
+        let below_answer = at(search.defense - 1);
+        assert!(
+            at_answer <= target + 1.0,
+            "P({}) = {at_answer}%",
+            search.defense
+        );
+        assert!(
+            below_answer > target - 1.0,
+            "P({}) = {below_answer}%",
+            search.defense - 1
+        );
+    }
+
+    #[test]
+    fn test_required_defense_is_zero_when_target_is_met_without_defense() {
+        // Nobody can die at all: every citizen has a huge defense threshold.
+        let config = SimConfig {
+            min_def: 1_000_000,
+            ..search_config()
+        };
+        let search = required_defense(&config, &[], 5.0);
+        assert_eq!(search.safe_defense, 0);
+        assert_eq!(search.defense, 0);
+    }
+
+    #[test]
+    fn test_required_defense_complete_mode() {
+        use crate::config::SimulationCitizen;
+
+        let mut citizens = vec![SimulationCitizen {
+            name: "Fragile".to_string(),
+            defense: 0,
+        }];
+        for i in 0..39 {
+            citizens.push(SimulationCitizen {
+                name: format!("Tank{i}"),
+                defense: 60,
+            });
+        }
+        let config = SimConfig {
+            is_complete: true,
+            ..search_config()
+        };
+        let target = 10.0;
+        let search = required_defense(&config, &citizens, target);
+
+        assert!(search.prob_at_defense <= target);
+        assert!(search.defense < search.safe_defense);
+        let (at_answer, _, _, _) = complete_overflow_probability(
+            &SimConfig {
+                defense: search.defense,
+                ..config.clone()
+            },
+            &citizens,
+        );
+        assert!(
+            at_answer <= target + 1.0,
+            "P({}) = {at_answer}%",
+            search.defense
+        );
+    }
+
+    #[test]
+    fn test_lowest_passing_defense_near_finds_the_edge_from_any_guess() {
+        let answer = 37;
+        for guess in [0, 1, 20, 36, 37, 38, 60, 100] {
+            let mut evaluations = Vec::new();
+            let found = lowest_passing_defense_near(guess, 100, |d| {
+                evaluations.push(d);
+                d >= answer
+            });
+            assert_eq!(found, answer, "guess {guess}, evaluated {evaluations:?}");
+            assert!(evaluations.iter().all(|&d| (0..=100).contains(&d)));
+        }
+    }
+
+    #[test]
+    fn test_lowest_passing_defense_near_needs_two_evaluations_for_a_close_guess() {
+        let mut evaluations = 0;
+        let found = lowest_passing_defense_near(37, 100, |d| {
+            evaluations += 1;
+            d >= 37
+        });
+        assert_eq!(found, 37);
+        assert_eq!(evaluations, 2, "37 passes and 36 fails");
+    }
+
+    #[test]
+    fn test_lowest_passing_defense_near_handles_the_bounds() {
+        // Everything passes: the answer is 0.
+        assert_eq!(lowest_passing_defense_near(50, 100, |_| true), 0);
+        // Only `max` passes; it is never evaluated.
+        let found = lowest_passing_defense_near(50, 100, |d| {
+            assert!(d < 100, "max must not be evaluated");
+            false
+        });
+        assert_eq!(found, 100);
+    }
+
+    #[test]
+    fn test_required_defense_without_rough_pass_for_few_iterations() {
+        let config = SimConfig {
+            iterations: ROUGH_SEARCH_ITERATIONS,
+            ..search_config()
+        };
+        let target = 20.0;
+        let search = required_defense(&config, &[], target);
+        assert!(search.prob_at_defense <= target);
+        assert!(search.defense < search.safe_defense);
+    }
+
+    #[test]
+    fn test_complete_town_probability_matches_complete_simulation() {
+        use crate::config::SimulationCitizen;
+
+        let citizens: Vec<SimulationCitizen> = (0..40)
+            .map(|i| SimulationCitizen {
+                name: format!("Cit {i}"),
+                defense: 15 + i,
+            })
+            .collect();
+        let config = SimConfig {
+            defense: 1100,
+            is_complete: true,
+            ..search_config()
+        };
+        let (town_only, runs) = complete_town_probability(&config, &citizens);
+        let (town, full_runs, _, _) = complete_overflow_probability(&config, &citizens);
+        assert_eq!(runs, full_runs);
+        assert!(
+            town > 2.0 && town < 95.0,
+            "test config should give a non-trivial probability, got {town}%"
+        );
+        assert!(
+            (town_only - town).abs() < 1.0,
+            "town-only {town_only}% vs complete {town}%"
+        );
     }
 }
