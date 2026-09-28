@@ -1,26 +1,50 @@
 //! Worker Lambda - déclenché par SQS, exécute la simulation et envoie le résultat à Discord.
 
 use aws_lambda_events::sqs::SqsEvent;
+use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
+use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    JobType, SimulationJob, format_defense_search_results, format_reparo_results, format_results,
-    truncate_for_discord,
+    EstimationJob, EstimationSource, EstimationStage, JobType, SimulationJob,
+    format_defense_search_results, format_reparo_results, format_results, truncate_for_discord,
 };
+use debordo_lib::database;
 use debordo_lib::discord::api::send_followup;
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{
     complete_overflow_probability, overflow_probability, required_defense,
 };
+use estimation25_lib::mho::{self, MhoEstimations};
+use estimation25_lib::parse::InputOverrides;
+use estimation25_lib::{
+    EstimConf, EstimationError, EstimationInput, format_summary, parse_text, seed_slices,
+};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DISCORD_MESSAGE_MAX_LENGTH: usize = 2000;
+/// One `/estimation25` part must finish within the 300 s Lambda timeout.
+const ESTIMATION_TIMEOUT_SECS: u64 = 280;
+/// Parallel parts of an `/estimation25` run (`ESTIMATION_PARTS` overrides it).
+const DEFAULT_ESTIMATION_PARTS: u32 = 32;
+/// `modifiers.red_soul_max_factor` of Pandemonium towns.
+const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
-async fn handler(event: LambdaEvent<SqsEvent>, http_client: &reqwest::Client) -> Result<(), Error> {
+/// Clients shared by every invocation, built once per cold start (cheap to clone).
+#[derive(Clone)]
+struct Clients {
+    http: reqwest::Client,
+    sqs: aws_sdk_sqs::Client,
+    dynamodb: aws_sdk_dynamodb::Client,
+    /// Queue the `/estimation25` parts are sent to (`SQS_QUEUE_URL`).
+    queue_url: Option<String>,
+}
+
+async fn handler(event: LambdaEvent<SqsEvent>, clients: &Clients) -> Result<(), Error> {
     for record in event.payload.records {
         let body = match record.body {
             Some(b) => b,
@@ -38,23 +62,25 @@ async fn handler(event: LambdaEvent<SqsEvent>, http_client: &reqwest::Client) ->
             }
         };
 
-        if let Err(e) = process_job(job, http_client).await {
+        if let Err(e) = process_job(job, clients).await {
             error!("Failed to process simulation job: {}", e);
         }
     }
     Ok(())
 }
 
-async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Result<(), Error> {
+async fn process_job(job: SimulationJob, clients: &Clients) -> Result<(), Error> {
     let config = job.config.clone();
     info!("Processing simulation with config: {:?}", config);
 
+    let http_client = &clients.http;
     match job.job_type {
         JobType::Debordo if config.target_death.is_some() => {
             process_defense_search_job(job, config, http_client).await
         }
         JobType::Debordo => process_debordo_job(job, config, http_client).await,
         JobType::Reparation => process_reparo_job(job, config, http_client).await,
+        JobType::Estimation => process_estimation_job(job, clients).await,
     }
 }
 
@@ -177,7 +203,10 @@ async fn process_reparo_job(
 
     let content = match result {
         Err(_elapsed) => {
-            error!("Reparo simulation timed out after {}s", SIMULATION_TIMEOUT_SECS);
+            error!(
+                "Reparo simulation timed out after {}s",
+                SIMULATION_TIMEOUT_SECS
+            );
             "⏱️ La simulation a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string()
         }
         Ok(Err(e)) => {
@@ -230,6 +259,272 @@ async fn process_reparo_job(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// /estimation25: the plan job resolves the readings and fans the 2^32 seeds out to part jobs;
+// each part searches its slice and records it in DynamoDB; the last one posts the result.
+// ---------------------------------------------------------------------------------------------
+
+fn estimation_parts() -> u32 {
+    std::env::var("ESTIMATION_PARTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_ESTIMATION_PARTS)
+        .clamp(1, 256)
+}
+
+/// Replaces the deferred message with `content` (truncated to Discord's limit).
+async fn reply(job: &SimulationJob, clients: &Clients, content: &str) -> Result<(), Error> {
+    let content = truncate_for_discord(
+        content,
+        DISCORD_MESSAGE_MAX_LENGTH,
+        "\n… (message tronqué, réponse trop longue pour Discord)",
+    );
+    send_followup(&clients.http, &job.application_id, &job.token, &content).await?;
+    Ok(())
+}
+
+async fn process_estimation_job(job: SimulationJob, clients: &Clients) -> Result<(), Error> {
+    let Some(estimation) = job.estimation.clone() else {
+        error!("Estimation job without estimation payload, skipping");
+        return Ok(());
+    };
+    match estimation.stage {
+        EstimationStage::Plan { source } => {
+            plan_estimation(&job, source, &estimation.overrides, clients).await
+        }
+        EstimationStage::Part {
+            run_id,
+            index,
+            parts,
+            input,
+        } => run_estimation_part(&job, &run_id, index, parts, input, clients).await,
+    }
+}
+
+/// Readings of the run, as the CLI would read them (MyHordes Optimizer or pasted text).
+async fn resolve_readings(
+    source: EstimationSource,
+    overrides: &InputOverrides,
+    http: &reqwest::Client,
+) -> Result<EstimationInput, String> {
+    let (town_id, day, pandemonium) = match source {
+        EstimationSource::Text(text) => {
+            return parse_text(&text)
+                .into_input(overrides)
+                .map_err(|e| format!("❌ Erreur : {e}"));
+        }
+        EstimationSource::Mho {
+            town_id,
+            day,
+            pandemonium,
+        } => (town_id, day, pandemonium),
+    };
+
+    let future = overrides.future.unwrap_or(false);
+    let attack_day = day + i64::from(future);
+    let (header, origin) = mho::ORIGIN_HEADER;
+    let response = http
+        .get(mho::estimations_url(attack_day, town_id))
+        .header(header, origin)
+        .send()
+        .await
+        .map_err(|e| format!("❌ MyHordes Optimizer injoignable : {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("❌ Réponse de MyHordes Optimizer illisible : {e}"))?;
+    if !status.is_success() {
+        return Err(format!("❌ MyHordes Optimizer a répondu {status}."));
+    }
+    let estimations = MhoEstimations::from_json(&body)
+        .map_err(|e| format!("❌ Réponse de MyHordes Optimizer inattendue : {e}"))?;
+
+    let mut overrides = overrides.clone();
+    if pandemonium && overrides.soul_max.is_none() {
+        overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
+    }
+    estimations
+        .into_input(future, &overrides)
+        .map_err(|e| match e {
+            EstimationError::NoReadings => format!(
+                "❌ MyHordes Optimizer n'a aucun relevé pour la ville {town_id} (attaque du J{attack_day})."
+            ),
+            e => format!("❌ Erreur : {e}"),
+        })
+}
+
+async fn plan_estimation(
+    job: &SimulationJob,
+    source: EstimationSource,
+    overrides: &InputOverrides,
+    clients: &Clients,
+) -> Result<(), Error> {
+    let input = match resolve_readings(source, overrides, &clients.http).await {
+        Ok(input) => input,
+        Err(message) => return reply(job, clients, &message).await,
+    };
+    if let Err(e) = estimation25_lib::check_input(&input, &EstimConf::default()) {
+        return reply(job, clients, &format!("❌ Erreur : {e}")).await;
+    }
+    let Some(queue_url) = clients.queue_url.as_deref() else {
+        error!("SQS_QUEUE_URL is not set on the worker: cannot fan /estimation25 out");
+        return reply(
+            job,
+            clients,
+            "❌ La recherche n'est pas configurée sur ce serveur.",
+        )
+        .await;
+    };
+
+    let parts = estimation_parts();
+    let run_id = database::estimation_run_id(&job.token);
+    if let Err(e) = database::create_estimation_run(&run_id, parts, &clients.dynamodb).await {
+        error!("Failed to create estimation run {}: {}", run_id, e);
+        return reply(
+            job,
+            clients,
+            "❌ La recherche n'a pas pu démarrer. Réessayez.",
+        )
+        .await;
+    }
+    reply(
+        job,
+        clients,
+        &format!("⏳ Recherche de la graine parmi 4 294 967 296 ({parts} lots en parallèle)…"),
+    )
+    .await?;
+
+    let indices: Vec<u32> = (0..parts).collect();
+    for chunk in indices.chunks(10) {
+        let mut entries = Vec::with_capacity(chunk.len());
+        for &index in chunk {
+            let part = SimulationJob {
+                token: job.token.clone(),
+                application_id: job.application_id.clone(),
+                job_type: JobType::Estimation,
+                estimation: Some(EstimationJob {
+                    overrides: overrides.clone(),
+                    stage: EstimationStage::Part {
+                        run_id: run_id.clone(),
+                        index,
+                        parts,
+                        input: input.clone(),
+                    },
+                }),
+                ..Default::default()
+            };
+            entries.push(
+                SendMessageBatchRequestEntry::builder()
+                    .id(index.to_string())
+                    .message_body(serde_json::to_string(&part)?)
+                    .build()?,
+            );
+        }
+        let sent = clients
+            .sqs
+            .send_message_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(entries))
+            .send()
+            .await;
+        let failed = match sent {
+            Ok(out) => !out.failed().is_empty(),
+            Err(e) => {
+                error!("SendMessageBatch failed for run {}: {}", run_id, e);
+                true
+            }
+        };
+        if failed {
+            return reply(
+                job,
+                clients,
+                "❌ La recherche n'a pas pu démarrer. Réessayez.",
+            )
+            .await;
+        }
+    }
+    info!("Estimation run {} fanned out to {} parts", run_id, parts);
+    Ok(())
+}
+
+async fn run_estimation_part(
+    job: &SimulationJob,
+    run_id: &str,
+    index: u32,
+    parts: u32,
+    input: EstimationInput,
+    clients: &Clients,
+) -> Result<(), Error> {
+    let Some(slice) = seed_slices(parts).into_iter().nth(index as usize) else {
+        error!("Part {} out of range for {} parts", index, parts);
+        return Ok(());
+    };
+
+    let start = Instant::now();
+    let search_input = input.clone();
+    let searched = timeout(
+        Duration::from_secs(ESTIMATION_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || {
+            estimation25_lib::search_seeds(
+                &search_input,
+                &EstimConf::default(),
+                slice,
+                &AtomicU64::new(0),
+            )
+        }),
+    )
+    .await;
+    let matches = match searched {
+        Ok(Ok(Ok(matches))) => matches,
+        Ok(Ok(Err(e))) => return reply(job, clients, &format!("❌ Erreur : {e}")).await,
+        Ok(Err(e)) => {
+            error!("Estimation part {} of {} panicked: {}", index, run_id, e);
+            return reply(
+                job,
+                clients,
+                "❌ La recherche a échoué. Veuillez réessayer.",
+            )
+            .await;
+        }
+        Err(_elapsed) => {
+            error!("Estimation part {} of {} timed out", index, run_id);
+            return reply(
+                job,
+                clients,
+                "⏱️ La recherche a expiré. Veuillez réessayer.",
+            )
+            .await;
+        }
+    };
+    info!(
+        "Estimation part {}/{} of {}: {} seed(s) in {:.1} s",
+        index + 1,
+        parts,
+        run_id,
+        matches.len(),
+        start.elapsed().as_secs_f64()
+    );
+
+    let Some(done) =
+        database::record_estimation_part(run_id, index, &matches, &clients.dynamodb).await?
+    else {
+        return Ok(());
+    };
+    let content = match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
+        Ok(estimate) => format!(
+            "{}\n-# {} graine(s) compatible(s) sur 4294967296 testées ({parts} lots, {} s)",
+            format_summary(&input, &estimate),
+            estimate.seeds.len(),
+            database::seconds_since(done.started_at)
+        ),
+        Err(e) => format!("❌ Erreur : {e}"),
+    };
+    reply(job, clients, &content).await?;
+    info!("Estimation run {} result sent to Discord", run_id);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
@@ -237,14 +532,20 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
-        .build()
-        .expect("failed to build reqwest client");
+    let aws_config = aws_config::load_from_env().await;
+    let clients = Clients {
+        http: reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+            .build()
+            .expect("failed to build reqwest client"),
+        sqs: aws_sdk_sqs::Client::new(&aws_config),
+        dynamodb: aws_sdk_dynamodb::Client::new(&aws_config),
+        queue_url: std::env::var("SQS_QUEUE_URL").ok(),
+    };
     info!("Starting DebordoLambda Worker");
     lambda_runtime::run(service_fn(move |event| {
-        let client = http_client.clone();
-        async move { handler(event, &client).await }
+        let clients = clients.clone();
+        async move { handler(event, &clients).await }
     }))
     .await
 }

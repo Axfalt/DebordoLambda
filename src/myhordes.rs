@@ -8,6 +8,9 @@ pub struct MHMeResponse {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct MHMap {
+    /// Town id (used by `/estimation25` to query MyHordes Optimizer).
+    #[serde(default)]
+    pub id: Option<i64>,
     pub days: i32,
     pub city: Option<MHCity>,
     pub citizens: Vec<MHCitizen>,
@@ -95,7 +98,7 @@ pub async fn fetch_mh_data(
         }
     };
 
-    let fields_param = "map.fields(days,city.fields(chaos,devast,hard,defense.fields(total,watchmen),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
+    let fields_param = "map.fields(id,days,city.fields(chaos,devast,hard,defense.fields(total,watchmen),buildings.fields(name,life,maxLife,breakable,temporary),estimations.fields(min,max)),citizens.fields(name,dead,baseDef,job.fields(uid,name)))";
 
     let url = "https://myhordes.eu/api/x/json/me";
     info!("Querying MyHordes API for me/map details...");
@@ -212,7 +215,8 @@ mod tests {
 
     #[test]
     fn test_parse_defense_without_watchmen_field_defaults_zero() {
-        let defense: MHDefense = serde_json::from_value(serde_json::json!({ "total": 125 })).unwrap();
+        let defense: MHDefense =
+            serde_json::from_value(serde_json::json!({ "total": 125 })).unwrap();
         assert_eq!(defense.watchmen, 0);
     }
 

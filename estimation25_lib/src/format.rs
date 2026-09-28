@@ -1,127 +1,118 @@
-//! French text summary of a posterior, shared by the CLI and (later) the Discord bot.
+//! French text summary of an estimate, shared by the CLI and (later) the Discord bot.
+//!
+//! Everything is written straight into one `String` (`fmt::Write`), with no intermediate strings.
 
-use crate::inference::{GuetInput, Posterior};
+use crate::engine::future_blocks;
+use crate::inference::{Estimate, EstimationInput};
+use std::fmt::{self, Write};
 
-pub const CREDIBLE_LEVELS: [f64; 4] = [0.5, 0.8, 0.95, 0.99];
-
-fn pct(p: f64) -> String {
-    let v = p * 100.0;
-    if v >= 10.0 {
-        format!("{v:.0} %")
-    } else {
-        format!("{v:.1} %")
-    }
+#[must_use]
+pub fn format_summary(input: &EstimationInput, estimate: &Estimate) -> String {
+    let mut out = String::with_capacity(512);
+    write_summary(&mut out, input, estimate).expect("writing to a String cannot fail");
+    out
 }
 
-pub fn format_summary(input: &GuetInput, post: &Posterior, top_targets: usize) -> String {
-    let mut out = String::new();
-    let day = input.estimated_day();
-    let kind = if input.future {
-        format!(
+fn write_summary(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
+    write_header(out, input, estimate)?;
+    write_seeds(out, estimate)?;
+    write_attack(out, input, estimate)
+}
+
+fn write_header(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
+    write!(
+        out,
+        "🔭 Tour de guet — attaque du J{} (",
+        input.estimated_day()
+    )?;
+    if input.future {
+        write!(
+            out,
             "estimation J+1 faite au J{}, blocs de {}",
             input.day,
             input.blocks()
-        )
+        )?;
     } else {
-        "estimation du jour".to_string()
-    };
-    out.push_str(&format!(
-        "🔭 Tour de guet — attaque du J{day} ({kind}), mode {}\n",
-        input.mode.label()
-    ));
+        out.push_str("estimation du jour");
+    }
+    writeln!(out, "), mode {}", input.mode.label())?;
 
-    if let (Some(first), Some(last)) = (post.observations.first(), post.observations.last()) {
-        out.push_str(&format!(
-            "{} relevés ({} % → {} %), dernier : {} - {} (largeur {})\n",
-            post.observations.len(),
+    let obs = &estimate.observations;
+    if let (Some(first), Some(last)) = (obs.first(), obs.last()) {
+        writeln!(
+            out,
+            "{} relevés ({} % → {} %), dernier : {} - {} (largeur {})",
+            obs.len(),
             first.pct,
             last.pct,
             last.min,
             last.max,
             last.max - last.min
-        ));
+        )?;
     }
     if !input.future && !input.planner.is_empty() {
-        out.push_str(&format!(
-            "+ {} relevés J+1 pris au J{} (même tirage, blocs de {})\n",
+        writeln!(
+            out,
+            "+ {} relevés J+1 pris au J{} (même tirage, blocs de {})",
             input.planner.len(),
             input.day - 1,
-            crate::engine::future_blocks(input.day)
-        ));
+            future_blocks(input.day)
+        )?;
     }
+    Ok(())
+}
 
-    if input.soul_factor != 1.0 {
-        out.push_str("\n🎯 Attaque estimée (avant âmes rouges)\n");
-    } else {
-        out.push_str("\n🎯 Attaque réelle estimée\n");
+/// A bound pinned by the seed (`a`) or left open between two values (`a…b`).
+struct Bound((i64, i64));
+
+impl fmt::Display for Bound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (a, b) = self.0;
+        if a == b {
+            write!(f, "{a}")
+        } else {
+            write!(f, "{a}…{b}")
+        }
     }
-    out.push_str(&format!(
-        "  Médiane {} · moyenne {:.0}\n",
-        post.median(),
-        post.mean()
-    ));
-    for level in CREDIBLE_LEVELS {
-        let (lo, hi) = post.central_interval(level);
-        out.push_str(&format!(
-            "  {:>4} : {lo} - {hi} (largeur {})\n",
-            pct(level),
+}
+
+fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
+    out.push('\n');
+    for s in &estimate.seeds {
+        let m = &s.seed;
+        writeln!(
+            out,
+            "🎲 Graine {:#010x} : offsets ({}, {}), plage cachée {} - {} → attaque {} - {}",
+            m.seed,
+            m.om0,
+            m.ox0,
+            Bound(m.tmin),
+            Bound(m.tmax),
+            s.attack.0,
+            s.attack.1
+        )?;
+    }
+    Ok(())
+}
+
+fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
+    let (lo, hi) = estimate.attack();
+    if input.has_red_souls() {
+        // NightlyHandler: the night attack is round(zombies * soulFactor).
+        let soul = input.soul_factor;
+        let night = |v: i64| (v as f64 * soul).round() as i64;
+        writeln!(
+            out,
+            "\n🎯 Attaque stockée : {lo} - {hi} (largeur {})",
             hi - lo
-        ));
+        )?;
+        writeln!(
+            out,
+            "💀 Attaque de la nuit (âmes rouges ×{soul}) : {} - {}",
+            night(lo),
+            night(hi)
+        )
+    } else {
+        writeln!(out, "\n🎯 Attaque : {lo} - {hi} (largeur {})", hi - lo)
     }
-    let (lo, hi) = post.support();
-    out.push_str(&format!("  Possible : {lo} - {hi} (largeur {})\n", hi - lo));
-
-    let soul = input.soul_factor;
-    if soul != 1.0 {
-        // NightlyHandler: attack = round(zombies * soulFactor).
-        let scale = |v: i64| (v as f64 * soul).round() as i64;
-        out.push_str(&format!(
-            "\n💀 Avec les âmes rouges (×{soul}), attaque de la nuit :\n  Médiane {}\n",
-            scale(post.median())
-        ));
-        for level in CREDIBLE_LEVELS {
-            let (lo, hi) = post.central_interval(level);
-            out.push_str(&format!(
-                "  {:>4} : {} - {}\n",
-                pct(level),
-                scale(lo),
-                scale(hi)
-            ));
-        }
-        out.push_str(&format!("  Possible : {} - {}\n", scale(lo), scale(hi)));
-    }
-    if let Some(last) = post.observations.last() {
-        let last_width = (last.max - last.min).max(1) as f64;
-        let (q_lo, q_hi) = post.central_interval(0.95);
-        out.push_str(&format!(
-            "  L'intervalle à 95 % est {} plus étroit que le dernier relevé\n",
-            pct(1.0 - (q_hi - q_lo) as f64 * soul / last_width)
-        ));
-    }
-
-    let pairs = post.offset_pairs();
-    if !pairs.is_empty() {
-        let shown: Vec<String> = pairs
-            .iter()
-            .take(6)
-            .map(|((om0, ox0), p)| format!("({om0}, {ox0}) {}", pct(*p)))
-            .collect();
-        out.push_str(&format!("\n🧩 Offsets initiaux : {}\n", shown.join(" · ")));
-    }
-
-    if top_targets > 0 && !post.targets.is_empty() {
-        out.push_str("🔍 Plages cachées les plus probables (tmin - tmax, offsets) :\n");
-        for t in post.targets.iter().take(top_targets) {
-            out.push_str(&format!(
-                "  {} - {} ({}, {}) : {}\n",
-                t.target.tmin,
-                t.target.tmax,
-                t.target.om0,
-                t.target.ox0,
-                pct(t.probability)
-            ));
-        }
-    }
-
-    out
 }

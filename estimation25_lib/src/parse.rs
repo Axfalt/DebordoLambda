@@ -6,10 +6,11 @@
 //! line inside the `Planificateur` section gives the red souls of that day.
 
 use crate::engine::{AttackMode, DEFAULT_SOUL_MAX, DEFAULT_SOUL_PENALTY, soul_factor};
-use crate::inference::{GuetError, GuetInput, Reading};
+use crate::inference::{EstimationError, EstimationInput, Reading};
+use serde::{Deserialize, Serialize};
 
 /// Values given outside the text (command-line options); they take precedence over the text.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InputOverrides {
     pub day: Option<i64>,
     pub future: Option<bool>,
@@ -35,6 +36,8 @@ pub struct ParsedText {
     pub planner_red_souls: Option<u32>,
     /// Penalty per red soul (0.04, or 0.02 with the level-2 blue soul building).
     pub soul_penalty: Option<f64>,
+    /// Cap of the red-soul factor (1.2, or 666 in Pandemonium).
+    pub soul_max: Option<f64>,
     /// Non-empty lines that were neither a reading nor a known key.
     pub ignored: Vec<String>,
 }
@@ -44,24 +47,28 @@ impl ParsedText {
     ///
     /// A paste holding only a `Planificateur` section is a J+1 estimate made on `planner_day`.
     /// With both sections, the J+1 readings sharpen today's (same seeded path).
-    pub fn into_input(self, o: &InputOverrides) -> Result<GuetInput, GuetError> {
+    ///
+    /// # Errors
+    ///
+    /// [`EstimationError::MissingDay`] when neither the overrides nor the text give a day.
+    pub fn into_input(self, o: &InputOverrides) -> Result<EstimationInput, EstimationError> {
         let mode = o.mode.or(self.mode).unwrap_or_default();
         let penalty = o
             .soul_penalty
             .or(self.soul_penalty)
             .unwrap_or(DEFAULT_SOUL_PENALTY);
-        let max = o.soul_max.unwrap_or(DEFAULT_SOUL_MAX);
+        let max = o.soul_max.or(self.soul_max).unwrap_or(DEFAULT_SOUL_MAX);
         let factor = |souls: u32| soul_factor(souls, penalty, max);
         let souls = o.red_souls.or(self.red_souls);
         let planner_souls = o.planner_red_souls.or(self.planner_red_souls);
 
         if self.readings.is_empty() && !self.planner.is_empty() {
-            return Ok(GuetInput {
+            return Ok(EstimationInput {
                 day: o
                     .day
                     .or(self.planner_day)
                     .or(self.day)
-                    .ok_or(GuetError::MissingDay)?,
+                    .ok_or(EstimationError::MissingDay)?,
                 future: true,
                 mode,
                 readings: self.planner,
@@ -70,12 +77,12 @@ impl ParsedText {
                 planner_soul_factor: None,
             });
         }
-        Ok(GuetInput {
+        Ok(EstimationInput {
             day: o
                 .day
                 .or(self.day)
                 .or(self.planner_day.map(|d| d + 1))
-                .ok_or(GuetError::MissingDay)?,
+                .ok_or(EstimationError::MissingDay)?,
             future: o.future.or(self.future).unwrap_or(false),
             mode,
             readings: self.readings,
@@ -125,6 +132,7 @@ fn parse_reading(line: &str) -> Option<Reading> {
     }
 }
 
+#[must_use]
 pub fn parse_mode(value: &str) -> Option<AttackMode> {
     match value.trim().to_lowercase().as_str() {
         "normal" | "normale" => Some(AttackMode::Normal),
@@ -134,6 +142,7 @@ pub fn parse_mode(value: &str) -> Option<AttackMode> {
     }
 }
 
+#[must_use]
 pub fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_lowercase().as_str() {
         "oui" | "o" | "yes" | "y" | "true" | "vrai" | "1" => Some(true),
@@ -142,6 +151,12 @@ pub fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+/// A decimal value, with `.` or `,` as separator.
+fn decimal(value: &str) -> Option<f64> {
+    value.trim().replace(',', ".").parse().ok()
+}
+
+#[must_use]
 pub fn parse_text(text: &str) -> ParsedText {
     let mut parsed = ParsedText::default();
     let mut in_planner = false;
@@ -191,13 +206,12 @@ pub fn parse_text(text: &str) -> ParsedText {
                 "ames veille" | "ames rouges veille" | "ames planificateur" => count()
                     .map(|n| parsed.planner_red_souls = Some(n))
                     .is_some(),
-                "penalite" | "penalite ames" => value
-                    .trim()
-                    .replace(',', ".")
-                    .parse::<f64>()
-                    .ok()
+                "penalite" | "penalite ames" => decimal(value)
                     .map(|p| parsed.soul_penalty = Some(p))
                     .is_some(),
+                "ames max" | "ames rouges max" | "plafond ames" => {
+                    decimal(value).map(|m| parsed.soul_max = Some(m)).is_some()
+                }
                 "jour" | "day" | "j" => numbers(value)
                     .first()
                     .map(|&(_, _, d)| parsed.day = Some(d))
@@ -322,6 +336,15 @@ mod tests {
         let input = parsed.into_input(&InputOverrides::default()).unwrap();
         assert!((input.soul_factor - 1.04).abs() < 1e-12);
         assert!((input.planner_soul_factor.unwrap() - 1.02).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_soul_cap_key() {
+        let parsed = parse_text("jour: 25\nâmes: 10\nâmes max: 666\n33% : 9236 - 10804\n");
+        assert_eq!(parsed.soul_max, Some(666.0));
+        let input = parsed.into_input(&InputOverrides::default()).unwrap();
+        // 1 + 0.04 × 10 = 1.4, above the default cap of 1.2 but below 666.
+        assert!((input.soul_factor - 1.4).abs() < 1e-12);
     }
 
     #[test]

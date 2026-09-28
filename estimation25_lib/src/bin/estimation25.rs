@@ -1,137 +1,121 @@
-//! Local CLI: `guet [--jour N] [--demain] [--mode normal|hard|easy] [--particles N] [--seed S]
-//! [--exact [--seeds A-B]] [--top K] [--csv FILE] [FICHIER]`. Readings are read from FICHIER, or
-//! stdin when omitted. `--exact` brute-forces the 2^32 PHP seeds instead of the particle filter.
+//! Local CLI: `estimation25 [--api [--userkey K]] [--town_id ID] [--jour N] [--demain] [--mode M]
+//! [--seeds A-B] [--ames N] [--ames-veille N] [--penalite P] [--ames-max M] [FICHIER]`.
+//!
+//! Readings come from one of:
+//! - `--town_id ID --jour N`: `MyHordes` Optimizer, no `MyHordes` key needed;
+//! - `--api`: `MyHordes` Optimizer, the town and day coming from the `MyHordes` API (user key from
+//!   `--userkey` or `MH_USER_KEY`, application key from `MH_APP_KEY`), either overridable;
+//! - otherwise FICHIER, or stdin when omitted.
+//!
+//! The 2^32 PHP seeds are then replayed to find the ones reproducing every reading, and the attack
+//! range they imply is printed.
 
-use guet_lib::parse::{InputOverrides, parse_bool, parse_mode};
-use guet_lib::{InferenceOptions, Posterior, format_summary, infer, infer_exact, parse_text};
+use estimation25_lib::mho::{self, MhoEstimations};
+use estimation25_lib::parse::{InputOverrides, parse_bool, parse_mode};
+use estimation25_lib::{
+    EstimConf, Estimate, EstimationInput, estimate, format_summary, parse_text,
+};
+use serde::Deserialize;
+use std::fmt::Display;
 use std::io::Read;
+use std::ops::RangeInclusive;
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "Usage : guet [--jour N] [--demain] [--mode normal|hard|easy] [--particles N] \
-[--seed S] [--exact [--seeds A-B]] [--ames N] [--ames-veille N] [--penalite 0.04] [--ames-max 1.2] \
-[--top K] [--csv FICHIER] [RELEVÉS]\n\
-Les relevés (une ligne `33% 2047 - 2749` par citoyen) sont lus depuis RELEVÉS, ou l'entrée standard.";
+// `concat!` keeps the indentation (a trailing `\` in a string literal would strip it).
+const USAGE: &str = concat!(
+    "Usage : estimation25 [--api [--userkey CLÉ]] [--town_id ID] [--jour N] [--demain] ",
+    "[--mode normal|hard|easy] [--seeds A-B] [--ames N] [--ames-veille N] [--penalite 0.04] ",
+    "[--ames-max 1.2] [RELEVÉS]\n",
+    "Source des relevés :\n",
+    "  --town_id ID --jour N  MyHordes Optimizer, sans clé MyHordes ",
+    "(Pandémonium : ajoutez --ames-max 666)\n",
+    "  --api                  MyHordes Optimizer, ville et jour lus via l'API MyHordes\n",
+    "                         (clé utilisateur : --userkey ou MH_USER_KEY, ",
+    "clé d'application : MH_APP_KEY)\n",
+    "  sinon                  RELEVÉS, ou l'entrée standard ",
+    "(une ligne `33% 2047 - 2749` par citoyen)",
+);
+
+const MH_ME_URL: &str = "https://myhordes.eu/api/x/json/me";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+/// `modifiers.red_soul_max_factor` of Pandemonium towns.
+const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
 struct Args {
-    day: Option<i64>,
-    future: Option<bool>,
-    mode: Option<guet_lib::AttackMode>,
-    particles: Option<usize>,
-    seed: Option<u64>,
-    top: usize,
-    csv: Option<String>,
+    overrides: InputOverrides,
     file: Option<String>,
-    exact: bool,
-    seeds: std::ops::RangeInclusive<u32>,
-    red_souls: Option<u32>,
-    planner_red_souls: Option<u32>,
-    soul_penalty: Option<f64>,
-    soul_max: Option<f64>,
+    seeds: RangeInclusive<u32>,
+    api: bool,
+    user_key: Option<String>,
+    town_id: Option<i64>,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Args {
+            overrides: InputOverrides::default(),
+            file: None,
+            seeds: 0..=u32::MAX,
+            api: false,
+            user_key: None,
+            town_id: None,
+        }
+    }
+}
+
+/// Parses an option value, naming the option in the error.
+fn parse_value<T: FromStr>(option: &str, raw: &str) -> Result<T, String>
+where
+    T::Err: Display,
+{
+    raw.trim().parse().map_err(|e| format!("{option} : {e}"))
+}
+
+fn parse_seed_range(raw: &str) -> Result<RangeInclusive<u32>, String> {
+    let (a, b) = raw
+        .split_once('-')
+        .ok_or_else(|| format!("--seeds attend A-B : {raw}"))?;
+    Ok(parse_value("--seeds", a)?..=parse_value("--seeds", b)?)
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut args = Args {
-        day: None,
-        future: None,
-        mode: None,
-        particles: None,
-        seed: None,
-        top: 5,
-        csv: None,
-        file: None,
-        exact: false,
-        seeds: 0..=u32::MAX,
-        red_souls: None,
-        planner_red_souls: None,
-        soul_penalty: None,
-        soul_max: None,
-    };
+    let mut args = Args::default();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        let mut value = |name: &str| it.next().ok_or(format!("{name} attend une valeur"));
+        let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} attend une valeur"));
+        let o = &mut args.overrides;
         match arg.as_str() {
             "-h" | "--help" => return Err(USAGE.to_string()),
             "--jour" | "--day" => {
-                args.day = Some(
-                    value("--jour")?
-                        .trim_start_matches(['J', 'j'])
-                        .parse()
-                        .map_err(|e| format!("--jour : {e}"))?,
-                )
+                let v = value("--jour")?;
+                o.day = Some(parse_value("--jour", v.trim_start_matches(['J', 'j']))?);
             }
-            "--demain" | "--j1" => args.future = Some(true),
+            "--demain" | "--j1" => o.future = Some(true),
             "--mode" => {
                 let v = value("--mode")?;
-                args.mode = Some(parse_mode(&v).ok_or(format!("mode inconnu : {v}"))?);
+                o.mode = Some(parse_mode(&v).ok_or_else(|| format!("mode inconnu : {v}"))?);
             }
-            "--particles" => {
-                args.particles = Some(
-                    value("--particles")?
-                        .parse()
-                        .map_err(|e| format!("--particles : {e}"))?,
-                )
-            }
-            "--seed" => {
-                args.seed = Some(
-                    value("--seed")?
-                        .parse()
-                        .map_err(|e| format!("--seed : {e}"))?,
-                )
-            }
-            "--top" => {
-                args.top = value("--top")?
-                    .parse()
-                    .map_err(|e| format!("--top : {e}"))?
-            }
-            "--csv" => args.csv = Some(value("--csv")?),
-            "--ames" => {
-                args.red_souls = Some(
-                    value("--ames")?
-                        .parse()
-                        .map_err(|e| format!("--ames : {e}"))?,
-                )
-            }
+            "--ames" => o.red_souls = Some(parse_value("--ames", &value("--ames")?)?),
             "--ames-veille" => {
-                args.planner_red_souls = Some(
-                    value("--ames-veille")?
-                        .parse()
-                        .map_err(|e| format!("--ames-veille : {e}"))?,
-                )
+                o.planner_red_souls = Some(parse_value("--ames-veille", &value("--ames-veille")?)?);
             }
             "--penalite" => {
-                args.soul_penalty = Some(
-                    value("--penalite")?
-                        .replace(',', ".")
-                        .parse()
-                        .map_err(|e| format!("--penalite : {e}"))?,
-                )
+                let v = value("--penalite")?.replace(',', ".");
+                o.soul_penalty = Some(parse_value("--penalite", &v)?);
             }
-            "--ames-max" => {
-                args.soul_max = Some(
-                    value("--ames-max")?
-                        .parse()
-                        .map_err(|e| format!("--ames-max : {e}"))?,
-                )
-            }
-            "--exact" => args.exact = true,
-            "--seeds" => {
-                let v = value("--seeds")?;
-                let (a, b) = v
-                    .split_once('-')
-                    .ok_or(format!("--seeds attend A-B : {v}"))?;
-                let parse = |x: &str| {
-                    x.trim()
-                        .parse::<u32>()
-                        .map_err(|e| format!("--seeds : {e}"))
-                };
-                args.seeds = parse(a)?..=parse(b)?;
+            "--ames-max" => o.soul_max = Some(parse_value("--ames-max", &value("--ames-max")?)?),
+            "--seeds" => args.seeds = parse_seed_range(&value("--seeds")?)?,
+            "--api" => args.api = true,
+            "--userkey" => args.user_key = Some(value("--userkey")?),
+            "--town_id" | "--town-id" => {
+                args.town_id = Some(parse_value("--town_id", &value("--town_id")?)?);
             }
             s if s.starts_with("--demain=") => {
-                args.future = Some(
-                    parse_bool(&s["--demain=".len()..]).ok_or(format!("valeur invalide : {s}"))?,
-                )
+                let v = &s["--demain=".len()..];
+                o.future = Some(parse_bool(v).ok_or_else(|| format!("valeur invalide : {s}"))?);
             }
             s if s.starts_with('-') => return Err(format!("option inconnue : {s}\n{USAGE}")),
             s => args.file = Some(s.to_string()),
@@ -140,36 +124,12 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-fn histogram(post: &Posterior, bins: usize, width: usize) -> String {
-    let (lo, hi) = post.support();
-    let bin_size = (((hi - lo + 1) as f64 / bins as f64).ceil() as i64).max(1);
-    let n_bins = ((hi - lo) / bin_size + 1) as usize;
-    let mut mass = vec![0.0; n_bins];
-    for &(v, p) in &post.attack {
-        mass[((v - lo) / bin_size) as usize] += p;
-    }
-    let peak = mass.iter().copied().fold(0.0, f64::max);
-    let mut out = String::new();
-    for (i, m) in mass.iter().enumerate() {
-        let start = lo + i as i64 * bin_size;
-        let bar = "█".repeat(((m / peak) * width as f64).round() as usize);
-        out.push_str(&format!(
-            "{:>6}-{:<6} {:>5.1} % {bar}\n",
-            start,
-            start + bin_size - 1,
-            m * 100.0
-        ));
-    }
-    out
-}
-
-/// Seed brute force with a progress line on stderr; returns the posterior and a footer.
-fn run_exact(
-    input: &guet_lib::GuetInput,
-    opts: &InferenceOptions,
-    seeds: std::ops::RangeInclusive<u32>,
-) -> Result<(Posterior, String), String> {
-    let total = *seeds.end() as u64 - *seeds.start() as u64 + 1;
+/// Seed search with a progress line on stderr; returns the estimate and a footer.
+fn run_search(
+    input: &EstimationInput,
+    seeds: RangeInclusive<u32>,
+) -> Result<(Estimate, String), String> {
+    let total = u64::from(*seeds.end()) - u64::from(*seeds.start()) + 1;
     let progress = AtomicU64::new(0);
     let done = AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
@@ -187,94 +147,190 @@ fn run_exact(
             }
             eprintln!();
         });
-        let result = infer_exact(input, &opts.conf, seeds, &progress);
+        let result = estimate(input, &EstimConf::default(), seeds, &progress);
         done.store(true, Ordering::Relaxed);
         result
     });
-    let exact = result.map_err(|e| format!("Erreur : {e}"))?;
-    for m in &exact.matches {
-        eprintln!(
-            "graine {:#010x} : offsets ({}, {}), tmin {}-{}, tmax {}-{}",
-            m.seed, m.om0, m.ox0, m.tmin.0, m.tmin.1, m.tmax.0, m.tmax.1
-        );
-    }
+    let estimate = result.map_err(|e| format!("Erreur : {e}"))?;
     let footer = format!(
         "{} graine(s) compatible(s) sur {total} testées",
-        exact.matches.len()
+        estimate.seeds.len()
     );
-    Ok((exact.posterior, footer))
+    Ok((estimate, footer))
 }
 
-fn run() -> Result<(), String> {
-    let args = parse_args()?;
-    let text = match &args.file {
-        Some(path) => {
-            std::fs::read_to_string(path).map_err(|e| format!("lecture de {path} : {e}"))?
-        }
-        None => {
-            eprintln!("Collez les relevés puis Ctrl-Z/Entrée (Windows) ou Ctrl-D :");
-            let mut buf = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buf)
-                .map_err(|e| e.to_string())?;
-            buf
+fn read_readings(file: Option<&str>) -> Result<String, String> {
+    if let Some(path) = file {
+        return std::fs::read_to_string(path).map_err(|e| format!("lecture de {path} : {e}"));
+    }
+    eprintln!("Collez les relevés puis Ctrl-Z/Entrée (Windows) ou Ctrl-D :");
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// Town, current day and Pandemonium flag of the user, from the `MyHordes` API.
+struct Town {
+    id: i64,
+    day: i64,
+    pandemonium: bool,
+}
+
+fn get(request: reqwest::blocking::RequestBuilder, what: &str) -> Result<String, String> {
+    let response = request
+        .send()
+        .map_err(|e| format!("{what} injoignable : {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| format!("{what} : réponse illisible : {e}"))?;
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(format!("{what} a répondu {status} : {body}"))
+    }
+}
+
+fn fetch_town(client: &reqwest::blocking::Client, user_key: &str) -> Result<Town, String> {
+    #[derive(Deserialize)]
+    struct Me {
+        map: Option<Map>,
+    }
+    #[derive(Deserialize)]
+    struct Map {
+        id: i64,
+        days: i64,
+        city: Option<City>,
+    }
+    #[derive(Deserialize)]
+    struct City {
+        #[serde(default)]
+        hard: bool,
+    }
+
+    let app_key = std::env::var("MH_APP_KEY")
+        .map_err(|_| "--api : clé d'application manquante (variable MH_APP_KEY)".to_string())?;
+    let request = client.get(MH_ME_URL).query(&[
+        ("userkey", user_key),
+        ("appkey", app_key.as_str()),
+        ("fields", "map.fields(id,days,city.fields(hard))"),
+    ]);
+    let body = get(request, "l'API MyHordes")?;
+    let me: Me =
+        serde_json::from_str(&body).map_err(|e| format!("réponse MyHordes inattendue : {e}"))?;
+    let map = me
+        .map
+        .ok_or("l'API MyHordes ne renvoie aucune ville : êtes-vous incarné ?")?;
+    Ok(Town {
+        id: map.id,
+        day: map.days,
+        pandemonium: map.city.is_some_and(|c| c.hard),
+    })
+}
+
+fn fetch_estimations(
+    client: &reqwest::blocking::Client,
+    day: i64,
+    town_id: i64,
+) -> Result<MhoEstimations, String> {
+    let (header, origin) = mho::ORIGIN_HEADER;
+    let request = client
+        .get(mho::estimations_url(day, town_id))
+        .header(header, origin);
+    let body = get(request, "MyHordes Optimizer")?;
+    MhoEstimations::from_json(&body).map_err(|e| format!("réponse MHO inattendue : {e}"))
+}
+
+/// `--api`: readings of the attack from `MyHordes` Optimizer.
+fn api_input(args: &Args) -> Result<EstimationInput, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let town = match (args.town_id, args.overrides.day) {
+        (Some(id), Some(day)) => Town {
+            id,
+            day,
+            pandemonium: false,
+        },
+        (town_override, day_override) => {
+            let user_key = args
+                .user_key
+                .clone()
+                .or_else(|| std::env::var("MH_USER_KEY").ok())
+                .ok_or(
+                    "clé utilisateur MyHordes manquante (--userkey ou MH_USER_KEY) ; \
+                     sans clé, précisez --town_id ID et --jour N",
+                )?;
+            let town = fetch_town(&client, &user_key)?;
+            Town {
+                id: town_override.unwrap_or(town.id),
+                day: day_override.unwrap_or(town.day),
+                pandemonium: town.pandemonium,
+            }
         }
     };
 
+    let future = args.overrides.future.unwrap_or(false);
+    let attack_day = town.day + i64::from(future);
+    let estimations = fetch_estimations(&client, attack_day, town.id)?;
+    eprintln!(
+        "MHO : ville {}, attaque du J{attack_day} : {} relevés du jour, {} relevés J+1{}",
+        town.id,
+        estimations.today().len(),
+        estimations.planner().len(),
+        if town.pandemonium {
+            " (Pandémonium)"
+        } else {
+            ""
+        }
+    );
+
+    let mut overrides = args.overrides.clone();
+    if town.pandemonium && overrides.soul_max.is_none() {
+        overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
+    }
+    estimations
+        .into_input(future, &overrides)
+        .map_err(|e| match e {
+            estimation25_lib::EstimationError::NoReadings => format!(
+                "Erreur : MyHordes Optimizer n'a aucun relevé pour la ville {} (attaque du J{attack_day}).",
+                town.id
+            ),
+            e => format!("Erreur : {e}"),
+        })
+}
+
+fn text_input(args: &Args) -> Result<EstimationInput, String> {
+    let text = read_readings(args.file.as_deref())?;
     let parsed = parse_text(&text);
     for line in &parsed.ignored {
         eprintln!("ligne ignorée : {line}");
     }
-    let input = parsed
-        .into_input(&InputOverrides {
-            day: args.day,
-            future: args.future,
-            mode: args.mode,
-            red_souls: args.red_souls,
-            planner_red_souls: args.planner_red_souls,
-            soul_penalty: args.soul_penalty,
-            soul_max: args.soul_max,
-        })
-        .map_err(|e| format!("Erreur : {e}"))?;
+    parsed
+        .into_input(&args.overrides)
+        .map_err(|e| format!("Erreur : {e}"))
+}
+
+fn run() -> Result<(), String> {
+    let args = parse_args()?;
+    // An explicit town is enough to read from MyHordes Optimizer.
+    let input = if args.api || args.town_id.is_some() {
+        api_input(&args)?
+    } else {
+        text_input(&args)?
+    };
     if input.future && !input.planner.is_empty() {
         eprintln!("relevés du planificateur ignorés : ils ne s'ajoutent qu'aux relevés du jour");
     }
-    let mut opts = InferenceOptions::default();
-    if let Some(p) = args.particles {
-        opts.particles = p;
-    }
-    if let Some(s) = args.seed {
-        opts.seed = s;
-    }
 
     let start = Instant::now();
-    let (post, footer) = if args.exact {
-        run_exact(&input, &opts, args.seeds.clone())?
-    } else {
-        let post = infer(&input, &opts).map_err(|e| format!("Erreur : {e}"))?;
-        let footer = format!(
-            "{} hypothèses cachées évaluées, {} particules chacune",
-            post.hypotheses, opts.particles
-        );
-        (post, footer)
-    };
-    let elapsed = start.elapsed();
-
-    println!("{}", format_summary(&input, &post, args.top));
-    println!(
-        "📊 Distribution de l'attaque :\n{}",
-        histogram(&post, 24, 40)
-    );
-    println!("-# {footer}, {:.2} s", elapsed.as_secs_f64());
-
-    if let Some(path) = &args.csv {
-        let mut csv = String::from("attack,probability\n");
-        for (v, p) in &post.attack {
-            csv.push_str(&format!("{v},{p}\n"));
-        }
-        std::fs::write(path, csv).map_err(|e| format!("écriture de {path} : {e}"))?;
-        eprintln!("distribution écrite dans {path}");
-    }
+    let (estimate, footer) = run_search(&input, args.seeds.clone())?;
+    println!("{}", format_summary(&input, &estimate));
+    println!("-# {footer}, {:.1} s", start.elapsed().as_secs_f64());
     Ok(())
 }
 

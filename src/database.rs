@@ -186,3 +186,153 @@ pub async fn get_user_key(
 
     Ok(Some(plaintext))
 }
+
+// ---------------------------------------------------------------------------------------------
+// `/estimation25` runs: the 2^32 seeds are split across parallel worker invocations, which merge
+// their results in one DynamoDB item (table `ESTIMATION_TABLE_NAME`, key `run_id`, TTL
+// `expires_at`). Every write is idempotent so SQS redeliveries cannot corrupt a run.
+// ---------------------------------------------------------------------------------------------
+
+const ESTIMATION_RUN_TTL_SECS: u64 = 24 * 3600;
+
+fn estimation_table() -> String {
+    std::env::var("ESTIMATION_TABLE_NAME").unwrap_or_else(|_| "EstimationRuns".to_string())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Run id of an interaction: the interaction token is unique but secret, so only its hash is
+/// stored.
+pub fn estimation_run_id(token: &str) -> String {
+    hex::encode(&Sha256::digest(token.as_bytes())[..16])
+}
+
+pub async fn create_estimation_run(
+    run_id: &str,
+    parts: u32,
+    db_client: &aws_sdk_dynamodb::Client,
+) -> Result<(), lambda_runtime::Error> {
+    let now = now_secs();
+    db_client
+        .put_item()
+        .table_name(estimation_table())
+        .item("run_id", AttributeValue::S(run_id.to_string()))
+        .item("parts", AttributeValue::N(parts.to_string()))
+        .item("started_at", AttributeValue::N(now.to_string()))
+        .item(
+            "expires_at",
+            AttributeValue::N((now + ESTIMATION_RUN_TTL_SECS).to_string()),
+        )
+        .item("matches", AttributeValue::M(Default::default()))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("DynamoDB put_item (estimation run) failed: {}", e);
+            lambda_runtime::Error::from(format!("Database write failed: {}", e))
+        })?;
+    Ok(())
+}
+
+/// All parts of a run are done: the merged matches, handed to exactly one caller.
+#[derive(Debug)]
+pub struct CompletedRun {
+    pub matches: Vec<estimation25_lib::SeedMatch>,
+    pub started_at: u64,
+}
+
+/// Records the matches of part `index`; returns the whole run once every part is recorded, to
+/// the single caller that wins the right to post the result.
+pub async fn record_estimation_part(
+    run_id: &str,
+    index: u32,
+    matches: &[estimation25_lib::SeedMatch],
+    db_client: &aws_sdk_dynamodb::Client,
+) -> Result<Option<CompletedRun>, lambda_runtime::Error> {
+    let table = estimation_table();
+    let key = AttributeValue::S(run_id.to_string());
+    let json = serde_json::to_string(matches)?;
+
+    // `ADD` to a number set and `SET` of this part's slot are both idempotent.
+    let updated = db_client
+        .update_item()
+        .table_name(&table)
+        .key("run_id", key.clone())
+        .update_expression("ADD done :part SET matches.#part = :matches")
+        .expression_attribute_names("#part", format!("p{index}"))
+        .expression_attribute_values(":part", AttributeValue::Ns(vec![index.to_string()]))
+        .expression_attribute_values(":matches", AttributeValue::S(json))
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("DynamoDB update_item (estimation part) failed: {}", e);
+            lambda_runtime::Error::from(format!("Database write failed: {}", e))
+        })?;
+    let attrs = updated.attributes.unwrap_or_default();
+
+    let parts = attrs
+        .get("parts")
+        .and_then(|v| v.as_n().ok())
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+    let done = attrs
+        .get("done")
+        .and_then(|v| v.as_ns().ok())
+        .map_or(0, Vec::len);
+    if done < parts {
+        return Ok(None);
+    }
+
+    // Several callers can see the run complete (simultaneous finishes, redeliveries): only the
+    // one setting `posted` first reports it.
+    let claim = db_client
+        .update_item()
+        .table_name(&table)
+        .key("run_id", key)
+        .update_expression("SET posted = :true")
+        .condition_expression("attribute_not_exists(posted)")
+        .expression_attribute_values(":true", AttributeValue::Bool(true))
+        .send()
+        .await;
+    if let Err(e) = claim {
+        if e.as_service_error()
+            .is_some_and(|s| s.is_conditional_check_failed_exception())
+        {
+            return Ok(None);
+        }
+        error!("DynamoDB update_item (estimation claim) failed: {}", e);
+        return Err(lambda_runtime::Error::from(format!(
+            "Database write failed: {}",
+            e
+        )));
+    }
+
+    let mut all = Vec::new();
+    if let Some(slots) = attrs.get("matches").and_then(|v| v.as_m().ok()) {
+        for slot in slots.values() {
+            if let Ok(json) = slot.as_s() {
+                all.extend(serde_json::from_str::<Vec<estimation25_lib::SeedMatch>>(
+                    json,
+                )?);
+            }
+        }
+    }
+    let started_at = attrs
+        .get("started_at")
+        .and_then(|v| v.as_n().ok())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(now_secs);
+    Ok(Some(CompletedRun {
+        matches: all,
+        started_at,
+    }))
+}
+
+/// Seconds elapsed since `started_at` (for the result footer).
+pub fn seconds_since(started_at: u64) -> u64 {
+    now_secs().saturating_sub(started_at)
+}
