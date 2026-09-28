@@ -13,6 +13,9 @@ const BASE_LEVEL_MAX: u32 = 55;
 const UNLUCKY_BOOST: f64 = 0.3;
 const REACTOR_DAMAGE_MIN: i32 = 100;
 const REACTOR_DAMAGE_MAX: i32 = 250;
+/// Iterations of the rough pass that narrows a defense search before the
+/// full-iteration check.
+const ROUGH_SEARCH_ITERATIONS: u32 = 1000;
 
 #[derive(Clone)]
 pub struct AttackSimulator {
@@ -391,7 +394,10 @@ fn debordo_point(
     hits
 }
 
-/// `indices` must hold a permutation of `0..citizens.len()`.
+/// `indices` must hold a permutation of `0..citizens.len()`. Deaths are counted
+/// per citizen into `citizen_hits`; without it, each run stops at the first
+/// death. Returns the number of runs where someone died.
+#[allow(clippy::too_many_arguments)]
 fn complete_point(
     simulator: &mut AttackSimulator,
     indices: &mut [usize],
@@ -400,10 +406,10 @@ fn complete_point(
     point: &AttackPoint,
     citizens: &[crate::config::SimulationCitizen],
     min_citizen_defense: i32,
-) -> (u64, Vec<u64>) {
+    mut citizen_hits: Option<&mut [u64]>,
+) -> u64 {
     let overflow = point.total_attack - config.defense;
     let mut town_hits = 0;
-    let mut citizen_hits = vec![0u64; citizens.len()];
 
     for _ in 0..point.runs {
         let (death_possible, _) = simulator.roll_attack_above(
@@ -424,8 +430,11 @@ fn complete_point(
         let mut any_citizen_died = false;
         for (&idx, &zombies) in chosen.iter().zip(allocated) {
             if zombies > citizens[idx].defense {
-                citizen_hits[idx] += 1;
                 any_citizen_died = true;
+                match citizen_hits.as_deref_mut() {
+                    Some(hits) => hits[idx] += 1,
+                    None => break,
+                }
             }
         }
 
@@ -434,7 +443,7 @@ fn complete_point(
         }
     }
 
-    (town_hits, citizen_hits)
+    town_hits
 }
 
 fn attack_distribution(tdg_min: i32, tdg_max: i32, day: i32) -> HashMap<i32, f64> {
@@ -484,18 +493,21 @@ pub fn overflow_probability(config: &SimConfig) -> (f64, u64, Option<f64>) {
         })
         .collect();
 
-    let overflow_prob: f64 = plan
-        .points
-        .iter()
-        .zip(&hits)
-        .map(|(point, &hits)| point.weight * hits as f64 / point.runs as f64)
-        .sum();
-
     (
-        (overflow_prob.min(1.0) * 100.0).max(0.0),
+        death_percentage(&plan.points, hits),
         plan.budget,
         plan.avg_max_active,
     )
+}
+
+/// Death probability (%) from the number of runs with a death at each point.
+fn death_percentage(points: &[AttackPoint], hits: impl IntoIterator<Item = u64>) -> f64 {
+    let prob: f64 = points
+        .iter()
+        .zip(hits)
+        .map(|(point, hits)| point.weight * hits as f64 / point.runs as f64)
+        .sum();
+    (prob.min(1.0) * 100.0).max(0.0)
 }
 
 /// Config, home level and death threshold of a complete simulation: the
@@ -529,7 +541,8 @@ pub fn complete_overflow_probability(
                 (AttackSimulator::new(), indices)
             },
             |(simulator, indices), point| {
-                complete_point(
+                let mut citizen_hits = vec![0u64; citizens.len()];
+                let town_hits = complete_point(
                     simulator,
                     indices,
                     &effective_config,
@@ -537,16 +550,16 @@ pub fn complete_overflow_probability(
                     point,
                     citizens,
                     min_citizen_defense,
-                )
+                    Some(&mut citizen_hits),
+                );
+                (town_hits, citizen_hits)
             },
         )
         .collect();
 
-    let mut overflow_prob = 0.0;
     let mut citizen_probs = vec![0.0; citizens.len()];
-    for (point, (town_hits, citizen_hits)) in plan.points.iter().zip(&results) {
+    for (point, (_, citizen_hits)) in plan.points.iter().zip(&results) {
         let scale = point.weight / point.runs as f64;
-        overflow_prob += scale * *town_hits as f64;
         for (prob, &hits) in citizen_probs.iter_mut().zip(citizen_hits) {
             *prob += scale * hits as f64;
         }
@@ -558,11 +571,49 @@ pub fn complete_overflow_probability(
         .collect();
 
     (
-        (overflow_prob.min(1.0) * 100.0).max(0.0),
+        death_percentage(
+            &plan.points,
+            results.iter().map(|&(town_hits, _)| town_hits),
+        ),
         plan.budget,
         citizen_percentages,
         plan.avg_max_active,
     )
+}
+
+/// Town death probability (%) and run budget of a complete simulation, without
+/// the per-citizen results.
+fn complete_town_probability(
+    config: &SimConfig,
+    citizens: &[crate::config::SimulationCitizen],
+) -> (f64, u64) {
+    let (effective_config, b_level, min_citizen_defense) = complete_setup(config, citizens);
+    let plan = plan_attack_points(&effective_config, b_level, min_citizen_defense);
+
+    let hits: Vec<u64> = plan
+        .points
+        .par_iter()
+        .map_init(
+            || {
+                let indices: Vec<usize> = (0..citizens.len()).collect();
+                (AttackSimulator::new(), indices)
+            },
+            |(simulator, indices), point| {
+                complete_point(
+                    simulator,
+                    indices,
+                    &effective_config,
+                    b_level,
+                    point,
+                    citizens,
+                    min_citizen_defense,
+                    None,
+                )
+            },
+        )
+        .collect();
+
+    (death_percentage(&plan.points, hits), plan.budget)
 }
 
 pub struct DefenseSearch {
@@ -576,18 +627,14 @@ pub struct DefenseSearch {
 }
 
 /// Finds the lowest town defense whose death probability (%) is at most
-/// `target_pct`. The probability never increases with defense, so both
-/// searches below are binary searches.
+/// `target_pct`. The probability never increases with defense, so the searches
+/// below are binary searches: a rough one at ROUGH_SEARCH_ITERATIONS, then a
+/// full-iteration one around its result.
 pub fn required_defense(
     config: &SimConfig,
     citizens: &[crate::config::SimulationCitizen],
     target_pct: f64,
 ) -> DefenseSearch {
-    let with_defense = |defense: i32| SimConfig {
-        defense,
-        ..config.clone()
-    };
-
     let (setup_config, b_level, threshold) = if config.is_complete {
         complete_setup(config, citizens)
     } else {
@@ -623,27 +670,46 @@ pub fn required_defense(
         };
     }
 
-    // The estimate at safe_defense is exactly 0, so the answer is at most
-    // safe_defense. Passing evaluations only move the bound down, so the last
-    // one is at the returned defense.
-    let mut prob_at_defense = 0.0;
     let mut total_runs = 0;
-    let defense = lowest_passing_defense(0, safe_defense, |defense| {
+    let mut estimate = |iterations: u32, defense: i32| {
+        let config = SimConfig {
+            defense,
+            iterations,
+            ..config.clone()
+        };
         let (prob, runs) = if config.is_complete {
-            let (prob, runs, _, _) =
-                complete_overflow_probability(&with_defense(defense), citizens);
-            (prob, runs)
+            complete_town_probability(&config, citizens)
         } else {
-            let (prob, runs, _) = overflow_probability(&with_defense(defense));
+            let (prob, runs, _) = overflow_probability(&config);
             (prob, runs)
         };
         total_runs += runs;
+        prob
+    };
+
+    // The estimate at safe_defense is exactly 0, so the answer is at most
+    // safe_defense.
+    let rough_guess = (config.iterations > ROUGH_SEARCH_ITERATIONS).then(|| {
+        lowest_passing_defense(0, safe_defense, |defense| {
+            estimate(ROUGH_SEARCH_ITERATIONS, defense) <= target_pct
+        })
+    });
+
+    // Passing evaluations only move the bound down, so the last one is at the
+    // returned defense.
+    let mut prob_at_defense = 0.0;
+    let mut passes = |defense: i32| {
+        let prob = estimate(config.iterations, defense);
         let passes = prob <= target_pct;
         if passes {
             prob_at_defense = prob;
         }
         passes
-    });
+    };
+    let defense = match rough_guess {
+        Some(guess) => lowest_passing_defense_near(guess, safe_defense, &mut passes),
+        None => lowest_passing_defense(0, safe_defense, &mut passes),
+    };
 
     DefenseSearch {
         defense,
@@ -665,6 +731,41 @@ fn lowest_passing_defense(mut lo: i32, mut hi: i32, mut passes: impl FnMut(i32) 
         }
     }
     hi
+}
+
+/// Same as `lowest_passing_defense` on `0..=max`, starting from a guess: steps
+/// of 1, 2, 4... away from `guess` bracket the answer, which a binary search
+/// then finds. A close guess needs only two evaluations.
+fn lowest_passing_defense_near(guess: i32, max: i32, mut passes: impl FnMut(i32) -> bool) -> i32 {
+    let guess = guess.clamp(0, max);
+    let mut step = 1;
+    let (lo, hi) = if guess == max || passes(guess) {
+        // The answer is at or below the guess.
+        let mut hi = guess;
+        loop {
+            if hi == 0 {
+                break (0, 0);
+            }
+            let d = (hi - step).max(0);
+            if !passes(d) {
+                break (d + 1, hi);
+            }
+            hi = d;
+            step *= 2;
+        }
+    } else {
+        // The answer is above the guess.
+        let mut lo = guess + 1;
+        loop {
+            let d = (lo - 1 + step).min(max);
+            if d == max || passes(d) {
+                break (lo, d);
+            }
+            lo = d + 1;
+            step *= 2;
+        }
+    };
+    lowest_passing_defense(lo, hi, passes)
 }
 
 #[cfg(test)]
@@ -1870,6 +1971,83 @@ mod tests {
             at_answer <= target + 1.0,
             "P({}) = {at_answer}%",
             search.defense
+        );
+    }
+
+    #[test]
+    fn test_lowest_passing_defense_near_finds_the_edge_from_any_guess() {
+        let answer = 37;
+        for guess in [0, 1, 20, 36, 37, 38, 60, 100] {
+            let mut evaluations = Vec::new();
+            let found = lowest_passing_defense_near(guess, 100, |d| {
+                evaluations.push(d);
+                d >= answer
+            });
+            assert_eq!(found, answer, "guess {guess}, evaluated {evaluations:?}");
+            assert!(evaluations.iter().all(|&d| (0..=100).contains(&d)));
+        }
+    }
+
+    #[test]
+    fn test_lowest_passing_defense_near_needs_two_evaluations_for_a_close_guess() {
+        let mut evaluations = 0;
+        let found = lowest_passing_defense_near(37, 100, |d| {
+            evaluations += 1;
+            d >= 37
+        });
+        assert_eq!(found, 37);
+        assert_eq!(evaluations, 2, "37 passes and 36 fails");
+    }
+
+    #[test]
+    fn test_lowest_passing_defense_near_handles_the_bounds() {
+        // Everything passes: the answer is 0.
+        assert_eq!(lowest_passing_defense_near(50, 100, |_| true), 0);
+        // Only `max` passes; it is never evaluated.
+        let found = lowest_passing_defense_near(50, 100, |d| {
+            assert!(d < 100, "max must not be evaluated");
+            false
+        });
+        assert_eq!(found, 100);
+    }
+
+    #[test]
+    fn test_required_defense_without_rough_pass_for_few_iterations() {
+        let config = SimConfig {
+            iterations: ROUGH_SEARCH_ITERATIONS,
+            ..search_config()
+        };
+        let target = 20.0;
+        let search = required_defense(&config, &[], target);
+        assert!(search.prob_at_defense <= target);
+        assert!(search.defense < search.safe_defense);
+    }
+
+    #[test]
+    fn test_complete_town_probability_matches_complete_simulation() {
+        use crate::config::SimulationCitizen;
+
+        let citizens: Vec<SimulationCitizen> = (0..40)
+            .map(|i| SimulationCitizen {
+                name: format!("Cit {i}"),
+                defense: 15 + i,
+            })
+            .collect();
+        let config = SimConfig {
+            defense: 1100,
+            is_complete: true,
+            ..search_config()
+        };
+        let (town_only, runs) = complete_town_probability(&config, &citizens);
+        let (town, full_runs, _, _) = complete_overflow_probability(&config, &citizens);
+        assert_eq!(runs, full_runs);
+        assert!(
+            town > 2.0 && town < 95.0,
+            "test config should give a non-trivial probability, got {town}%"
+        );
+        assert!(
+            (town_only - town).abs() < 1.0,
+            "town-only {town_only}% vs complete {town}%"
         );
     }
 }
