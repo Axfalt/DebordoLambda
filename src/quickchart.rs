@@ -6,8 +6,6 @@ use serde::Deserialize;
 /// Source : https://community.quickchart.io/t/maximum-chart-data-exceeded/727
 const MAX_CHART_POINTS: usize = 250;
 
-/// Sélectionne au plus `max_points` éléments régulièrement espacés, en conservant toujours le
-/// premier et le dernier (les bornes de la TDG).
 fn downsample<T>(items: &[T], max_points: usize) -> Vec<&T> {
     if items.len() <= max_points || max_points < 2 {
         return items.iter().collect();
@@ -22,9 +20,6 @@ fn round1(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
-/// Une seule valeur d'attaque (tdg_min == tdg_max) : une ligne a besoin de deux points, donc
-/// avec `pointRadius: 0` rien n'est dessiné. On affiche à la place des marqueurs centrés façon
-/// boîte à moustaches : traits pour min/max et Q1/Q3, point pour la moyenne.
 fn apply_single_point_style(config: &mut serde_json::Value) {
     let markers = [
         ("Q1", "line", 40, "rgb(54, 162, 235)"),

@@ -273,8 +273,7 @@ async fn handle_command(
         .and_then(|d| d.name.as_deref())
         .unwrap_or("debordo");
     let is_complete_cmd = command_name == "debordo-complete" || command_name == "debordo_complete";
-
-    // 1. Parser les options saisies par l'utilisateur
+    
     let mut user_defense: Option<i32> = None;
     let mut user_tdg_min: Option<i32> = None;
     let mut user_tdg_max: Option<i32> = None;
@@ -331,10 +330,7 @@ async fn handle_command(
             "Erreur : indiquez soit `defense`, soit `risque`, pas les deux.",
         ));
     }
-    // With `risque`, the defense is searched instead of given.
     let has_defense_or_risque = user_defense.is_some() || user_risque.is_some();
-
-    // 2. Vérifier si on a tous les paramètres requis manuellement
     let has_all_critical = has_defense_or_risque
         && user_tdg_min.is_some()
         && user_tdg_max.is_some()
@@ -530,7 +526,6 @@ async fn handle_command(
                         }
 
                         let day = user_day.unwrap_or(api_day);
-                        // With `risque`, the defense is searched: the API one is not used.
                         let defense = if user_risque.is_some() {
                             0
                         } else {
@@ -834,7 +829,6 @@ async fn handle_reparo_command(
     respond_with_buildings_modal(&config, &buildings)
 }
 
-/// Limite `max_length` du champ TEXT_INPUT du modal Discord de /reparo.
 const REPARO_MODAL_MAX_LENGTH: usize = 4000;
 
 fn respond_with_buildings_modal(
@@ -978,7 +972,6 @@ async fn enqueue_simulation(
     Ok(build_json_response(200, &response))
 }
 
-/// A defense search runs several simulations, so it gets a stricter work limit.
 fn defense_search_work_error(job: &SimulationJob) -> Option<String> {
     let config = &job.config;
     if job.job_type != JobType::Debordo || config.target_death.is_none() {

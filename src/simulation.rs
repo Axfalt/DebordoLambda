@@ -13,8 +13,6 @@ const BASE_LEVEL_MAX: u32 = 55;
 const UNLUCKY_BOOST: f64 = 0.3;
 const REACTOR_DAMAGE_MIN: i32 = 100;
 const REACTOR_DAMAGE_MAX: i32 = 250;
-/// Iterations of the rough pass that narrows a defense search before the
-/// full-iteration check.
 const ROUGH_SEARCH_ITERATIONS: u32 = 1000;
 
 #[derive(Clone)]
@@ -24,7 +22,6 @@ pub struct AttackSimulator {
     allocated_buf: Vec<i32>,
 }
 
-/// Result of the active-zombie roll, before any repartition is drawn.
 struct ActiveRoll {
     targets: usize,
     max_active: i32,
@@ -33,7 +30,6 @@ struct ActiveRoll {
     flag_bonus: i32,
 }
 
-/// Active-zombie roll for a given base level (drawn in BASE_LEVEL_MIN..=BASE_LEVEL_MAX).
 fn active_roll(
     config: &SimConfig,
     total_attack: i32,
@@ -169,9 +165,6 @@ impl AttackSimulator {
         }
     }
 
-    /// Rolls an attack but only draws the repartition when some target can
-    /// receive more than `threshold` zombies. Returns whether `allocated_buf`
-    /// holds a fresh allocation, and `max_active` (0 when nothing attacks).
     fn roll_attack_above(
         &mut self,
         config: &SimConfig,
@@ -260,7 +253,6 @@ fn attack_can_overflow(config: &SimConfig, attack: i32) -> bool {
     attack + max_reactor_damage > config.defense
 }
 
-/// A total attack (TDG value + reactor damage) that can kill someone.
 struct AttackPoint {
     total_attack: i32,
     weight: f64,
@@ -269,14 +261,10 @@ struct AttackPoint {
 
 struct AttackPlan {
     points: Vec<AttackPoint>,
-    /// `iterations` for each TDG value that can overflow, shared between the points.
     budget: u64,
     avg_max_active: Option<f64>,
 }
 
-/// Probability of each total attack, sorted by total attack. The reactor adds a
-/// uniform damage in REACTOR_DAMAGE_MIN..=REACTOR_DAMAGE_MAX, so each total attack
-/// gets 1/151 of the probability of every TDG value within that window below it.
 fn total_attack_distribution(config: &SimConfig) -> Vec<(i32, f64)> {
     let (tdg_min, tdg_max) = config.tdg_interval();
     let dist = attack_distribution(tdg_min, tdg_max, config.day);
@@ -289,7 +277,6 @@ fn total_attack_distribution(config: &SimConfig) -> Vec<(i32, f64)> {
         return points;
     }
 
-    // prefix[i] = P(tdg_min) + ... + P(tdg_min + i - 1)
     let mut prefix = Vec::with_capacity((tdg_max - tdg_min + 2) as usize);
     prefix.push(0.0);
     let mut acc = 0.0;
@@ -309,9 +296,6 @@ fn total_attack_distribution(config: &SimConfig) -> Vec<(i32, f64)> {
         .collect()
 }
 
-/// Keeps the total attacks where some target can receive more than `threshold`
-/// zombies, splits the run budget between them by probability, and averages
-/// `max_active` exactly over the base levels.
 fn plan_attack_points(config: &SimConfig, b_level: i32, threshold: i32) -> AttackPlan {
     let (tdg_min, tdg_max) = config.tdg_interval();
     let overflowing_values = (tdg_min..=tdg_max)
@@ -346,7 +330,6 @@ fn plan_attack_points(config: &SimConfig, b_level: i32, threshold: i32) -> Attac
             }
         }
 
-        // The highest base level leaves the most zombies to spread.
         let can_kill = active_roll(
             config,
             total_attack,
@@ -394,9 +377,6 @@ fn debordo_point(
     hits
 }
 
-/// `indices` must hold a permutation of `0..citizens.len()`. Deaths are counted
-/// per citizen into `citizen_hits`; without it, each run stops at the first
-/// death. Returns the number of runs where someone died.
 #[allow(clippy::too_many_arguments)]
 fn complete_point(
     simulator: &mut AttackSimulator,
@@ -500,7 +480,6 @@ pub fn overflow_probability(config: &SimConfig) -> (f64, u64, Option<f64>) {
     )
 }
 
-/// Death probability (%) from the number of runs with a death at each point.
 fn death_percentage(points: &[AttackPoint], hits: impl IntoIterator<Item = u64>) -> f64 {
     let prob: f64 = points
         .iter()
@@ -510,8 +489,6 @@ fn death_percentage(points: &[AttackPoint], hits: impl IntoIterator<Item = u64>)
     (prob.min(1.0) * 100.0).max(0.0)
 }
 
-/// Config, home level and death threshold of a complete simulation: the
-/// population and the weakest defense come from the citizen list.
 fn complete_setup(
     config: &SimConfig,
     citizens: &[crate::config::SimulationCitizen],
@@ -581,8 +558,6 @@ pub fn complete_overflow_probability(
     )
 }
 
-/// Town death probability (%) and run budget of a complete simulation, without
-/// the per-citizen results.
 fn complete_town_probability(
     config: &SimConfig,
     citizens: &[crate::config::SimulationCitizen],
@@ -617,19 +592,12 @@ fn complete_town_probability(
 }
 
 pub struct DefenseSearch {
-    /// Lowest defense whose estimated death probability is at most the target.
     pub defense: i32,
-    /// Estimated death probability (%) at `defense`.
     pub prob_at_defense: f64,
-    /// Lowest defense at which no one can die, computed exactly.
     pub safe_defense: i32,
     pub total_runs: u64,
 }
 
-/// Finds the lowest town defense whose death probability (%) is at most
-/// `target_pct`. The probability never increases with defense, so the searches
-/// below are binary searches: a rough one at ROUGH_SEARCH_ITERATIONS, then a
-/// full-iteration one around its result.
 pub fn required_defense(
     config: &SimConfig,
     citizens: &[crate::config::SimulationCitizen],
@@ -649,8 +617,6 @@ pub fn required_defense(
             .points
             .is_empty()
     };
-
-    // No total attack exceeds this defense, so nobody can die there.
     let max_reactor_damage = if config.is_reactor_built {
         REACTOR_DAMAGE_MAX
     } else {
@@ -687,16 +653,12 @@ pub fn required_defense(
         prob
     };
 
-    // The estimate at safe_defense is exactly 0, so the answer is at most
-    // safe_defense.
     let rough_guess = (config.iterations > ROUGH_SEARCH_ITERATIONS).then(|| {
         lowest_passing_defense(0, safe_defense, |defense| {
             estimate(ROUGH_SEARCH_ITERATIONS, defense) <= target_pct
         })
     });
 
-    // Passing evaluations only move the bound down, so the last one is at the
-    // returned defense.
     let mut prob_at_defense = 0.0;
     let mut passes = |defense: i32| {
         let prob = estimate(config.iterations, defense);
@@ -719,8 +681,6 @@ pub fn required_defense(
     }
 }
 
-/// Smallest `d` in `lo..=hi` for which `passes(d)` holds, assuming `passes` is
-/// false then true as `d` grows and holds at `hi`.
 fn lowest_passing_defense(mut lo: i32, mut hi: i32, mut passes: impl FnMut(i32) -> bool) -> i32 {
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
@@ -733,14 +693,10 @@ fn lowest_passing_defense(mut lo: i32, mut hi: i32, mut passes: impl FnMut(i32) 
     hi
 }
 
-/// Same as `lowest_passing_defense` on `0..=max`, starting from a guess: steps
-/// of 1, 2, 4... away from `guess` bracket the answer, which a binary search
-/// then finds. A close guess needs only two evaluations.
 fn lowest_passing_defense_near(guess: i32, max: i32, mut passes: impl FnMut(i32) -> bool) -> i32 {
     let guess = guess.clamp(0, max);
     let mut step = 1;
     let (lo, hi) = if guess == max || passes(guess) {
-        // The answer is at or below the guess.
         let mut hi = guess;
         loop {
             if hi == 0 {
@@ -754,7 +710,6 @@ fn lowest_passing_defense_near(guess: i32, max: i32, mut passes: impl FnMut(i32)
             step *= 2;
         }
     } else {
-        // The answer is above the guess.
         let mut lo = guess + 1;
         loop {
             let d = (lo - 1 + step).min(max);
@@ -771,10 +726,6 @@ fn lowest_passing_defense_near(guess: i32, max: i32, mut passes: impl FnMut(i32)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // Reference: one Monte Carlo batch for a single raw attack value.
-    // =========================================================================
 
     fn debordo_sequential(
         config: &SimConfig,

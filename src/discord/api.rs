@@ -24,8 +24,6 @@ fn build_followup_body(content: &str) -> serde_json::Value {
     if content.contains("**Probabilité de mort:") || content.contains("**Défense requise:") {
         view_config_button_body(content, "vconf")
     } else if content.contains("Résultats de la simulation de réparation") {
-        // Distinct custom_id (underscore, not "vconf:") so it never collides with
-        // handle_component_interaction's `starts_with("vconf:")` debordo routing.
         view_config_button_body(content, "vconf_reparo")
     } else {
         serde_json::json!({

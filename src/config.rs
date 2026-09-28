@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_ITERATIONS: u32 = 10_000_000;
 pub const MAX_REPARO_TOTAL_WORK: u64 = 20_000_000;
-/// Iterations × TDG width allowed for a defense search, which runs a rough pass
-/// and a few full-iteration simulations.
 pub const MAX_SEARCH_TOTAL_WORK: u64 = 20_000_000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,8 +30,6 @@ pub struct SimConfig {
     pub home_bonus: i32,
     #[serde(default)]
     pub veille: i32,
-    /// Accepted death risk in percent; when set, the simulation searches the
-    /// defense needed instead of using `defense`.
     #[serde(default)]
     pub target_death: Option<f64>,
 }
@@ -81,8 +77,6 @@ impl SimConfig {
     }
 }
 
-/// Parses a death risk written as a percentage ("5%", "0,5 %", "5"), in
-/// 0 <= risk < 100. A bare number is a percentage too: "0.05" is 0.05%.
 pub fn parse_risk_percent(text: &str) -> Option<f64> {
     let number = text.trim().trim_end_matches('%').trim().replace(',', ".");
     let risk = number.parse::<f64>().ok()?;
@@ -221,7 +215,6 @@ pub fn format_defense_search_results(
     output
 }
 
-/// The "**Paramètres:**" block shared by the result messages.
 fn format_parameters(config: &SimConfig, avg_max_active: Option<f64>) -> String {
     let mut output = String::new();
     output.push_str("**Paramètres:**\n");

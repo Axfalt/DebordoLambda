@@ -46,7 +46,6 @@ mod tests {
 
     #[test]
     fn test_invalid_signature_format() {
-        // Clé publique valide format mais signature invalide
         let fake_key = "0".repeat(64);
         assert!(!verify_discord_signature(
             &fake_key, "invalid", "123", "body"
