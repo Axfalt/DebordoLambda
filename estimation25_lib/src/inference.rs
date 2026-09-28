@@ -136,7 +136,7 @@ impl fmt::Display for EstimationError {
             ),
             EstimationError::Inconsistent => write!(
                 f,
-                "aucune graine ne reproduit ces relevés. Vérifiez le jour, le mode, l'option J+1 \
+                "aucun seed ne reproduit ces relevés. Vérifiez le jour, le mode, l'option J+1 \
                  et les âmes rouges (les événements ne sont pas modélisés)."
             ),
         }

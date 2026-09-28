@@ -34,6 +34,34 @@ const DEFAULT_ESTIMATION_PARTS: u32 = 32;
 /// `modifiers.red_soul_max_factor` of Pandemonium towns.
 const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
+/// Waiting messages of an `/estimation25` run, rotated as the parts finish.
+const PROGRESS_MESSAGES: [&str; 14] = [
+    "⏳ Recompte les zombies avec attention...",
+    "⏳ Nettoie la lunette de la tour...",
+    "⏳ Demande à Cubique si on sera Top2...",
+    "⏳ Ajoute de l'huile de frein dans le réacteur...",
+    "⏳ Cherche qui va faire l'os...",
+    "⏳ Ooops j'ai compté de traver, boarf c'est pas si grave...",
+    "⏳ Planque un VTT sur le puit abandonnée...",
+    "⏳ Recompte les oignons pour préparer la soupe...",
+    "⏳ Recalcule la probabilité de monter une table...",
+    "⏳ Recompte le nombre de candidats à la présidentielle de 2027...",
+    "⏳ Je prends bien en compte de laisser mourir Fofotre...",
+    "⏳ Recompte les seeds...",
+    "⏳ Oui bah fallait pas oublier une estimations...",
+    "⏳ Analyse du ~~sanctuaire~~ zoo en cours...",
+];
+
+/// Waiting message number `step` of a run. Each run starts at its own place in the list (taken
+/// from its id), so consecutive runs do not all open with the same line.
+fn progress_message(run_id: &str, step: u32) -> &'static str {
+    let offset = run_id
+        .get(..8)
+        .and_then(|hex| usize::from_str_radix(hex, 16).ok())
+        .unwrap_or(0);
+    PROGRESS_MESSAGES[(offset + step as usize) % PROGRESS_MESSAGES.len()]
+}
+
 /// Clients shared by every invocation, built once per cold start (cheap to clone).
 #[derive(Clone)]
 struct Clients {
@@ -406,12 +434,7 @@ async fn plan_estimation(
         )
         .await;
     }
-    reply(
-        job,
-        clients,
-        &format!("⏳ Recherche de la graine parmi 4 294 967 296 ({parts} lots en parallèle)…"),
-    )
-    .await?;
+    reply(job, clients, progress_message(&run_id, 0)).await?;
 
     let indices: Vec<u32> = (0..parts).collect();
     for chunk in indices.chunks(10) {
@@ -524,6 +547,20 @@ async fn run_estimation_part(
         start.elapsed().as_secs_f64()
     );
 
+    // Rotate the waiting message *before* recording the part: the result is only posted once
+    // every part is recorded, so it can never be overwritten by a late progress update.
+    // Best effort: parts finishing together may hit Discord's rate limit.
+    if let Err(e) = send_followup(
+        &clients.http,
+        &job.application_id,
+        &job.token,
+        progress_message(run_id, index + 1),
+    )
+    .await
+    {
+        info!("Progress update of part {} skipped: {}", index, e);
+    }
+
     let Some(done) =
         database::record_estimation_part(run_id, index, &matches, &clients.dynamodb).await?
     else {
@@ -531,7 +568,7 @@ async fn run_estimation_part(
     };
     let content = match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
         Ok(estimate) => format!(
-            "{}\n-# {} graine(s) compatible(s) sur 4294967296 testées ({parts} lots, {} s)",
+            "{}\n-# {} seed(s) compatible(s) sur 4294967296 testés ({parts} lots, {} s)",
             format_summary(&input, &estimate),
             estimate.seeds.len(),
             database::seconds_since(done.started_at)
@@ -566,4 +603,21 @@ async fn main() -> Result<(), Error> {
         async move { handler(event, &clients).await }
     }))
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_progress_message_rotates_from_the_run_offset() {
+        let run_id = database::estimation_run_id("interaction-token");
+        let first = progress_message(&run_id, 0);
+        assert!(PROGRESS_MESSAGES.contains(&first));
+        assert_ne!(first, progress_message(&run_id, 1));
+        let len = u32::try_from(PROGRESS_MESSAGES.len()).unwrap();
+        assert_eq!(first, progress_message(&run_id, len));
+        // A malformed id falls back to the start of the list.
+        assert_eq!(progress_message("", 0), PROGRESS_MESSAGES[0]);
+    }
 }

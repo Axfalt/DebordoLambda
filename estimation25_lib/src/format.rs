@@ -82,7 +82,7 @@ fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
         let m = &s.seed;
         writeln!(
             out,
-            "🎲 Graine {:#010x} : offsets ({}, {}), plage cachée {} - {} → attaque {} - {}",
+            "🎲 Seed {:#010x} : offsets ({}, {}), plage cachée {} - {} → attaque {} - {}",
             m.seed,
             m.om0,
             m.ox0,

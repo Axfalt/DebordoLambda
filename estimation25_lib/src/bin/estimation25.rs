@@ -141,7 +141,7 @@ fn run_search(
                 let secs = start.elapsed().as_secs_f64();
                 let eta = if p > 0.0 { secs / p - secs } else { 0.0 };
                 eprint!(
-                    "\rgraines : {:5.1} % ({secs:.0} s, reste ~{eta:.0} s)   ",
+                    "\rseeds : {:5.1} % ({secs:.0} s, reste ~{eta:.0} s)   ",
                     p * 100.0
                 );
             }
@@ -153,7 +153,7 @@ fn run_search(
     });
     let estimate = result.map_err(|e| format!("Erreur : {e}"))?;
     let footer = format!(
-        "{} graine(s) compatible(s) sur {total} testées",
+        "{} seed(s) compatible(s) sur {total} testés",
         estimate.seeds.len()
     );
     Ok((estimate, footer))
