@@ -4,19 +4,20 @@ use aws_lambda_events::sqs::SqsEvent;
 use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::time::{Duration, MissedTickBehavior, interval_at, sleep, timeout};
+use tokio::time::{Duration, MissedTickBehavior, interval, sleep, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationSource, EstimationStage, JobType,
-    SimulationJob, format_defense_search_results, format_reparo_results, format_results,
-    truncate_for_discord,
+    ESTIMATION_CANCEL_BUTTON, ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationSource,
+    EstimationStage, JobType, SimulationJob, format_defense_search_results, format_reparo_results,
+    format_results, truncate_for_discord,
 };
 use debordo_lib::database;
 use debordo_lib::discord::api::{
     delete_original, post_followup_mentioning, send_followup, send_followup_with_button,
+    send_followup_with_cancel, send_followup_without_buttons,
 };
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{
@@ -339,20 +340,26 @@ fn estimation_parts() -> u32 {
         .clamp(1, 256)
 }
 
-/// Replaces the deferred message with `content` (truncated to Discord's limit).
+/// Replaces the deferred message with `content` (truncated to Discord's limit), removing the
+/// "Annuler" button of a waiting message.
 async fn reply(job: &SimulationJob, clients: &Clients, content: &str) -> Result<(), Error> {
     let content = truncate_for_discord(
         content,
         DISCORD_MESSAGE_MAX_LENGTH,
         "\n… (message tronqué, réponse trop longue pour Discord)",
     );
-    send_followup(&clients.http, &job.application_id, &job.token, &content).await?;
+    send_followup_without_buttons(&clients.http, &job.application_id, &job.token, &content).await?;
     Ok(())
 }
 
 /// Discord id of the user who ran `/estimation25`.
 fn caller(job: &SimulationJob) -> Option<String> {
     job.estimation.as_ref().and_then(|e| e.user_id.clone())
+}
+
+/// `custom_id` of the "Annuler" button of a run's waiting message.
+fn cancel_button_id(run_id: &str) -> String {
+    format!("{ESTIMATION_CANCEL_BUTTON}{run_id}")
 }
 
 /// `custom_id` of the "Voir la configuration" button of a run's result.
@@ -406,6 +413,28 @@ async fn deliver(
                 e
             );
             edit_waiting_message().await
+        }
+    }
+}
+
+/// Failure of a part: reported once per run. The part claims the run first, so the other parts
+/// (failing the same way, or finishing later) and the watchdog stay silent.
+async fn deliver_failure(
+    job: &SimulationJob,
+    clients: &Clients,
+    run_id: &str,
+    content: &str,
+) -> Result<(), Error> {
+    match database::claim_estimation_run(run_id, &clients.dynamodb).await {
+        Ok(Some(_)) => deliver(job, clients, content, None).await,
+        Ok(None) => {
+            info!("Run {} already reported, not posting: {}", run_id, content);
+            Ok(())
+        }
+        Err(e) => {
+            // Better a duplicate than a run left on its waiting message.
+            error!("Could not claim run {} to report a failure: {}", run_id, e);
+            deliver(job, clients, content, None).await
         }
     }
 }
@@ -554,7 +583,15 @@ async fn plan_estimation(
 
     let parts = estimation_parts();
     let run_id = database::estimation_run_id(&job.token);
-    match database::create_estimation_run(&run_id, parts, &config, &clients.dynamodb).await {
+    match database::create_estimation_run(
+        &run_id,
+        parts,
+        &config,
+        caller(job).as_deref(),
+        &clients.dynamodb,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => {
             // Redelivered plan job: the run is already going (or done); leave it alone.
@@ -574,7 +611,14 @@ async fn plan_estimation(
             .await;
         }
     }
-    reply(job, clients, &waiting_message(&run_id, 0, 0)).await?;
+    send_followup_with_cancel(
+        &clients.http,
+        &job.application_id,
+        &job.token,
+        &waiting_message(&run_id, 0, 0),
+        &cancel_button_id(&run_id),
+    )
+    .await?;
 
     let indices: Vec<u32> = (0..parts).collect();
     for chunk in indices.chunks(10) {
@@ -673,20 +717,25 @@ async fn run_estimation_part(
     let start = Instant::now();
     let slice_len = u64::from(slice.end() - slice.start()) + 1;
     let progress = Arc::new(AtomicU64::new(0));
+    // Set on timeout, or once the run no longer needs this part: the blocking search would
+    // otherwise keep burning the CPU of this (frozen, then reused) Lambda instance.
+    let cancel = Arc::new(AtomicBool::new(false));
     let search_input = input.clone();
-    let search_progress = Arc::clone(&progress);
+    let (search_progress, search_cancel) = (Arc::clone(&progress), Arc::clone(&cancel));
     let search = tokio::task::spawn_blocking(move || {
         estimation25_lib::search_seeds(
             &search_input,
             &EstimConf::default(),
             slice,
             &search_progress,
+            &search_cancel,
         )
     });
     let deadline = sleep(Duration::from_secs(ESTIMATION_TIMEOUT_SECS));
     tokio::pin!(search, deadline);
     let period = Duration::from_secs(PROGRESS_REPORT_SECS);
-    let mut ticks = interval_at(tokio::time::Instant::now() + period, period);
+    // The first tick is immediate: a part of a cancelled run stops before doing any work.
+    let mut ticks = interval(period);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // Progress is reported from this task, between polls of the search: an edit is always
     // finished before the part is recorded, hence before the result can be posted.
@@ -698,29 +747,40 @@ async fn run_estimation_part(
             _ = ticks.tick(), if live => {
                 let searched = progress.load(Ordering::Relaxed);
                 live = show_progress(job, clients, run_id, index, searched).await;
+                if !live {
+                    // The run was reported (result, failure or cancelled by its caller) or
+                    // this part was already recorded by an earlier delivery: the rest of the
+                    // search is useless.
+                    info!("Part {} of run {} no longer needed, cancelling", index, run_id);
+                    cancel.store(true, Ordering::Relaxed);
+                }
             }
         }
     };
     let matches = match searched {
         Some(Ok(Ok(matches))) => matches,
-        Some(Ok(Err(e))) => return deliver(job, clients, &format!("❌ Erreur : {e}"), None).await,
+        Some(Ok(Err(EstimationError::Cancelled))) => return Ok(()),
+        Some(Ok(Err(e))) => {
+            return deliver_failure(job, clients, run_id, &format!("❌ Erreur : {e}")).await;
+        }
         Some(Err(e)) => {
             error!("Estimation part {} of {} panicked: {}", index, run_id, e);
-            return deliver(
+            return deliver_failure(
                 job,
                 clients,
+                run_id,
                 "❌ La recherche a échoué. Veuillez réessayer.",
-                None,
             )
             .await;
         }
         None => {
+            cancel.store(true, Ordering::Relaxed);
             error!("Estimation part {} of {} timed out", index, run_id);
-            return deliver(
+            return deliver_failure(
                 job,
                 clients,
+                run_id,
                 "⏱️ La recherche a expiré. Veuillez réessayer.",
-                None,
             )
             .await;
         }
@@ -747,11 +807,11 @@ async fn run_estimation_part(
         Ok(None) => return Ok(()),
         Err(e) => {
             error!("Failed to record part {} of run {}: {}", index, run_id, e);
-            return deliver(
+            return deliver_failure(
                 job,
                 clients,
+                run_id,
                 "❌ La recherche a échoué (enregistrement impossible). Veuillez réessayer.",
-                None,
             )
             .await;
         }

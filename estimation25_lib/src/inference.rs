@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::ops::RangeInclusive;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 /// One watchtower reading as displayed in game: `[pct%] min - max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +103,8 @@ pub enum EstimationError {
     /// Today's reading and yesterday's J+1 reading at this percentage cannot share one path.
     PlannerMismatch(u32),
     Inconsistent,
+    /// The search was cancelled before covering its seeds.
+    Cancelled,
 }
 
 impl fmt::Display for EstimationError {
@@ -139,6 +141,7 @@ impl fmt::Display for EstimationError {
                 "aucune seed ne reproduit ces relevés. Vérifiez le jour, le mode, l'option J+1 \
                  et les âmes rouges (les événements ne sont pas modélisés)."
             ),
+            EstimationError::Cancelled => write!(f, "recherche annulée."),
         }
     }
 }
@@ -392,22 +395,23 @@ pub fn check_input(input: &EstimationInput, conf: &EstimConf) -> Result<(), Esti
 }
 
 /// Seeds of `seeds` whose offset path replays every reading (possibly none). `progress` counts
-/// processed seeds.
+/// processed seeds; setting `cancel` (from another thread) stops the search early.
 ///
 /// # Errors
 ///
-/// Any validation error of [`observations`] or [`EstimationError::PlannerMismatch`].
+/// Any validation error of [`observations`], [`EstimationError::PlannerMismatch`], or
+/// [`EstimationError::Cancelled`] once `cancel` is set.
 pub fn search_seeds(
     input: &EstimationInput,
     conf: &EstimConf,
     seeds: RangeInclusive<u32>,
     progress: &AtomicU64,
+    cancel: &AtomicBool,
 ) -> Result<Vec<SeedMatch>, EstimationError> {
     let (_, raw, bounds) = prepare(input)?;
     let pairs = candidate_pairs(input, conf, bounds);
-    Ok(crate::seed::search(
-        &raw, &pairs, bounds, conf, seeds, progress,
-    ))
+    crate::seed::search(&raw, &pairs, bounds, conf, seeds, progress, cancel)
+        .ok_or(EstimationError::Cancelled)
 }
 
 /// Attack range of each compatible seed, typically gathered by [`search_seeds`] over slices of
@@ -455,7 +459,7 @@ pub fn estimate(
     seeds: RangeInclusive<u32>,
     progress: &AtomicU64,
 ) -> Result<Estimate, EstimationError> {
-    let matches = search_seeds(input, conf, seeds, progress)?;
+    let matches = search_seeds(input, conf, seeds, progress, &AtomicBool::new(false))?;
     finish(input, conf, matches)
 }
 
@@ -660,6 +664,25 @@ mod tests {
     }
 
     #[test]
+    fn test_cancelled_search_stops() {
+        let text = include_str!("../tests/data/j15_real_attack_2587.txt");
+        let input = parse_text(text)
+            .into_input(&InputOverrides::default())
+            .unwrap();
+        let progress = AtomicU64::new(0);
+        let cancel = AtomicBool::new(true);
+        let searched = search_seeds(
+            &input,
+            &EstimConf::default(),
+            0..=u32::MAX,
+            &progress,
+            &cancel,
+        );
+        assert_eq!(searched.unwrap_err(), EstimationError::Cancelled);
+        assert_eq!(progress.into_inner(), 0);
+    }
+
+    #[test]
     fn test_split_search_matches_single_search() {
         let text = include_str!("../tests/data/j15_real_attack_2587.txt");
         let input = parse_text(text)
@@ -671,7 +694,8 @@ mod tests {
         check_input(&input, &conf).unwrap();
         let mut matches = Vec::new();
         for slice in [0x123f_0000..=0x123f_7fff, 0x123f_8000..=0x123f_ffff] {
-            matches.extend(search_seeds(&input, &conf, slice, &AtomicU64::new(0)).unwrap());
+            let (progress, cancel) = (AtomicU64::new(0), AtomicBool::new(false));
+            matches.extend(search_seeds(&input, &conf, slice, &progress, &cancel).unwrap());
         }
         let split = finish(&input, &conf, matches).unwrap();
         assert_eq!(split.seeds, whole.seeds);

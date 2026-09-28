@@ -17,7 +17,7 @@ use crate::isa::{Isa, Kernel};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const N: usize = 624;
 const M: usize = 397;
@@ -479,7 +479,8 @@ pub fn seed_slices(parts: u32) -> Vec<RangeInclusive<u32>> {
 }
 
 /// Replays every seed in `seeds` for each candidate initial pair and returns the consistent ones,
-/// sorted by seed. `progress` is incremented by the number of seeds processed.
+/// sorted by seed. `progress` is incremented by the number of seeds processed. Setting `cancel`
+/// stops the search within a chunk per thread; it then returns `None`.
 pub(crate) fn search(
     raw: &[RawObservation],
     pairs: &[(i64, i64)],
@@ -487,7 +488,8 @@ pub(crate) fn search(
     conf: &EstimConf,
     seeds: RangeInclusive<u32>,
     progress: &AtomicU64,
-) -> Vec<SeedMatch> {
+    cancel: &AtomicBool,
+) -> Option<Vec<SeedMatch>> {
     let mut observed = [None; MAX_ROUNDS + 1];
     for r in raw {
         observed[r.rounds] = Some(*r);
@@ -529,6 +531,9 @@ pub(crate) fn search(
                 })
             },
             |state, c| {
+                if cancel.load(Ordering::Relaxed) {
+                    return Vec::new();
+                }
                 let lo = first + c * CHUNK;
                 let hi = (lo + CHUNK).min(end);
                 let mut found = Vec::new();
@@ -539,8 +544,11 @@ pub(crate) fn search(
         )
         .flatten()
         .collect();
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     matches.sort_unstable_by_key(|m| (m.seed, m.om0));
-    matches
+    Some(matches)
 }
 
 #[cfg(test)]

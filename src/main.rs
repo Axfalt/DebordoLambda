@@ -6,11 +6,11 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationOptions, EstimationSource, EstimationStage,
-    JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, MAX_SEARCH_TOTAL_WORK, SimConfig,
-    SimulationCitizen, SimulationJob, format_conf, format_reparo_conf, parse_reparo_modal_text,
-    parse_reparo_result_content, parse_result_message_content, parse_risk_percent,
-    risk_percent_from_value,
+    ESTIMATION_CANCEL_BUTTON, ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationOptions,
+    EstimationSource, EstimationStage, JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK,
+    MAX_SEARCH_TOTAL_WORK, SimConfig, SimulationCitizen, SimulationJob, format_conf,
+    format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
+    parse_result_message_content, parse_risk_percent, risk_percent_from_value,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -119,6 +119,37 @@ async fn handle_component_interaction(
         .as_ref()
         .and_then(|d| d.custom_id.as_deref())
         .unwrap_or_default();
+
+    // `/estimation25` waiting message: only the caller may cancel the run.
+    if let Some(run_id) = custom_id.strip_prefix(ESTIMATION_CANCEL_BUTTON) {
+        let Some(user_id) = interaction.user_id() else {
+            return Ok(ephemeral_message("Erreur : utilisateur inconnu."));
+        };
+        return match database::cancel_estimation_run(run_id, user_id, dynamodb_client).await {
+            Ok(database::CancelOutcome::Cancelled) => {
+                info!("Estimation run {} cancelled by its caller", run_id);
+                let response = DiscordResponse {
+                    response_type: response_types::UPDATE_MESSAGE,
+                    data: Some(debordo_lib::discord::api::cancelled_message_body(
+                        "🛑 Recherche annulée.",
+                    )),
+                };
+                Ok(build_json_response(200, &response))
+            }
+            Ok(database::CancelOutcome::NotOwner) => Ok(ephemeral_message(
+                "Seul l'auteur de la commande peut annuler la recherche.",
+            )),
+            Ok(database::CancelOutcome::Finished) => {
+                Ok(ephemeral_message("La recherche est déjà terminée."))
+            }
+            Err(e) => {
+                error!("Failed to cancel /estimation25 run {}: {}", run_id, e);
+                Ok(ephemeral_message(
+                    "Erreur : annulation impossible pour le moment. Réessayez.",
+                ))
+            }
+        };
+    }
 
     // `/estimation25`: the configuration lives in the run's DynamoDB item (kept 24 h).
     if let Some(run_id) = custom_id.strip_prefix(ESTIMATION_CONFIG_BUTTON) {
@@ -1137,6 +1168,17 @@ fn respond_with_readings_modal(prefill: &str) -> Result<ApiGatewayV2httpResponse
     Ok(build_json_response(200, &response))
 }
 
+/// Error for pasted `key: value` lines the readings parser did not understand: a mistyped
+/// setting would otherwise be dropped silently and change the search.
+fn unknown_settings_message(lines: &[String]) -> String {
+    let listed: Vec<String> = lines.iter().map(|l| format!("`{l}`")).collect();
+    format!(
+        "Erreur : réglage non compris : {}.\nRéglages acceptés : `âmes`, `âmes veille`, \
+         `pénalité`, `pénalité veille`, `âmes max`, `jour`, `demain` (ex. `pénalité veille: 0.04`).",
+        listed.join(", ")
+    )
+}
+
 async fn handle_estimation25_modal_submit(
     interaction: DiscordInteraction,
     sqs_client: &aws_sdk_sqs::Client,
@@ -1149,7 +1191,13 @@ async fn handle_estimation25_modal_submit(
         .to_string();
 
     // Same checks as the worker's plan stage, answered right away and privately.
-    let checked = estimation25_lib::parse_text(&text)
+    let parsed = estimation25_lib::parse_text(&text);
+    if !parsed.unknown_settings.is_empty() {
+        return Ok(ephemeral_message(&unknown_settings_message(
+            &parsed.unknown_settings,
+        )));
+    }
+    let checked = parsed
         .into_input(&InputOverrides::default())
         .and_then(|input| {
             estimation25_lib::check_input(&input, &estimation25_lib::EstimConf::default())

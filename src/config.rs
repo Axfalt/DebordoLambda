@@ -124,6 +124,10 @@ pub struct SimulationJob {
 /// run id follows (its configuration is kept in the run's DynamoDB item).
 pub const ESTIMATION_CONFIG_BUTTON: &str = "vconf_est:";
 
+/// `custom_id` prefix of the "Annuler" button of an `/estimation25` waiting message; the run id
+/// follows.
+pub const ESTIMATION_CANCEL_BUTTON: &str = "cancel_est:";
+
 /// Where `/estimation25` reads the watchtower readings from.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum EstimationSource {

@@ -18,6 +18,26 @@ fn config_button_components(custom_id: &str) -> serde_json::Value {
     ])
 }
 
+/// The "🛑 Annuler" button row of an `/estimation25` waiting message.
+fn cancel_button_components(custom_id: &str) -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": 1, // ACTION_ROW
+            "components": [
+                {
+                    "type": 2, // BUTTON
+                    "style": 4, // DANGER (red)
+                    "label": "Annuler",
+                    "custom_id": custom_id,
+                    "emoji": {
+                        "name": "🛑"
+                    }
+                }
+            ]
+        }
+    ])
+}
+
 fn view_config_button_body(content: &str, custom_id: &str) -> serde_json::Value {
     serde_json::json!({
         "content": content,
@@ -143,6 +163,39 @@ pub async fn send_followup_with_button(
     patch_followup(client, application_id, token, &body).await
 }
 
+/// Edits the original response with `content` and an "Annuler" button whose interaction
+/// carries `custom_id`. Later content-only edits keep the button.
+pub async fn send_followup_with_cancel(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+    custom_id: &str,
+) -> Result<(), reqwest::Error> {
+    let body = serde_json::json!({
+        "content": content,
+        "components": cancel_button_components(custom_id)
+    });
+    patch_followup(client, application_id, token, &body).await
+}
+
+/// Edits the original response with `content` and removes its buttons.
+pub async fn send_followup_without_buttons(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+) -> Result<(), reqwest::Error> {
+    let body = serde_json::json!({ "content": content, "components": [] });
+    patch_followup(client, application_id, token, &body).await
+}
+
+/// Body of the component response replacing a cancelled waiting message (without its button).
+#[must_use]
+pub fn cancelled_message_body(content: &str) -> serde_json::Value {
+    serde_json::json!({ "content": content, "components": [] })
+}
+
 /// Deletes the original (deferred) response of the interaction.
 pub async fn delete_original(
     client: &reqwest::Client,
@@ -159,7 +212,17 @@ pub async fn delete_original(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_followup_body, mention_body};
+    use super::{build_followup_body, cancel_button_components, mention_body};
+
+    #[test]
+    fn cancel_button_carries_the_run() {
+        let row = cancel_button_components("cancel_est:abc");
+        assert_eq!(
+            row[0]["components"][0]["custom_id"].as_str(),
+            Some("cancel_est:abc")
+        );
+        assert_eq!(row[0]["components"][0]["style"].as_u64(), Some(4));
+    }
 
     #[test]
     fn mention_body_carries_the_config_button() {

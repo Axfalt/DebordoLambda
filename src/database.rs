@@ -212,27 +212,35 @@ pub fn estimation_run_id(token: &str) -> String {
 }
 
 /// Creates the run item, keeping `config` (the readings as pasteable text) for the result's
-/// "Voir la configuration" button. Returns `false` when the run already exists (a redelivered
-/// plan job, which must not reset the run nor post over its result).
+/// "Voir la configuration" button and `user_id` (the caller, the only one allowed to cancel).
+/// Returns `false` when the run already exists (a redelivered plan job, which must not reset
+/// the run nor post over its result).
 pub async fn create_estimation_run(
     run_id: &str,
     parts: u32,
     config: &str,
+    user_id: Option<&str>,
     db_client: &aws_sdk_dynamodb::Client,
 ) -> Result<bool, lambda_runtime::Error> {
     let now = now_secs();
-    let created = db_client
+    let mut put = db_client
         .put_item()
         .table_name(estimation_table())
         .item("run_id", AttributeValue::S(run_id.to_string()))
         .item("parts", AttributeValue::N(parts.to_string()))
         .item("started_at", AttributeValue::N(now.to_string()))
+        // The waiting message was just posted: the first progress edit waits for the gap.
+        .item("last_edit_at", AttributeValue::N(now.to_string()))
         .item(
             "expires_at",
             AttributeValue::N((now + ESTIMATION_RUN_TTL_SECS).to_string()),
         )
         .item("matches", AttributeValue::M(Default::default()))
-        .item("config", AttributeValue::S(config.to_string()))
+        .item("config", AttributeValue::S(config.to_string()));
+    if let Some(user_id) = user_id {
+        put = put.item("user_id", AttributeValue::S(user_id.to_string()));
+    }
+    let created = put
         .condition_expression("attribute_not_exists(run_id)")
         .send()
         .await;
@@ -539,6 +547,74 @@ pub async fn claim_estimation_run(
             )))
         }
     }
+}
+
+/// Outcome of a click on the "Annuler" button of a run.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The run is now marked as reported: its parts stop at their next progress check.
+    Cancelled,
+    /// Someone other than the caller clicked.
+    NotOwner,
+    /// The run already posted its result or failure (or expired).
+    Finished,
+}
+
+/// Cancels a run on behalf of `user_id`: marks it as reported (`posted`), which the parts, the
+/// result and the watchdog all check, so nothing is posted over the cancellation.
+pub async fn cancel_estimation_run(
+    run_id: &str,
+    user_id: &str,
+    db_client: &aws_sdk_dynamodb::Client,
+) -> Result<CancelOutcome, lambda_runtime::Error> {
+    let table = estimation_table();
+    let key = AttributeValue::S(run_id.to_string());
+    let cancelled = db_client
+        .update_item()
+        .table_name(&table)
+        .key("run_id", key.clone())
+        .update_expression("SET posted = :true, cancelled = :true")
+        .condition_expression(
+            "attribute_exists(run_id) AND attribute_not_exists(posted) \
+             AND (attribute_not_exists(user_id) OR user_id = :user)",
+        )
+        .expression_attribute_values(":true", AttributeValue::Bool(true))
+        .expression_attribute_values(":user", AttributeValue::S(user_id.to_string()))
+        .send()
+        .await;
+    match cancelled {
+        Ok(_) => return Ok(CancelOutcome::Cancelled),
+        Err(e)
+            if e.as_service_error()
+                .is_some_and(|s| s.is_conditional_check_failed_exception()) => {}
+        Err(e) => {
+            error!("DynamoDB update_item (estimation cancel) failed: {}", e);
+            return Err(lambda_runtime::Error::from(format!(
+                "Database write failed: {}",
+                e
+            )));
+        }
+    }
+
+    // Tell apart a finished run from someone else's.
+    let item = db_client
+        .get_item()
+        .table_name(&table)
+        .key("run_id", key)
+        .projection_expression("posted, user_id")
+        .send()
+        .await
+        .map_err(|e| {
+            error!("DynamoDB get_item (estimation cancel) failed: {}", e);
+            lambda_runtime::Error::from(format!("Database read failed: {}", e))
+        })?
+        .item;
+    let running = item.as_ref().is_some_and(|i| !i.contains_key("posted"));
+    Ok(if running {
+        CancelOutcome::NotOwner
+    } else {
+        CancelOutcome::Finished
+    })
 }
 
 /// Seconds elapsed since `started_at` (for the result footer).

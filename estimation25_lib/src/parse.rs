@@ -44,6 +44,9 @@ pub struct ParsedText {
     pub soul_max: Option<f64>,
     /// Non-empty lines that were neither a reading nor a known key.
     pub ignored: Vec<String>,
+    /// Ignored lines shaped like a setting (`key: value`): an unknown key or an invalid value,
+    /// most likely a typo that would silently change the search.
+    pub unknown_settings: Vec<String>,
 }
 
 impl ParsedText {
@@ -243,11 +246,13 @@ pub fn parse_text(text: &str) -> ParsedText {
         }
 
         let recognised = line.split_once([':', '=']).is_some_and(|(key, value)| {
+            // `pénalité_veille`, `Pénalité-veille` and `penalite  veille` are the same key.
             let key = key
-                .trim()
                 .to_lowercase()
                 .replace('â', "a")
-                .replace('é', "e");
+                .replace('é', "e")
+                .replace(['_', '-'], " ");
+            let key = key.split_whitespace().collect::<Vec<_>>().join(" ");
             let count = || {
                 numbers(value)
                     .first()
@@ -285,6 +290,9 @@ pub fn parse_text(text: &str) -> ParsedText {
             }
         });
         if !recognised {
+            if line.contains([':', '=']) {
+                parsed.unknown_settings.push(line.to_string());
+            }
             parsed.ignored.push(line.to_string());
         }
     }
@@ -416,6 +424,21 @@ mod tests {
         .into_input(&InputOverrides::default())
         .unwrap();
         assert!((input.planner_soul_factor.unwrap() - 1.04).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_setting_keys_accept_underscores_and_report_typos() {
+        let parsed = parse_text(
+            "penalité_veille: 0.04\nPénalité-veille = 0,04\npénalité veile: 0.04\n\
+             âmes: deux\nTour de guet\n33% : 3666 - 4555\n",
+        );
+        assert_eq!(parsed.planner_soul_penalty, Some(0.04));
+        assert_eq!(
+            parsed.unknown_settings,
+            vec!["pénalité veile: 0.04".to_string(), "âmes: deux".to_string()]
+        );
+        // A line without `:` is only ignored.
+        assert!(parsed.ignored.contains(&"Tour de guet".to_string()));
     }
 
     #[test]
