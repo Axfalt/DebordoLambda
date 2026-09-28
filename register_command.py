@@ -30,8 +30,14 @@ commands = [
         "options": [
             {
                 "name": "defense",
-                "description": "Valeur de défense de la ville",
+                "description": "Valeur de défense de la ville (ou utilisez risque)",
                 "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "risque",
+                "description": "Risque de mort visé en % (ex. 5%), à la place de defense : calcule la défense nécessaire",
+                "type": 3,  # STRING, pour accepter le signe %
                 "required": False
             },
             {

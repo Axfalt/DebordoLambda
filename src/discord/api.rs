@@ -21,7 +21,7 @@ fn view_config_button_body(content: &str, custom_id: &str) -> serde_json::Value 
 }
 
 fn build_followup_body(content: &str) -> serde_json::Value {
-    if content.contains("**Probabilité de mort:") {
+    if content.contains("**Probabilité de mort:") || content.contains("**Défense requise:") {
         view_config_button_body(content, "vconf")
     } else if content.contains("Résultats de la simulation de réparation") {
         // Distinct custom_id (underscore, not "vconf:") so it never collides with
@@ -101,6 +101,18 @@ mod tests {
         let body = build_followup_body("💀 **Probabilité de mort: 12.500%**");
 
         assert!(body.get("components").is_some());
+    }
+
+    #[test]
+    fn adds_config_button_for_defense_search_results() {
+        let body = build_followup_body(
+            "🛡️ **Défense requise: 5230** (probabilité de mort estimée: 4.912%)",
+        );
+
+        assert_eq!(
+            body["components"][0]["components"][0]["custom_id"].as_str(),
+            Some("vconf")
+        );
     }
 
     #[test]

@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_ITERATIONS: u32 = 10_000_000;
 pub const MAX_REPARO_TOTAL_WORK: u64 = 20_000_000;
+/// Iterations × TDG width allowed per evaluation of a defense search, which
+/// runs about 15 evaluations.
+pub const MAX_SEARCH_TOTAL_WORK: u64 = 5_000_000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommandOption {
@@ -29,6 +32,10 @@ pub struct SimConfig {
     pub home_bonus: i32,
     #[serde(default)]
     pub veille: i32,
+    /// Accepted death risk in percent; when set, the simulation searches the
+    /// defense needed instead of using `defense`.
+    #[serde(default)]
+    pub target_death: Option<f64>,
 }
 
 impl SimConfig {
@@ -61,6 +68,7 @@ impl SimConfig {
                 "interactive" => config.is_interactive = opt.value.as_bool().unwrap_or(false),
                 "defenses" => config.custom_defenses = opt.value.as_str().map(|s| s.to_string()),
                 "home_bonus" => config.home_bonus = opt.value.as_i64().unwrap_or(0) as i32,
+                "risque" => config.target_death = risk_percent_from_value(&opt.value),
                 _ => {}
             }
         }
@@ -70,6 +78,22 @@ impl SimConfig {
 
     pub fn tdg_interval(&self) -> (i32, i32) {
         (self.tdg_min, self.tdg_max)
+    }
+}
+
+/// Parses a death risk written as a percentage ("5%", "0,5 %", "5"), in
+/// 0 <= risk < 100. A bare number is a percentage too: "0.05" is 0.05%.
+pub fn parse_risk_percent(text: &str) -> Option<f64> {
+    let number = text.trim().trim_end_matches('%').trim().replace(',', ".");
+    let risk = number.parse::<f64>().ok()?;
+    (risk.is_finite() && (0.0..100.0).contains(&risk)).then_some(risk)
+}
+
+pub fn risk_percent_from_value(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::String(text) => parse_risk_percent(text),
+        serde_json::Value::Number(number) => parse_risk_percent(&number.to_string()),
+        _ => None,
     }
 }
 
@@ -104,7 +128,10 @@ pub fn format_conf(config: &SimConfig, citizens: &[SimulationCitizen]) -> String
     citizens_sorted.sort_by_key(|a| a.name.to_lowercase());
 
     let mut config_lines = vec![
-        format!("defense: {}", config.defense),
+        match config.target_death {
+            Some(risk) => format!("risque: {}%", risk),
+            None => format!("defense: {}", config.defense),
+        },
         format!("tdg: {}-{}", config.tdg_min, config.tdg_max),
     ];
 
@@ -143,6 +170,64 @@ pub fn format_results(
 ) -> String {
     let mut output = String::new();
     output.push_str("## 🎲 Résultats de la simulation\n\n");
+    output.push_str(&format_parameters(config, avg_max_active));
+
+    output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
+
+    if config.is_complete && !citizens.is_empty() {
+        output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
+        let mut list: Vec<(&SimulationCitizen, f64)> = citizens
+            .iter()
+            .zip(citizen_percentages.iter().copied())
+            .collect();
+        list.sort_by_key(|a| a.0.name.to_lowercase());
+
+        for &(citizen, c_prob) in &list {
+            output.push_str(&format!(
+                "• **{}**: {} 🛡️ — **{:.3}%**\n",
+                citizen.name, citizen.defense, c_prob
+            ));
+        }
+        output.push('\n');
+    }
+
+    output.push_str(&format!(
+        "-# ⏱️ {} simulations en {}ms",
+        total_runs, elapsed_ms
+    ));
+
+    output
+}
+
+pub fn format_defense_search_results(
+    config: &SimConfig,
+    search: &crate::simulation::DefenseSearch,
+    elapsed_ms: u128,
+) -> String {
+    let mut output = String::new();
+    output.push_str("## 🎯 Défense nécessaire\n\n");
+    output.push_str(&format_parameters(config, None));
+
+    output.push_str(&format!(
+        "🛡️ **Défense requise: {}** (probabilité de mort estimée: {:.3}%)\n",
+        search.defense, search.prob_at_defense
+    ));
+    output.push_str(&format!(
+        "🔒 Défense pour 0% de risque: {}\n\n",
+        search.safe_defense
+    ));
+
+    output.push_str(&format!(
+        "-# ⏱️ {} simulations en {}ms",
+        search.total_runs, elapsed_ms
+    ));
+
+    output
+}
+
+/// The "**Paramètres:**" block shared by the result messages.
+fn format_parameters(config: &SimConfig, avg_max_active: Option<f64>) -> String {
+    let mut output = String::new();
     output.push_str("**Paramètres:**\n");
 
     let fmt_line =
@@ -150,7 +235,10 @@ pub fn format_results(
 
     let tdg_line = format!("• **🔭 TDG**: {} - {}\n", config.tdg_min, config.tdg_max);
 
-    output.push_str(&fmt_line("🛡️ Défense", config.defense));
+    match config.target_death {
+        Some(risk) => output.push_str(&format!("• **🎯 Risque visé**: {}%\n", risk)),
+        None => output.push_str(&fmt_line("🛡️ Défense", config.defense)),
+    }
     output.push_str(&tdg_line);
     output.push_str(&fmt_line("🧑‍🤝‍🧑 Personnes en ville", config.nb_hab));
     if !config.is_complete {
@@ -178,30 +266,6 @@ pub fn format_results(
     // Always last, regardless of which optional lines above were printed.
     output.push_str(&format!("• **🔁 Itérations**: {}\n", config.iterations));
     output.push('\n');
-
-    output.push_str(&format!("💀 **Probabilité de mort: {:.3}%**\n\n", prob));
-
-    if config.is_complete && !citizens.is_empty() {
-        output.push_str("**💀 Risque de mort par citoyen (détaillé) :**\n");
-        let mut list: Vec<(&SimulationCitizen, f64)> = citizens
-            .iter()
-            .zip(citizen_percentages.iter().copied())
-            .collect();
-        list.sort_by_key(|a| a.0.name.to_lowercase());
-
-        for &(citizen, c_prob) in &list {
-            output.push_str(&format!(
-                "• **{}**: {} 🛡️ — **{:.3}%**\n",
-                citizen.name, citizen.defense, c_prob
-            ));
-        }
-        output.push('\n');
-    }
-
-    output.push_str(&format!(
-        "-# ⏱️ {} simulations en {}ms",
-        total_runs, elapsed_ms
-    ));
 
     output
 }
@@ -469,7 +533,11 @@ pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<Simulation
                         }
                 }
         } else {
-            if line.contains("Défense min") {
+            if line.contains("Risque visé") {
+                if let Some(pos) = line.rfind(':') {
+                    config.target_death = parse_risk_percent(&line[pos + 1..]);
+                }
+            } else if line.contains("Défense min") {
                 if let Some(pos) = line.rfind(':')
                     && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
                         config.min_def = v;
@@ -1028,5 +1096,110 @@ mod tests {
         assert!(!parsed_config.is_reactor_built);
         assert!(!parsed_config.is_chaos);
         assert!(!parsed_config.is_devastated);
+    }
+
+    // =========================================================================
+    // Target death risk
+    // =========================================================================
+
+    #[test]
+    fn test_parse_risk_percent_accepts_percentages() {
+        assert_eq!(parse_risk_percent("5%"), Some(5.0));
+        assert_eq!(parse_risk_percent(" 0,5 % "), Some(0.5));
+        assert_eq!(parse_risk_percent("5"), Some(5.0));
+        assert_eq!(
+            parse_risk_percent("0.05"),
+            Some(0.05),
+            "a bare number is a percentage"
+        );
+        assert_eq!(parse_risk_percent("0%"), Some(0.0));
+    }
+
+    #[test]
+    fn test_parse_risk_percent_rejects_invalid_values() {
+        assert_eq!(parse_risk_percent("abc"), None);
+        assert_eq!(parse_risk_percent(""), None);
+        assert_eq!(parse_risk_percent("-1%"), None);
+        assert_eq!(parse_risk_percent("100%"), None);
+        assert_eq!(parse_risk_percent("NaN"), None);
+    }
+
+    #[test]
+    fn test_simconfig_parses_risque_option() {
+        let config = SimConfig::from_options(&[make_opt("risque", json!("2,5%"))]);
+        assert_eq!(config.target_death, Some(2.5));
+
+        let config = SimConfig::from_options(&[make_opt("risque", json!(7))]);
+        assert_eq!(config.target_death, Some(7.0));
+
+        let config = SimConfig::from_options(&[]);
+        assert_eq!(config.target_death, None);
+    }
+
+    #[test]
+    fn test_format_conf_writes_risque_instead_of_defense() {
+        let config = SimConfig {
+            defense: 1234,
+            target_death: Some(2.5),
+            ..Default::default()
+        };
+        let text = format_conf(&config, &[]);
+        assert!(text.contains("risque: 2.5%"));
+        assert!(!text.contains("defense:"));
+    }
+
+    #[test]
+    fn test_defense_search_results_roundtrip_target_death() {
+        let config = SimConfig {
+            tdg_min: 1000,
+            tdg_max: 1030,
+            min_def: 30,
+            day: 12,
+            nb_hab: 40,
+            iterations: 5000,
+            is_reactor_built: true,
+            target_death: Some(2.5),
+            ..Default::default()
+        };
+        let search = crate::simulation::DefenseSearch {
+            defense: 1180,
+            prob_at_defense: 2.41,
+            safe_defense: 1250,
+            total_runs: 123_456,
+        };
+        let output = format_defense_search_results(&config, &search, 42);
+
+        assert!(output.contains("🎯 Risque visé**: 2.5%"));
+        assert!(output.contains("**Défense requise: 1180**"));
+        assert!(output.contains("2.410%"));
+        assert!(output.contains("Défense pour 0% de risque: 1250"));
+        assert!(output.contains("123456 simulations en 42ms"));
+        assert!(!output.contains("Probabilité de mort:"));
+
+        let (parsed, _) = parse_result_message_content(&output);
+        assert_eq!(parsed.target_death, Some(2.5));
+        assert_eq!(
+            parsed.defense, 0,
+            "result lines must not be read as the defense"
+        );
+        assert_eq!(parsed.tdg_min, 1000);
+        assert_eq!(parsed.tdg_max, 1030);
+        assert_eq!(parsed.min_def, 30);
+        assert_eq!(parsed.iterations, 5000);
+        assert!(parsed.is_reactor_built);
+    }
+
+    #[test]
+    fn test_simulation_results_have_no_target_death() {
+        let config = SimConfig {
+            defense: 150,
+            tdg_min: 100,
+            tdg_max: 120,
+            ..Default::default()
+        };
+        let output = format_results(&config, 1.0, 1, 1, None, &[], &[]);
+        let (parsed, _) = parse_result_message_content(&output);
+        assert_eq!(parsed.target_death, None);
+        assert_eq!(parsed.defense, 150);
     }
 }

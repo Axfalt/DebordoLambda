@@ -6,9 +6,10 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
-    parse_result_message_content, JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, SimConfig,
-    SimulationCitizen, SimulationJob,
+    JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, MAX_SEARCH_TOTAL_WORK, SimConfig,
+    SimulationCitizen, SimulationJob, format_conf, format_reparo_conf, parse_reparo_modal_text,
+    parse_reparo_result_content, parse_result_message_content, parse_risk_percent,
+    risk_percent_from_value,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -287,6 +288,8 @@ async fn handle_command(
     let mut user_interactive: Option<bool> = None;
     let mut user_defenses: Option<String> = None;
     let mut user_home_bonus: Option<i32> = None;
+    let mut user_risque: Option<f64> = None;
+    let mut risque_given = false;
 
     let options = interaction.data.as_ref().and_then(|d| d.options.as_ref());
 
@@ -294,6 +297,10 @@ async fn handle_command(
         for opt in opts {
             match opt.name.as_str() {
                 "defense" => user_defense = opt.value.as_i64().map(|v| v as i32),
+                "risque" => {
+                    risque_given = true;
+                    user_risque = risk_percent_from_value(&opt.value);
+                }
                 "tdg_min" => user_tdg_min = opt.value.as_i64().map(|v| v as i32),
                 "tdg_max" => user_tdg_max = opt.value.as_i64().map(|v| v as i32),
                 "min_def" => user_min_def = opt.value.as_i64().map(|v| v as i32),
@@ -314,8 +321,21 @@ async fn handle_command(
     let is_complete = is_complete_cmd || user_complete.unwrap_or(false);
     let is_interactive = is_complete_cmd || user_interactive.unwrap_or(false);
 
+    if risque_given && user_risque.is_none() {
+        return Ok(ephemeral_message(
+            "Erreur : `risque` doit être un pourcentage entre 0 et 100, ex. `5%`.",
+        ));
+    }
+    if user_risque.is_some() && user_defense.is_some() {
+        return Ok(ephemeral_message(
+            "Erreur : indiquez soit `defense`, soit `risque`, pas les deux.",
+        ));
+    }
+    // With `risque`, the defense is searched instead of given.
+    let has_defense_or_risque = user_defense.is_some() || user_risque.is_some();
+
     // 2. Vérifier si on a tous les paramètres requis manuellement
-    let has_all_critical = user_defense.is_some()
+    let has_all_critical = has_defense_or_risque
         && user_tdg_min.is_some()
         && user_tdg_max.is_some()
         && user_min_def.is_some();
@@ -323,7 +343,7 @@ async fn handle_command(
     if has_all_critical {
         info!("All critical parameters provided manually. Skipping API call.");
         let config = SimConfig {
-            defense: user_defense.unwrap(),
+            defense: user_defense.unwrap_or(0),
             tdg_min: user_tdg_min.unwrap(),
             tdg_max: user_tdg_max.unwrap(),
             min_def: user_min_def.unwrap(),
@@ -336,6 +356,7 @@ async fn handle_command(
             is_interactive,
             custom_defenses: user_defenses.clone(),
             home_bonus: user_home_bonus.unwrap_or(0),
+            target_death: user_risque,
             ..Default::default()
         };
 
@@ -369,12 +390,12 @@ async fn handle_command(
 
     match user_key {
         None => {
-            if user_defense.is_none()
+            if !has_defense_or_risque
                 || user_tdg_min.is_none()
                 || user_tdg_max.is_none()
                 || user_min_def.is_none()
             {
-                let error_msg = "Certains paramètres requis sont manquants (defense, tdg_min, tdg_max, min_def) et vous n'avez pas enregistré votre clé API MyHordes. Veuillez utiliser `/register-key` ou fournir tous les paramètres manuellement.";
+                let error_msg = "Certains paramètres requis sont manquants (defense ou risque, tdg_min, tdg_max, min_def) et vous n'avez pas enregistré votre clé API MyHordes. Veuillez utiliser `/register-key` ou fournir tous les paramètres manuellement.";
                 let response = DiscordResponse {
                     response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
                     data: Some(serde_json::json!({
@@ -399,6 +420,7 @@ async fn handle_command(
                 is_interactive,
                 custom_defenses: user_defenses.clone(),
                 home_bonus: user_home_bonus.unwrap_or(0),
+                target_death: user_risque,
                 ..Default::default()
             };
 
@@ -508,7 +530,12 @@ async fn handle_command(
                         }
 
                         let day = user_day.unwrap_or(api_day);
-                        let defense = user_defense.unwrap_or(api_defense);
+                        // With `risque`, the defense is searched: the API one is not used.
+                        let defense = if user_risque.is_some() {
+                            0
+                        } else {
+                            user_defense.unwrap_or(api_defense)
+                        };
                         let tdg_min = user_tdg_min.unwrap_or(api_tdg_min);
                         let tdg_max = user_tdg_max.unwrap_or(api_tdg_max);
                         let reactor = user_reactor.unwrap_or(api_reactor);
@@ -517,7 +544,11 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
-                        if defense <= 0 || tdg_min <= 0 || tdg_max <= 0 || min_def <= 0 {
+                        if (defense <= 0 && user_risque.is_none())
+                            || tdg_min <= 0
+                            || tdg_max <= 0
+                            || min_def <= 0
+                        {
                             let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
                             let response = DiscordResponse {
                                 response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
@@ -557,6 +588,7 @@ async fn handle_command(
                             is_interactive,
                             custom_defenses: user_defenses.clone(),
                             home_bonus,
+                            target_death: user_risque,
                             ..Default::default()
                         };
 
@@ -583,7 +615,7 @@ async fn handle_command(
                 }
                 Err(e) => {
                     error!("MyHordes API call failed: {}", e);
-                    if user_defense.is_none()
+                    if !has_defense_or_risque
                         || user_tdg_min.is_none()
                         || user_tdg_max.is_none()
                         || user_min_def.is_none()
@@ -616,6 +648,7 @@ async fn handle_command(
                         is_interactive,
                         custom_defenses: user_defenses.clone(),
                         home_bonus: user_home_bonus.unwrap_or(0),
+                        target_death: user_risque,
                         ..Default::default()
                     };
 
@@ -923,6 +956,10 @@ async fn enqueue_simulation(
     sqs_client: &aws_sdk_sqs::Client,
     queue_url: &str,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
+    if let Some(error_msg) = defense_search_work_error(job) {
+        return Ok(ephemeral_message(&error_msg));
+    }
+
     let job_json = serde_json::to_string(job)?;
 
     sqs_client
@@ -939,6 +976,33 @@ async fn enqueue_simulation(
         data: None,
     };
     Ok(build_json_response(200, &response))
+}
+
+/// A defense search runs about 15 simulations, so it gets a stricter work limit.
+fn defense_search_work_error(job: &SimulationJob) -> Option<String> {
+    let config = &job.config;
+    if job.job_type != JobType::Debordo || config.target_death.is_none() {
+        return None;
+    }
+    let tdg_width = (config.tdg_max - config.tdg_min + 1).max(0) as u64;
+    if config.iterations as u64 * tdg_width <= MAX_SEARCH_TOTAL_WORK {
+        return None;
+    }
+    Some(format!(
+        "Erreur : avec `risque`, itérations ({}) × largeur de la TDG ({}) ne doit pas dépasser {}. Réduisez le nombre d'itérations ou resserrez la plage TDG.",
+        config.iterations, tdg_width, MAX_SEARCH_TOTAL_WORK
+    ))
+}
+
+fn ephemeral_message(content: &str) -> ApiGatewayV2httpResponse {
+    let response = DiscordResponse {
+        response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
+        data: Some(serde_json::json!({
+            "content": content,
+            "flags": 64
+        })),
+    };
+    build_json_response(200, &response)
 }
 
 fn parse_custom_defenses(defenses_str: &str) -> std::collections::HashMap<String, i32> {
@@ -1097,6 +1161,7 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
                         config.defense = v;
                     }
                 }
+                "risque" | "risque_cible" => config.target_death = parse_risk_percent(val_str),
                 "tdg" | "estimations" => {
                     if let Some(dash_pos) = val_str.find('-') {
                         if let Ok(mn) = val_str[..dash_pos].trim().parse::<i32>() {
@@ -1318,5 +1383,38 @@ mod tests {
         assert_eq!(citizens[0].defense, 10); // Custom defense used as-is
         assert_eq!(citizens[1].name, "Citoyen 1");
         assert_eq!(citizens[1].defense, 9); // 5 (min_def) + 4 (home_bonus)
+    }
+
+    #[test]
+    fn test_parse_complete_modal_text_reads_risque() {
+        let (config, citizens) =
+            parse_complete_modal_text("risque: 2,5 %\ntdg: 100-120\nmin_def: 10");
+        assert_eq!(config.target_death, Some(2.5));
+        assert_eq!(config.tdg_min, 100);
+        assert!(
+            citizens.is_empty(),
+            "`risque` must not be read as a citizen"
+        );
+    }
+
+    #[test]
+    fn test_defense_search_work_limit() {
+        let job = |iterations: u32, target_death: Option<f64>| SimulationJob {
+            config: SimConfig {
+                tdg_min: 1,
+                tdg_max: 100,
+                iterations,
+                target_death,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let limit = (MAX_SEARCH_TOTAL_WORK / 100) as u32;
+        assert!(defense_search_work_error(&job(limit, Some(5.0))).is_none());
+        assert!(defense_search_work_error(&job(limit + 1, Some(5.0))).is_some());
+        assert!(
+            defense_search_work_error(&job(limit + 1, None)).is_none(),
+            "the limit only applies to defense searches"
+        );
     }
 }

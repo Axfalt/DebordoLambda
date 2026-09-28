@@ -7,11 +7,14 @@ use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    JobType, SimulationJob, format_reparo_results, format_results, truncate_for_discord,
+    JobType, SimulationJob, format_defense_search_results, format_reparo_results, format_results,
+    truncate_for_discord,
 };
 use debordo_lib::discord::api::send_followup;
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
-use debordo_lib::simulation::{complete_overflow_probability, overflow_probability};
+use debordo_lib::simulation::{
+    complete_overflow_probability, overflow_probability, required_defense,
+};
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -47,6 +50,9 @@ async fn process_job(job: SimulationJob, http_client: &reqwest::Client) -> Resul
     info!("Processing simulation with config: {:?}", config);
 
     match job.job_type {
+        JobType::Debordo if config.target_death.is_some() => {
+            process_defense_search_job(job, config, http_client).await
+        }
         JobType::Debordo => process_debordo_job(job, config, http_client).await,
         JobType::Reparation => process_reparo_job(job, config, http_client).await,
     }
@@ -100,6 +106,45 @@ async fn process_debordo_job(
     send_followup(http_client, &job.application_id, &job.token, &content).await?;
 
     info!("Simulation results sent to Discord");
+    Ok(())
+}
+
+async fn process_defense_search_job(
+    job: SimulationJob,
+    config: debordo_lib::config::SimConfig,
+    http_client: &reqwest::Client,
+) -> Result<(), Error> {
+    let citizens = job.citizens.clone();
+    let sim_config = config.clone();
+    let target = config.target_death.unwrap_or(0.0);
+
+    let start = Instant::now();
+    let result = timeout(
+        Duration::from_secs(SIMULATION_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || required_defense(&sim_config, &citizens, target)),
+    )
+    .await;
+
+    let content = match result {
+        Err(_elapsed) => {
+            error!(
+                "Defense search timed out after {}s",
+                SIMULATION_TIMEOUT_SECS
+            );
+            "⏱️ La recherche de défense a expiré. Essayez avec moins d'itérations ou une plage TDG plus étroite.".to_string()
+        }
+        Ok(Err(e)) => {
+            error!("Defense search panicked: {}", e);
+            "❌ La simulation a échoué. Veuillez réessayer.".to_string()
+        }
+        Ok(Ok(search)) => {
+            format_defense_search_results(&config, &search, start.elapsed().as_millis())
+        }
+    };
+
+    send_followup(http_client, &job.application_id, &job.token, &content).await?;
+
+    info!("Defense search results sent to Discord");
     Ok(())
 }
 
