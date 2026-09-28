@@ -55,7 +55,7 @@ const EDITS_PER_PHRASE: u64 = 2;
 const PROGRESS_BAR_CELLS: u64 = 10;
 
 /// Waiting messages of an `/estimation25` run, rotated as the search goes.
-const PROGRESS_MESSAGES: [&str; 15] = [
+const PROGRESS_MESSAGES: [&str; 16] = [
     "⏳ Recompte les zombies avec attention...",
     "⏳ Nettoie la lunette de la tour...",
     "⏳ Demande à Cubique si on sera Top2...",
@@ -68,9 +68,10 @@ const PROGRESS_MESSAGES: [&str; 15] = [
     "⏳ Recompte le nombre de candidats à la présidentielle de 2027...",
     "⏳ Je prends bien en compte de laisser mourir Fofotre...",
     "⏳ Recompte les graines...",
-    "⏳ Oui bah fallait pas oublier une estimations...",
+    "⏳ Oui bah fallait pas oublier une estimation...",
     "⏳ Analyse du ~~sanctuaire~~ zoo en cours...",
     "⏳ Compte les grains de sable pour voir",
+    "⏳ Et un peu de vitriole ..."
 ];
 
 /// Waiting message number `step` of a run. Each run starts at its own place in the list (taken
