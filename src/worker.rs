@@ -30,7 +30,9 @@ const DISCORD_MESSAGE_MAX_LENGTH: usize = 2000;
 /// One `/estimation25` part must finish within the 300 s Lambda timeout.
 const ESTIMATION_TIMEOUT_SECS: u64 = 280;
 /// Parallel parts of an `/estimation25` run (`ESTIMATION_PARTS` overrides it).
-const DEFAULT_ESTIMATION_PARTS: u32 = 32;
+/// 8 fits the free tier's 10 concurrent executions in a single wave, while the worker's SQS
+/// trigger (maximum concurrency 8) leaves 2 slots for the receiver.
+const DEFAULT_ESTIMATION_PARTS: u32 = 8;
 /// `modifiers.red_soul_max_factor` of Pandemonium towns.
 const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
