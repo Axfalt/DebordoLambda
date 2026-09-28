@@ -49,6 +49,8 @@ const PROGRESS_REPORT_SECS: u64 = 5;
 /// Minimum delay between two edits of the waiting message, across all the parts of a run
 /// (well within Discord's rate limit).
 const PROGRESS_EDIT_GAP_SECS: u64 = 5;
+/// A progress edit slower than this is abandoned, so it cannot land after the next one.
+const PROGRESS_EDIT_TIMEOUT_SECS: u64 = 3;
 /// Waiting-message edits per phrase: the bar moves every edit, the phrase every other one.
 const EDITS_PER_PHRASE: u64 = 2;
 /// Cells of the progress bar.
@@ -71,7 +73,7 @@ const PROGRESS_MESSAGES: [&str; 16] = [
     "⏳ Oui bah fallait pas oublier une estimation...",
     "⏳ Analyse du ~~sanctuaire~~ zoo en cours...",
     "⏳ Compte les grains de sable pour voir",
-    "⏳ Et un peu de vitriole ..."
+    "⏳ Et un peu de vitriole ...",
 ];
 
 /// Waiting message number `step` of a run. Each run starts at its own place in the list (taken
@@ -801,10 +803,16 @@ async fn show_progress(
     if let Some(edit) = progress.edit {
         let step = edit.div_ceil(EDITS_PER_PHRASE);
         let content = waiting_message(run_id, step, progress.searched);
-        if let Err(e) =
-            send_followup(&clients.http, &job.application_id, &job.token, &content).await
-        {
-            info!("Progress update of part {} skipped: {}", index, e);
+        // A late edit would land after the next one and show an older total.
+        let edited = timeout(
+            Duration::from_secs(PROGRESS_EDIT_TIMEOUT_SECS),
+            send_followup(&clients.http, &job.application_id, &job.token, &content),
+        )
+        .await;
+        match edited {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => info!("Progress update of part {} skipped: {}", index, e),
+            Err(_) => info!("Progress update of part {} timed out", index),
         }
     }
     true

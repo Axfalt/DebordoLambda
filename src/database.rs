@@ -345,7 +345,7 @@ pub async fn report_estimation_progress(
         .iter()
         .filter(|(name, _)| name.starts_with("searched_p"))
         .filter_map(|(_, v)| number(v))
-        .sum();
+        .sum::<u64>();
 
     let now = now_secs();
     let cutoff = now.saturating_sub(min_gap_secs);
@@ -360,17 +360,21 @@ pub async fn report_estimation_progress(
         }));
     }
 
-    // Claim the edit: several parts may see the gap elapsed at once, only one wins.
+    // Claim the edit: several parts may see the gap elapsed at once, only one wins. The shown
+    // total never decreases: a part's view of it can be older than the last edit's, and a
+    // redelivered copy of a running part restarts its count from 0.
     let claimed = db_client
         .update_item()
         .table_name(&table)
         .key("run_id", key)
-        .update_expression("SET last_edit_at = :now ADD edits :one")
+        .update_expression("SET last_edit_at = :now, shown_searched = :total ADD edits :one")
         .condition_expression(format!(
-            "{LIVE} AND (attribute_not_exists(last_edit_at) OR last_edit_at <= :cutoff)"
+            "{LIVE} AND (attribute_not_exists(last_edit_at) OR last_edit_at <= :cutoff) \
+             AND (attribute_not_exists(shown_searched) OR shown_searched <= :total)"
         ))
         .expression_attribute_values(":now", AttributeValue::N(now.to_string()))
         .expression_attribute_values(":cutoff", AttributeValue::N(cutoff.to_string()))
+        .expression_attribute_values(":total", AttributeValue::N(total.to_string()))
         .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
         .expression_attribute_values(":part", part)
         .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
