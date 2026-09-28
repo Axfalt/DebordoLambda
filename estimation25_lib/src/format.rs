@@ -41,13 +41,12 @@ fn write_header(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
     if let (Some(first), Some(last)) = (obs.first(), obs.last()) {
         writeln!(
             out,
-            "{} relevés ({} % → {} %), dernier : {} - {} (largeur {})",
+            "{} relevés ({} % → {} %), dernier : {} - {}",
             obs.len(),
             first.pct,
             last.pct,
             last.min,
-            last.max,
-            last.max - last.min
+            last.max
         )?;
     }
     if !input.future && !input.planner.is_empty() {
@@ -101,11 +100,7 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
         // NightlyHandler: the night attack is round(zombies * soulFactor).
         let soul = input.soul_factor;
         let night = |v: i64| (v as f64 * soul).round() as i64;
-        writeln!(
-            out,
-            "\n🎯 Attaque stockée : {lo} - {hi} (largeur {})",
-            hi - lo
-        )?;
+        writeln!(out, "\n🎯 Attaque stockée : {lo} - {hi}")?;
         writeln!(
             out,
             "💀 Attaque de la nuit (âmes rouges ×{soul}) : {} - {}",
@@ -113,6 +108,6 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
             night(hi)
         )
     } else {
-        writeln!(out, "\n🎯 Attaque : {lo} - {hi} (largeur {})", hi - lo)
+        writeln!(out, "\n🎯 Attaque : {lo} - {hi}")
     }
 }
