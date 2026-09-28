@@ -209,12 +209,8 @@ pub fn format_defense_search_results(
     output.push_str(&format_parameters(config, None));
 
     output.push_str(&format!(
-        "🛡️ **Défense requise: {}** (probabilité de mort estimée: {:.3}%)\n",
+        "🛡️ **Défense requise: {}** (probabilité de mort estimée: {:.3}%)\n\n",
         search.defense, search.prob_at_defense
-    ));
-    output.push_str(&format!(
-        "🔒 Défense pour 0% de risque: {}\n\n",
-        search.safe_defense
     ));
 
     output.push_str(&format!(
@@ -1172,7 +1168,7 @@ mod tests {
         assert!(output.contains("🎯 Risque visé**: 2.5%"));
         assert!(output.contains("**Défense requise: 1180**"));
         assert!(output.contains("2.410%"));
-        assert!(output.contains("Défense pour 0% de risque: 1250"));
+        assert!(!output.contains("1250"), "the safe defense is not shown");
         assert!(output.contains("123456 simulations en 42ms"));
         assert!(!output.contains("Probabilité de mort:"));
 
