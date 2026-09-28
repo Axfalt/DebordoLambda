@@ -18,6 +18,7 @@ dependencies = [
  "lambda_runtime",
  "rand",
  "rand_mt",
+ "rayon",
  "reparo_lib",
  "reqwest",
  "serde",
