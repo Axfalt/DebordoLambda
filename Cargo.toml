@@ -1,5 +1,5 @@
 [workspace]
-members = ["reparo_lib"]
+members = ["reparo_lib", "guet_lib"]
 
 [package]
 name = "DebordoLambda"
