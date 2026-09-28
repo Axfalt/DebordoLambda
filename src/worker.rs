@@ -13,7 +13,7 @@ use debordo_lib::config::{
     format_defense_search_results, format_reparo_results, format_results, truncate_for_discord,
 };
 use debordo_lib::database;
-use debordo_lib::discord::api::send_followup;
+use debordo_lib::discord::api::{delete_original, post_followup_mentioning, send_followup};
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{
     complete_overflow_probability, overflow_probability, required_defense,
@@ -316,6 +316,41 @@ async fn reply(job: &SimulationJob, clients: &Clients, content: &str) -> Result<
     Ok(())
 }
 
+/// Discord id of the user who ran `/estimation25`.
+fn caller(job: &SimulationJob) -> Option<String> {
+    job.estimation.as_ref().and_then(|e| e.user_id.clone())
+}
+
+/// Final outcome of a run (result or failure). Editing a message never notifies a mention, so
+/// it is posted as a new message mentioning the caller and the waiting message is removed;
+/// if that post fails, the waiting message is edited instead so the outcome is never lost.
+async fn deliver(job: &SimulationJob, clients: &Clients, content: &str) -> Result<(), Error> {
+    let Some(user_id) = caller(job) else {
+        return reply(job, clients, content).await;
+    };
+    let text = truncate_for_discord(
+        &format!("<@{user_id}>\n{content}"),
+        DISCORD_MESSAGE_MAX_LENGTH,
+        "\n… (message tronqué, réponse trop longue pour Discord)",
+    );
+    let (http, app, token) = (&clients.http, &job.application_id, &job.token);
+    match post_followup_mentioning(http, app, token, &text, &user_id).await {
+        Ok(()) => {
+            if let Err(e) = delete_original(http, app, token).await {
+                info!("Could not delete the waiting message: {}", e);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            error!(
+                "Notified follow-up failed, editing the waiting message: {}",
+                e
+            );
+            reply(job, clients, content).await
+        }
+    }
+}
+
 async fn process_estimation_job(job: SimulationJob, clients: &Clients) -> Result<(), Error> {
     let Some(estimation) = job.estimation.clone() else {
         error!("Estimation job without estimation payload, skipping");
@@ -352,7 +387,7 @@ async fn check_estimation_run(
         "Estimation run {} incomplete after {} s: {}/{} parts done",
         run_id, ESTIMATION_WATCHDOG_SECS, done, parts
     );
-    reply(
+    deliver(
         job,
         clients,
         &format!(
@@ -496,6 +531,7 @@ async fn plan_estimation(
                         parts,
                         input: input.clone(),
                     },
+                    user_id: caller(job),
                 }),
                 ..Default::default()
             };
@@ -542,6 +578,7 @@ async fn plan_estimation(
                 run_id: run_id.clone(),
                 parts,
             },
+            user_id: caller(job),
         }),
         ..Default::default()
     };
@@ -588,10 +625,10 @@ async fn run_estimation_part(
     .await;
     let matches = match searched {
         Ok(Ok(Ok(matches))) => matches,
-        Ok(Ok(Err(e))) => return reply(job, clients, &format!("❌ Erreur : {e}")).await,
+        Ok(Ok(Err(e))) => return deliver(job, clients, &format!("❌ Erreur : {e}")).await,
         Ok(Err(e)) => {
             error!("Estimation part {} of {} panicked: {}", index, run_id, e);
-            return reply(
+            return deliver(
                 job,
                 clients,
                 "❌ La recherche a échoué. Veuillez réessayer.",
@@ -600,7 +637,7 @@ async fn run_estimation_part(
         }
         Err(_elapsed) => {
             error!("Estimation part {} of {} timed out", index, run_id);
-            return reply(
+            return deliver(
                 job,
                 clients,
                 "⏱️ La recherche a expiré. Veuillez réessayer.",
@@ -651,7 +688,7 @@ async fn run_estimation_part(
             Ok(None) => return Ok(()),
             Err(e) => {
                 error!("Failed to record part {} of run {}: {}", index, run_id, e);
-                return reply(
+                return deliver(
                     job,
                     clients,
                     "❌ La recherche a échoué (enregistrement impossible). Veuillez réessayer.",
@@ -667,7 +704,7 @@ async fn run_estimation_part(
         ),
         Err(e) => format!("❌ Erreur : {e}"),
     };
-    reply(job, clients, &content).await?;
+    deliver(job, clients, &content).await?;
     info!("Estimation run {} result sent to Discord", run_id);
     Ok(())
 }

@@ -1040,6 +1040,7 @@ fn estimation_plan_job(
         estimation: Some(EstimationJob {
             overrides,
             stage: EstimationStage::Plan { source },
+            user_id: interaction.user_id().map(str::to_string),
         }),
         ..Default::default()
     }

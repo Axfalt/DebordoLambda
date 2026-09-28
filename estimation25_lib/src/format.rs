@@ -1,15 +1,12 @@
 //! French result message of an estimate (Discord markdown, same layout as the bot's other
 //! commands), shared by `/estimation25` and the local CLI.
 //!
-//! The tightened attack range is the headline; the parameters and the seeds are secondary.
+//! The tightened attack range is the headline; the parameters are secondary.
 //! Everything is written straight into one `String` (`fmt::Write`), with no intermediate strings.
 
 use crate::engine::{AttackMode, future_blocks};
 use crate::inference::{Estimate, EstimationInput};
 use std::fmt::{self, Write};
-
-/// Seeds listed individually; beyond that only their count is given (Discord's 2000 chars).
-const MAX_LISTED_SEEDS: usize = 5;
 
 /// The estimate without its timing footer: callers add `-# ⏱️ …` with what they measured.
 #[must_use]
@@ -85,45 +82,14 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
     } else {
         writeln!(out, "🎯 **Attaque: {lo} - {hi}**")?;
     }
-    out.push('\n');
     Ok(())
 }
 
-/// A bound pinned by the seed (`a`) or left open between two values (`a…b`).
-struct Bound((i64, i64));
-
-impl fmt::Display for Bound {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (a, b) = self.0;
-        if a == b {
-            write!(f, "{a}")
-        } else {
-            write!(f, "{a}…{b}")
-        }
-    }
-}
-
+/// Several compatible seeds make the range a union: say how many.
 fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
-    let seeds = &estimate.seeds;
-    if seeds.len() > 1 {
-        writeln!(out, "-# {} seeds compatibles", seeds.len())?;
-    }
-    for s in seeds.iter().take(MAX_LISTED_SEEDS) {
-        let m = &s.seed;
-        writeln!(
-            out,
-            "-# 🎲 Seed {:#010x} · offsets ({}, {}) · plage cachée {} - {} · attaque {} - {}",
-            m.seed,
-            m.om0,
-            m.ox0,
-            Bound(m.tmin),
-            Bound(m.tmax),
-            s.attack.0,
-            s.attack.1
-        )?;
-    }
-    if seeds.len() > MAX_LISTED_SEEDS {
-        writeln!(out, "-# … et {} autres", seeds.len() - MAX_LISTED_SEEDS)?;
+    let count = estimate.seeds.len();
+    if count > 1 {
+        writeln!(out, "-# {count} seeds compatibles")?;
     }
     Ok(())
 }
@@ -174,7 +140,7 @@ mod tests {
         assert!(text.starts_with("## 🔭 Estimation de l'attaque du J17\n"));
         assert!(text.contains("🎯 **Attaque: 3949 - 3971**\n"));
         assert!(text.contains("• **🔭 Dernier relevé**: 3869 - 4218 (100 %)\n"));
-        assert!(text.contains("-# 🎲 Seed 0x9e76c676 · offsets (11, 10)"));
+        assert!(!text.contains("Seed 0x"));
         assert!(!text.contains("seeds compatibles"));
         assert!(!text.contains("Âmes rouges"));
     }
@@ -193,14 +159,13 @@ mod tests {
     }
 
     #[test]
-    fn test_many_seeds_are_capped() {
+    fn test_several_seeds_are_only_counted() {
         let input = EstimationInput {
             day: 17,
             ..EstimationInput::default()
         };
         let text = format_summary(&input, &estimate(8));
         assert!(text.contains("-# 8 seeds compatibles\n"));
-        assert_eq!(text.matches("-# 🎲 Seed").count(), MAX_LISTED_SEEDS);
-        assert!(text.contains("-# … et 3 autres\n"));
+        assert!(!text.contains("Seed 0x"));
     }
 }

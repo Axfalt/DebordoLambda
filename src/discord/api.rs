@@ -90,9 +90,64 @@ pub async fn create_followup_message(
     Ok(())
 }
 
+/// Body of a message that mentions (and notifies) only `user_id`.
+fn mention_body(content: &str, user_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "content": content,
+        "allowed_mentions": { "parse": [], "users": [user_id] }
+    })
+}
+
+/// Posts a new follow-up message that mentions `user_id`. Unlike an edit of the original
+/// response, a new message notifies the mentioned user.
+pub async fn post_followup_mentioning(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+    user_id: &str,
+) -> Result<(), reqwest::Error> {
+    client
+        .post(format!(
+            "https://discord.com/api/v10/webhooks/{}/{}",
+            application_id, token
+        ))
+        .json(&mention_body(content, user_id))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// Deletes the original (deferred) response of the interaction.
+pub async fn delete_original(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+) -> Result<(), reqwest::Error> {
+    client
+        .delete(followup_message_url(application_id, token))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_followup_body;
+    use super::{build_followup_body, mention_body};
+
+    #[test]
+    fn mention_body_only_allows_the_caller() {
+        let body = mention_body("<@42> prêt", "42");
+        assert_eq!(body["allowed_mentions"]["users"][0].as_str(), Some("42"));
+        assert!(
+            body["allowed_mentions"]["parse"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn adds_config_button_for_simulation_results() {

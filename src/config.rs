@@ -158,6 +158,9 @@ pub enum EstimationStage {
 pub struct EstimationJob {
     pub overrides: estimation25_lib::parse::InputOverrides,
     pub stage: EstimationStage,
+    /// Discord id of the caller, mentioned in the final message so they get notified.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// Options of the `/estimation25` slash command.
@@ -1156,6 +1159,7 @@ mod tests {
                         pandemonium: true,
                     },
                 },
+                user_id: Some("123".into()),
             }),
             ..Default::default()
         };
@@ -1176,6 +1180,7 @@ mod tests {
                         ..Default::default()
                     },
                 },
+                user_id: Some("123".into()),
             }),
             ..plan.clone()
         };
@@ -1186,6 +1191,7 @@ mod tests {
                     run_id: "abc".into(),
                     parts: 8,
                 },
+                user_id: Some("123".into()),
             }),
             ..plan.clone()
         };
