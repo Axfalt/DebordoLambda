@@ -211,11 +211,13 @@ pub fn estimation_run_id(token: &str) -> String {
     hex::encode(&Sha256::digest(token.as_bytes())[..16])
 }
 
-/// Creates the run item. Returns `false` when the run already exists (a redelivered plan job,
-/// which must not reset the run nor post over its result).
+/// Creates the run item, keeping `config` (the readings as pasteable text) for the result's
+/// "Voir la configuration" button. Returns `false` when the run already exists (a redelivered
+/// plan job, which must not reset the run nor post over its result).
 pub async fn create_estimation_run(
     run_id: &str,
     parts: u32,
+    config: &str,
     db_client: &aws_sdk_dynamodb::Client,
 ) -> Result<bool, lambda_runtime::Error> {
     let now = now_secs();
@@ -230,6 +232,7 @@ pub async fn create_estimation_run(
             AttributeValue::N((now + ESTIMATION_RUN_TTL_SECS).to_string()),
         )
         .item("matches", AttributeValue::M(Default::default()))
+        .item("config", AttributeValue::S(config.to_string()))
         .condition_expression("attribute_not_exists(run_id)")
         .send()
         .await;
@@ -249,6 +252,31 @@ pub async fn create_estimation_run(
             )))
         }
     }
+}
+
+/// Configuration (pasteable readings) of a run, `None` once the run has expired (TTL).
+pub async fn get_estimation_config(
+    run_id: &str,
+    db_client: &aws_sdk_dynamodb::Client,
+) -> Result<Option<String>, lambda_runtime::Error> {
+    let item = db_client
+        .get_item()
+        .table_name(estimation_table())
+        .key("run_id", AttributeValue::S(run_id.to_string()))
+        .projection_expression("#config")
+        .expression_attribute_names("#config", "config")
+        .send()
+        .await
+        .map_err(|e| {
+            error!("DynamoDB get_item (estimation config) failed: {}", e);
+            lambda_runtime::Error::from(format!("Database read failed: {}", e))
+        })?
+        .item;
+    Ok(item
+        .as_ref()
+        .and_then(|i| i.get("config"))
+        .and_then(|v| v.as_s().ok())
+        .cloned())
 }
 
 /// Whether part `index` may still update the waiting message: the run has not posted its

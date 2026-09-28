@@ -1,4 +1,4 @@
-//! Local CLI: `estimation25 [--api [--userkey K]] [--town_id ID] [--jour N] [--demain] [--mode M]
+//! Local CLI: `estimation25 [--api [--userkey K]] [--town_id ID] [--jour N] [--demain]
 //! [--seeds A-B] [--ames N] [--ames-veille N] [--penalite P] [--ames-max M] [FICHIER]`.
 //!
 //! Readings come from one of:
@@ -11,7 +11,7 @@
 //! range they imply is printed.
 
 use estimation25_lib::mho::{self, MhoEstimations};
-use estimation25_lib::parse::{InputOverrides, parse_bool, parse_mode};
+use estimation25_lib::parse::{InputOverrides, parse_bool};
 use estimation25_lib::{
     EstimConf, Estimate, EstimationInput, estimate, format_summary, parse_text,
 };
@@ -27,8 +27,7 @@ use std::time::{Duration, Instant};
 // `concat!` keeps the indentation (a trailing `\` in a string literal would strip it).
 const USAGE: &str = concat!(
     "Usage : estimation25 [--api [--userkey CLÉ]] [--town_id ID] [--jour N] [--demain] ",
-    "[--mode normal|hard|easy] [--seeds A-B] [--ames N] [--ames-veille N] [--penalite 0.04] ",
-    "[--ames-max 1.2] [RELEVÉS]\n",
+    "[--seeds A-B] [--ames N] [--ames-veille N] [--penalite 0.04] [--ames-max 1.2] [RELEVÉS]\n",
     "Source des relevés :\n",
     "  --town_id ID --jour N  MyHordes Optimizer, sans clé MyHordes ",
     "(Pandémonium : ajoutez --ames-max 666)\n",
@@ -94,10 +93,6 @@ fn parse_args() -> Result<Args, String> {
                 o.day = Some(parse_value("--jour", v.trim_start_matches(['J', 'j']))?);
             }
             "--demain" | "--j1" => o.future = Some(true),
-            "--mode" => {
-                let v = value("--mode")?;
-                o.mode = Some(parse_mode(&v).ok_or_else(|| format!("mode inconnu : {v}"))?);
-            }
             "--ames" => o.red_souls = Some(parse_value("--ames", &value("--ames")?)?),
             "--ames-veille" => {
                 o.planner_red_souls = Some(parse_value("--ames-veille", &value("--ames-veille")?)?);
@@ -141,7 +136,7 @@ fn run_search(
                 let secs = start.elapsed().as_secs_f64();
                 let eta = if p > 0.0 { secs / p - secs } else { 0.0 };
                 eprint!(
-                    "\rseeds : {:5.1} % ({secs:.0} s, reste ~{eta:.0} s)   ",
+                    "\rruns : {:5.1} % ({secs:.0} s, reste ~{eta:.0} s)   ",
                     p * 100.0
                 );
             }
@@ -152,7 +147,7 @@ fn run_search(
         result
     });
     let estimate = result.map_err(|e| format!("Erreur : {e}"))?;
-    Ok((estimate, format!("{total} seeds testées")))
+    Ok((estimate, format!("{total} runs testés")))
 }
 
 fn read_readings(file: Option<&str>) -> Result<String, String> {

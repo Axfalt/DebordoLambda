@@ -6,10 +6,11 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    EstimationJob, EstimationOptions, EstimationSource, EstimationStage, JobType, MAX_ITERATIONS,
-    MAX_REPARO_TOTAL_WORK, MAX_SEARCH_TOTAL_WORK, SimConfig, SimulationCitizen, SimulationJob,
-    format_conf, format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
-    parse_result_message_content, parse_risk_percent, risk_percent_from_value,
+    ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationOptions, EstimationSource, EstimationStage,
+    JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, MAX_SEARCH_TOTAL_WORK, SimConfig,
+    SimulationCitizen, SimulationJob, format_conf, format_reparo_conf, parse_reparo_modal_text,
+    parse_reparo_result_content, parse_result_message_content, parse_risk_percent,
+    risk_percent_from_value,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
@@ -102,19 +103,41 @@ async fn handler(
             )
             .await
         }
-        interaction_types::MESSAGE_COMPONENT => handle_component_interaction(interaction),
+        interaction_types::MESSAGE_COMPONENT => {
+            handle_component_interaction(interaction, &dynamodb_client).await
+        }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
 }
 
-fn handle_component_interaction(
+async fn handle_component_interaction(
     interaction: DiscordInteraction,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let custom_id = interaction
         .data
         .as_ref()
         .and_then(|d| d.custom_id.as_deref())
         .unwrap_or_default();
+
+    // `/estimation25`: the configuration lives in the run's DynamoDB item (kept 24 h).
+    if let Some(run_id) = custom_id.strip_prefix(ESTIMATION_CONFIG_BUTTON) {
+        return match database::get_estimation_config(run_id, dynamodb_client).await {
+            Ok(Some(config)) => respond_with_readings_modal(&config),
+            Ok(None) => Ok(ephemeral_message(
+                "Configuration expirée (conservée 24 h) : relancez `/estimation25`.",
+            )),
+            Err(e) => {
+                error!(
+                    "Failed to read /estimation25 configuration {}: {}",
+                    run_id, e
+                );
+                Ok(ephemeral_message(
+                    "Erreur : configuration indisponible pour le moment. Réessayez.",
+                ))
+            }
+        };
+    }
 
     if custom_id == "vconf" || custom_id.starts_with("vconf:") {
         let msg_content = interaction
@@ -969,7 +992,7 @@ async fn handle_estimation25_command(
         .unwrap_or_default();
     let opts = EstimationOptions::from_options(options);
     if opts.paste {
-        return respond_with_readings_modal(&opts.overrides);
+        return respond_with_readings_modal(&estimation_modal_prefill(&opts.overrides));
     }
 
     // The registered key fills in whatever town or day the options leave out.
@@ -1013,7 +1036,9 @@ async fn handle_estimation25_command(
             ));
         }
         // Neither a town nor a usable key: paste the readings instead.
-        (None, _) => return respond_with_readings_modal(&opts.overrides),
+        (None, _) => {
+            return respond_with_readings_modal(&estimation_modal_prefill(&opts.overrides));
+        }
     };
 
     let job = estimation_plan_job(
@@ -1055,9 +1080,6 @@ fn estimation_modal_prefill(o: &InputOverrides) -> String {
     if o.future == Some(true) {
         lines.push("demain: oui".to_string());
     }
-    if let Some(mode) = o.mode {
-        lines.push(format!("mode: {}", mode.label()));
-    }
     if let Some(n) = o.red_souls {
         lines.push(format!("âmes: {n}"));
     }
@@ -1073,11 +1095,15 @@ fn estimation_modal_prefill(o: &InputOverrides) -> String {
     lines.join("\n")
 }
 
-fn respond_with_readings_modal(
-    overrides: &InputOverrides,
-) -> Result<ApiGatewayV2httpResponse, Error> {
+/// The readings modal, pre-filled with `prefill` (option lines, or a whole configuration from the
+/// "Voir la configuration" button).
+fn respond_with_readings_modal(prefill: &str) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Responding with /estimation25 readings modal");
-    let prefill = estimation_modal_prefill(overrides);
+    let prefill = debordo_lib::config::truncate_for_discord(
+        prefill,
+        ESTIMATION_MODAL_MAX_LENGTH,
+        "\n… (tronqué)",
+    );
     let mut input = serde_json::json!({
         "type": 4, // TEXT_INPUT
         "custom_id": ESTIMATION_MODAL_INPUT,

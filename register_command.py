@@ -257,17 +257,6 @@ commands = [
                 "required": False
             },
             {
-                "name": "mode",
-                "description": "Mode d'attaque de la ville (défaut: normal)",
-                "type": 3,  # STRING
-                "required": False,
-                "choices": [
-                    {"name": "normal", "value": "normal"},
-                    {"name": "hard", "value": "hard"},
-                    {"name": "easy", "value": "easy"}
-                ]
-            },
-            {
                 "name": "no_api",
                 "description": "Ignorer la clé API enregistrée (défaut: false)",
                 "type": 5,  # BOOLEAN

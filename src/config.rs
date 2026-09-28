@@ -120,6 +120,10 @@ pub struct SimulationJob {
     pub estimation: Option<EstimationJob>,
 }
 
+/// `custom_id` prefix of the "Voir la configuration" button of an `/estimation25` result; the
+/// run id follows (its configuration is kept in the run's DynamoDB item).
+pub const ESTIMATION_CONFIG_BUTTON: &str = "vconf_est:";
+
 /// Where `/estimation25` reads the watchtower readings from.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum EstimationSource {
@@ -189,9 +193,6 @@ impl EstimationOptions {
                 "ames_veille" => o.overrides.planner_red_souls = count(v),
                 "penalite" => o.overrides.soul_penalty = v.as_f64(),
                 "ames_max" => o.overrides.soul_max = v.as_f64(),
-                "mode" => {
-                    o.overrides.mode = v.as_str().and_then(estimation25_lib::parse::parse_mode)
-                }
                 "no_api" => o.no_api = v.as_bool().unwrap_or(false),
                 "coller" => o.paste = v.as_bool().unwrap_or(false),
                 _ => {}
@@ -1125,7 +1126,6 @@ mod tests {
             make_opt("ames_veille", serde_json::json!(1)),
             make_opt("penalite", serde_json::json!(0.02)),
             make_opt("ames_max", serde_json::json!(666)),
-            make_opt("mode", serde_json::json!("hard")),
             make_opt("no_api", serde_json::json!(true)),
             make_opt("coller", serde_json::json!(true)),
         ]);
@@ -1135,7 +1135,6 @@ mod tests {
         assert_eq!((o.day, o.future), (Some(25), Some(true)));
         assert_eq!((o.red_souls, o.planner_red_souls), (Some(2), Some(1)));
         assert_eq!((o.soul_penalty, o.soul_max), (Some(0.02), Some(666.0)));
-        assert_eq!(o.mode, Some(estimation25_lib::AttackMode::Hard));
 
         let empty = EstimationOptions::from_options(&[]);
         assert_eq!(empty, EstimationOptions::default());

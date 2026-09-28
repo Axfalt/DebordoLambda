@@ -9,11 +9,14 @@ use tokio::time::{Duration, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    EstimationJob, EstimationSource, EstimationStage, JobType, SimulationJob,
-    format_defense_search_results, format_reparo_results, format_results, truncate_for_discord,
+    ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationSource, EstimationStage, JobType,
+    SimulationJob, format_defense_search_results, format_reparo_results, format_results,
+    truncate_for_discord,
 };
 use debordo_lib::database;
-use debordo_lib::discord::api::{delete_original, post_followup_mentioning, send_followup};
+use debordo_lib::discord::api::{
+    delete_original, post_followup_mentioning, send_followup, send_followup_with_button,
+};
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{
     complete_overflow_probability, overflow_probability, required_defense,
@@ -52,7 +55,7 @@ const PROGRESS_MESSAGES: [&str; 14] = [
     "⏳ Recalcule la probabilité de monter une table...",
     "⏳ Recompte le nombre de candidats à la présidentielle de 2027...",
     "⏳ Je prends bien en compte de laisser mourir Fofotre...",
-    "⏳ Recompte les seeds...",
+    "⏳ Recompte les runs...",
     "⏳ Oui bah fallait pas oublier une estimations...",
     "⏳ Analyse du ~~sanctuaire~~ zoo en cours...",
 ];
@@ -321,20 +324,45 @@ fn caller(job: &SimulationJob) -> Option<String> {
     job.estimation.as_ref().and_then(|e| e.user_id.clone())
 }
 
+/// `custom_id` of the "Voir la configuration" button of a run's result.
+fn config_button_id(run_id: &str) -> String {
+    format!("{ESTIMATION_CONFIG_BUTTON}{run_id}")
+}
+
 /// Final outcome of a run (result or failure). Editing a message never notifies a mention, so
 /// it is posted as a new message mentioning the caller and the waiting message is removed;
 /// if that post fails, the waiting message is edited instead so the outcome is never lost.
-async fn deliver(job: &SimulationJob, clients: &Clients, content: &str) -> Result<(), Error> {
+/// `button` adds the "Voir la configuration" button (results only).
+async fn deliver(
+    job: &SimulationJob,
+    clients: &Clients,
+    content: &str,
+    button: Option<&str>,
+) -> Result<(), Error> {
+    let (http, app, token) = (&clients.http, &job.application_id, &job.token);
+    let edit_waiting_message = || async {
+        match button {
+            Some(custom_id) => {
+                let content = truncate_for_discord(
+                    content,
+                    DISCORD_MESSAGE_MAX_LENGTH,
+                    "\n… (message tronqué, réponse trop longue pour Discord)",
+                );
+                send_followup_with_button(http, app, token, &content, custom_id).await?;
+                Ok(())
+            }
+            None => reply(job, clients, content).await,
+        }
+    };
     let Some(user_id) = caller(job) else {
-        return reply(job, clients, content).await;
+        return edit_waiting_message().await;
     };
     let text = truncate_for_discord(
         &format!("<@{user_id}>\n{content}"),
         DISCORD_MESSAGE_MAX_LENGTH,
         "\n… (message tronqué, réponse trop longue pour Discord)",
     );
-    let (http, app, token) = (&clients.http, &job.application_id, &job.token);
-    match post_followup_mentioning(http, app, token, &text, &user_id).await {
+    match post_followup_mentioning(http, app, token, &text, &user_id, button).await {
         Ok(()) => {
             if let Err(e) = delete_original(http, app, token).await {
                 info!("Could not delete the waiting message: {}", e);
@@ -346,7 +374,7 @@ async fn deliver(job: &SimulationJob, clients: &Clients, content: &str) -> Resul
                 "Notified follow-up failed, editing the waiting message: {}",
                 e
             );
-            reply(job, clients, content).await
+            edit_waiting_message().await
         }
     }
 }
@@ -390,24 +418,25 @@ async fn check_estimation_run(
     deliver(
         job,
         clients,
-        &format!(
-            "⏱️ La recherche n'a pas abouti ({done}/{parts} lots terminés). Veuillez réessayer."
-        ),
+        "⏱️ La recherche n'a pas abouti. Veuillez réessayer.",
+        None,
     )
     .await
 }
 
-/// Readings of the run, as the CLI would read them (MyHordes Optimizer or pasted text).
+/// Readings of the run, as the CLI would read them (MyHordes Optimizer or pasted text), with
+/// their pasteable text (kept for the result's "Voir la configuration" button).
 async fn resolve_readings(
     source: EstimationSource,
     overrides: &InputOverrides,
     http: &reqwest::Client,
-) -> Result<EstimationInput, String> {
+) -> Result<(EstimationInput, String), String> {
     let (town_id, day, pandemonium) = match source {
         EstimationSource::Text(text) => {
-            return parse_text(&text)
+            let input = parse_text(&text)
                 .into_input(overrides)
-                .map_err(|e| format!("❌ Erreur : {e}"));
+                .map_err(|e| format!("❌ Erreur : {e}"))?;
+            return Ok((input, text));
         }
         EstimationSource::Mho {
             town_id,
@@ -429,14 +458,15 @@ async fn resolve_readings(
     if pandemonium && overrides.soul_max.is_none() {
         overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
     }
-    mho::attack_input(attack_day, attack.as_ref(), eve.as_ref(), &overrides).map_err(|e| {
-        match e {
+    let input = mho::attack_input(attack_day, attack.as_ref(), eve.as_ref(), &overrides)
+        .map_err(|e| match e {
             EstimationError::NoReadings => format!(
                 "❌ MyHordes Optimizer n'a aucun relevé pour la ville {town_id} (attaque du J{attack_day})."
             ),
             e => format!("❌ Erreur : {e}"),
-        }
-    })
+        })?;
+    let config = estimation25_lib::parse::format_input_text(&input, &overrides);
+    Ok((input, config))
 }
 
 /// What the watchtower showed on `day` according to MyHordes Optimizer (`None` before day 1).
@@ -474,8 +504,8 @@ async fn plan_estimation(
     overrides: &InputOverrides,
     clients: &Clients,
 ) -> Result<(), Error> {
-    let input = match resolve_readings(source, overrides, &clients.http).await {
-        Ok(input) => input,
+    let (input, config) = match resolve_readings(source, overrides, &clients.http).await {
+        Ok(resolved) => resolved,
         Err(message) => return reply(job, clients, &message).await,
     };
     if let Err(e) = estimation25_lib::check_input(&input, &EstimConf::default()) {
@@ -493,7 +523,7 @@ async fn plan_estimation(
 
     let parts = estimation_parts();
     let run_id = database::estimation_run_id(&job.token);
-    match database::create_estimation_run(&run_id, parts, &clients.dynamodb).await {
+    match database::create_estimation_run(&run_id, parts, &config, &clients.dynamodb).await {
         Ok(true) => {}
         Ok(false) => {
             // Redelivered plan job: the run is already going (or done); leave it alone.
@@ -625,13 +655,14 @@ async fn run_estimation_part(
     .await;
     let matches = match searched {
         Ok(Ok(Ok(matches))) => matches,
-        Ok(Ok(Err(e))) => return deliver(job, clients, &format!("❌ Erreur : {e}")).await,
+        Ok(Ok(Err(e))) => return deliver(job, clients, &format!("❌ Erreur : {e}"), None).await,
         Ok(Err(e)) => {
             error!("Estimation part {} of {} panicked: {}", index, run_id, e);
             return deliver(
                 job,
                 clients,
                 "❌ La recherche a échoué. Veuillez réessayer.",
+                None,
             )
             .await;
         }
@@ -641,6 +672,7 @@ async fn run_estimation_part(
                 job,
                 clients,
                 "⏱️ La recherche a expiré. Veuillez réessayer.",
+                None,
             )
             .await;
         }
@@ -692,19 +724,25 @@ async fn run_estimation_part(
                     job,
                     clients,
                     "❌ La recherche a échoué (enregistrement impossible). Veuillez réessayer.",
+                    None,
                 )
                 .await;
             }
         };
-    let content = match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
-        Ok(estimate) => format!(
-            "{}\n-# ⏱️ 4294967296 seeds testées en {} s ({parts} lots)",
-            format_summary(&input, &estimate),
-            database::seconds_since(done.started_at)
-        ),
-        Err(e) => format!("❌ Erreur : {e}"),
-    };
-    deliver(job, clients, &content).await?;
+    let button = config_button_id(run_id);
+    let (content, button) =
+        match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
+            Ok(estimate) => (
+                format!(
+                    "{}\n-# ⏱️ 4294967296 runs testés en {} s",
+                    format_summary(&input, &estimate),
+                    database::seconds_since(done.started_at)
+                ),
+                Some(button.as_str()),
+            ),
+            Err(e) => (format!("❌ Erreur : {e}"), None),
+        };
+    deliver(job, clients, &content, button).await?;
     info!("Estimation run {} result sent to Discord", run_id);
     Ok(())
 }

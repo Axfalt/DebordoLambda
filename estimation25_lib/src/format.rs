@@ -89,7 +89,7 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
 fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
     let count = estimate.seeds.len();
     if count > 1 {
-        writeln!(out, "-# {count} seeds compatibles")?;
+        writeln!(out, "-# {count} runs compatibles")?;
     }
     Ok(())
 }
@@ -141,7 +141,7 @@ mod tests {
         assert!(text.contains("🎯 **Attaque: 3949 - 3971**\n"));
         assert!(text.contains("• **🔭 Dernier relevé**: 3869 - 4218 (100 %)\n"));
         assert!(!text.contains("Seed 0x"));
-        assert!(!text.contains("seeds compatibles"));
+        assert!(!text.contains("runs compatibles"));
         assert!(!text.contains("Âmes rouges"));
     }
 
@@ -165,7 +165,7 @@ mod tests {
             ..EstimationInput::default()
         };
         let text = format_summary(&input, &estimate(8));
-        assert!(text.contains("-# 8 seeds compatibles\n"));
+        assert!(text.contains("-# 8 runs compatibles\n"));
         assert!(!text.contains("Seed 0x"));
     }
 }

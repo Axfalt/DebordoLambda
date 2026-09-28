@@ -1,5 +1,5 @@
 //! Parsing of pasted watchtower readings, e.g. `[b][33%][/b] 2047 - 2749 🧟`,
-//! with optional `jour: 14`, `mode: hard`, `demain: oui`, `âmes: 1`, `pénalité: 0.02` lines.
+//! with optional `jour: 14`, `demain: oui`, `âmes: 1`, `pénalité: 0.02` lines.
 //!
 //! A paste may hold two sections: `Planificateur J17` (J+1 readings taken on day 17) and
 //! `Estimation J18` (today's readings). Readings before any header are today's; an `âmes: N`
@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 pub struct InputOverrides {
     pub day: Option<i64>,
     pub future: Option<bool>,
-    pub mode: Option<AttackMode>,
     pub red_souls: Option<u32>,
     pub planner_red_souls: Option<u32>,
     pub soul_penalty: Option<f64>,
@@ -25,7 +24,6 @@ pub struct InputOverrides {
 pub struct ParsedText {
     pub day: Option<i64>,
     pub future: Option<bool>,
-    pub mode: Option<AttackMode>,
     pub readings: Vec<Reading>,
     /// Readings of a `Planificateur` (J+1) section.
     pub planner: Vec<Reading>,
@@ -52,7 +50,9 @@ impl ParsedText {
     ///
     /// [`EstimationError::MissingDay`] when neither the overrides nor the text give a day.
     pub fn into_input(self, o: &InputOverrides) -> Result<EstimationInput, EstimationError> {
-        let mode = o.mode.or(self.mode).unwrap_or_default();
+        // Every town type of the game uses normal attacks except custom private towns, which
+        // the tool does not support (their `attacks` setting cannot be read).
+        let mode = AttackMode::Normal;
         let penalty = o
             .soul_penalty
             .or(self.soul_penalty)
@@ -133,22 +133,64 @@ fn parse_reading(line: &str) -> Option<Reading> {
 }
 
 #[must_use]
-pub fn parse_mode(value: &str) -> Option<AttackMode> {
-    match value.trim().to_lowercase().as_str() {
-        "normal" | "normale" => Some(AttackMode::Normal),
-        "hard" | "difficile" | "dur" | "dure" => Some(AttackMode::Hard),
-        "easy" | "facile" => Some(AttackMode::Easy),
-        _ => None,
-    }
-}
-
-#[must_use]
 pub fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_lowercase().as_str() {
         "oui" | "o" | "yes" | "y" | "true" | "vrai" | "1" => Some(true),
         "non" | "n" | "no" | "false" | "faux" | "0" => Some(false),
         _ => None,
     }
+}
+
+/// Pasteable text of an input: `overrides`' red-soul lines, then the readings in
+/// `Planificateur J… / Estimation J…` sections. [`parse_text`] reads it back into the same input,
+/// so a result can be re-run after editing (the `/estimation25` "Voir la configuration" button).
+#[must_use]
+pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) -> String {
+    use std::fmt::Write as _;
+
+    fn section(out: &mut String, title: &str, readings: &[Reading]) {
+        out.push_str(title);
+        out.push('\n');
+        for r in readings {
+            let _ = writeln!(out, "{}% : {} - {}", r.pct, r.min, r.max);
+        }
+    }
+
+    let mut out = String::with_capacity(64 + 24 * (input.readings.len() + input.planner.len()));
+    if let Some(n) = overrides.red_souls {
+        let _ = writeln!(out, "âmes: {n}");
+    }
+    if let Some(n) = overrides.planner_red_souls {
+        let _ = writeln!(out, "âmes veille: {n}");
+    }
+    if let Some(p) = overrides.soul_penalty {
+        let _ = writeln!(out, "pénalité: {p}");
+    }
+    if let Some(m) = overrides.soul_max {
+        let _ = writeln!(out, "âmes max: {m}");
+    }
+    if input.future {
+        // A J+1 estimate: its readings were taken on `day`.
+        section(
+            &mut out,
+            &format!("Planificateur J{}", input.day),
+            &input.readings,
+        );
+    } else {
+        if !input.planner.is_empty() {
+            section(
+                &mut out,
+                &format!("Planificateur J{}", input.day - 1),
+                &input.planner,
+            );
+        }
+        section(
+            &mut out,
+            &format!("Estimation J{}", input.day),
+            &input.readings,
+        );
+    }
+    out
 }
 
 /// A decimal value, with `.` or `,` as separator.
@@ -216,9 +258,6 @@ pub fn parse_text(text: &str) -> ParsedText {
                     .first()
                     .map(|&(_, _, d)| parsed.day = Some(d))
                     .is_some(),
-                "mode" | "attaques" | "attaque" => {
-                    parse_mode(value).map(|m| parsed.mode = Some(m)).is_some()
-                }
                 "demain" | "j+1" | "futur" | "future" => {
                     parse_bool(value).map(|b| parsed.future = Some(b)).is_some()
                 }
@@ -271,10 +310,9 @@ mod tests {
 
     #[test]
     fn test_parse_text_keys_and_readings() {
-        let text = "jour: 14\nMode = hard\ndemain: oui\n\n[b][33%][/b] 2047 - 2749 🧟\nblabla\n[b][100%][/b] 2089 - 2361 🧟\n";
+        let text = "jour: 14\ndemain: oui\n\n[b][33%][/b] 2047 - 2749 🧟\nblabla\n[b][100%][/b] 2089 - 2361 🧟\n";
         let parsed = parse_text(text);
         assert_eq!(parsed.day, Some(14));
-        assert_eq!(parsed.mode, Some(AttackMode::Hard));
         assert_eq!(parsed.future, Some(true));
         assert_eq!(parsed.readings.len(), 2);
         assert_eq!(parsed.ignored, vec!["blabla".to_string()]);
@@ -345,6 +383,29 @@ mod tests {
         let input = parsed.into_input(&InputOverrides::default()).unwrap();
         // 1 + 0.04 × 10 = 1.4, above the default cap of 1.2 but below 666.
         assert!((input.soul_factor - 1.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_input_text_roundtrips() {
+        let overrides = InputOverrides {
+            red_souls: Some(1),
+            soul_max: Some(666.0),
+            ..InputOverrides::default()
+        };
+        let today = parse_text(TWO_SECTIONS).into_input(&overrides).unwrap();
+        let text = format_input_text(&today, &overrides);
+        let back = parse_text(&text)
+            .into_input(&InputOverrides::default())
+            .unwrap();
+        assert_eq!(back, today);
+
+        let future = parse_text("Planificateur J17\n0% : 4060 - 5340\n100% : 4180 - 4580\n")
+            .into_input(&InputOverrides::default())
+            .unwrap();
+        let back = parse_text(&format_input_text(&future, &InputOverrides::default()))
+            .into_input(&InputOverrides::default())
+            .unwrap();
+        assert_eq!(back, future);
     }
 
     #[test]
