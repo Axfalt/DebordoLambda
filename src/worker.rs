@@ -568,9 +568,8 @@ async fn run_estimation_part(
     };
     let content = match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
         Ok(estimate) => format!(
-            "{}\n-# {} seed(s) compatible(s) sur 4294967296 testés ({parts} lots, {} s)",
+            "{}\n-# ⏱️ 4294967296 seeds testés en {} s ({parts} lots)",
             format_summary(&input, &estimate),
-            estimate.seeds.len(),
             database::seconds_since(done.started_at)
         ),
         Err(e) => format!("❌ Erreur : {e}"),

@@ -152,11 +152,7 @@ fn run_search(
         result
     });
     let estimate = result.map_err(|e| format!("Erreur : {e}"))?;
-    let footer = format!(
-        "{} seed(s) compatible(s) sur {total} testés",
-        estimate.seeds.len()
-    );
-    Ok((estimate, footer))
+    Ok((estimate, format!("{total} seeds testés")))
 }
 
 fn read_readings(file: Option<&str>) -> Result<String, String> {
@@ -337,7 +333,7 @@ fn run() -> Result<(), String> {
     let start = Instant::now();
     let (estimate, footer) = run_search(&input, args.seeds.clone())?;
     println!("{}", format_summary(&input, &estimate));
-    println!("-# {footer}, {:.1} s", start.elapsed().as_secs_f64());
+    println!("-# ⏱️ {footer} en {:.1} s", start.elapsed().as_secs_f64());
     Ok(())
 }
 
