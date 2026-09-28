@@ -146,6 +146,12 @@ pub enum EstimationStage {
         parts: u32,
         input: estimation25_lib::EstimationInput,
     },
+    /// Delayed check: reports the run as failed if it has not posted its result by then (a part
+    /// lost to throttling or crashing would otherwise leave the waiting message forever).
+    Watchdog {
+        run_id: String,
+        parts: u32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -1173,7 +1179,17 @@ mod tests {
             }),
             ..plan.clone()
         };
-        for job in [plan, part] {
+        let watchdog = SimulationJob {
+            estimation: Some(EstimationJob {
+                overrides: Default::default(),
+                stage: EstimationStage::Watchdog {
+                    run_id: "abc".into(),
+                    parts: 8,
+                },
+            }),
+            ..plan.clone()
+        };
+        for job in [plan, part, watchdog] {
             let json = serde_json::to_string(&job).unwrap();
             let back: SimulationJob = serde_json::from_str(&json).unwrap();
             assert_eq!(back.job_type, JobType::Estimation);

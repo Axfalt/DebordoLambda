@@ -332,6 +332,46 @@ pub async fn record_estimation_part(
     }))
 }
 
+/// Claims the right to post for a run that has not posted yet (the watchdog). Returns the number
+/// of finished parts, or `None` when the result (or another report) was already posted.
+pub async fn claim_estimation_run(
+    run_id: &str,
+    db_client: &aws_sdk_dynamodb::Client,
+) -> Result<Option<usize>, lambda_runtime::Error> {
+    let claimed = db_client
+        .update_item()
+        .table_name(estimation_table())
+        .key("run_id", AttributeValue::S(run_id.to_string()))
+        .update_expression("SET posted = :true")
+        .condition_expression("attribute_exists(run_id) AND attribute_not_exists(posted)")
+        .expression_attribute_values(":true", AttributeValue::Bool(true))
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
+        .send()
+        .await;
+    match claimed {
+        Ok(out) => Ok(Some(
+            out.attributes
+                .as_ref()
+                .and_then(|a| a.get("done"))
+                .and_then(|v| v.as_ns().ok())
+                .map_or(0, Vec::len),
+        )),
+        Err(e)
+            if e.as_service_error()
+                .is_some_and(|s| s.is_conditional_check_failed_exception()) =>
+        {
+            Ok(None)
+        }
+        Err(e) => {
+            error!("DynamoDB update_item (estimation watchdog) failed: {}", e);
+            Err(lambda_runtime::Error::from(format!(
+                "Database write failed: {}",
+                e
+            )))
+        }
+    }
+}
+
 /// Seconds elapsed since `started_at` (for the result footer).
 pub fn seconds_since(started_at: u64) -> u64 {
     now_secs().saturating_sub(started_at)

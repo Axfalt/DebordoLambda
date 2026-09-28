@@ -33,6 +33,9 @@ const ESTIMATION_TIMEOUT_SECS: u64 = 280;
 /// 8 fits the free tier's 10 concurrent executions in a single wave, while the worker's SQS
 /// trigger (maximum concurrency 8) leaves 2 slots for the receiver.
 const DEFAULT_ESTIMATION_PARTS: u32 = 8;
+/// Delay of the watchdog of a run: well past a normal run, within Discord's 15 minutes to edit
+/// the interaction reply (and SQS's 900 s maximum delay).
+const ESTIMATION_WATCHDOG_SECS: i32 = 600;
 /// `modifiers.red_soul_max_factor` of Pandemonium towns.
 const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
@@ -328,7 +331,35 @@ async fn process_estimation_job(job: SimulationJob, clients: &Clients) -> Result
             parts,
             input,
         } => run_estimation_part(&job, &run_id, index, parts, input, clients).await,
+        EstimationStage::Watchdog { run_id, parts } => {
+            check_estimation_run(&job, &run_id, parts, clients).await
+        }
     }
+}
+
+/// Watchdog: if the run has not posted its result yet, it never will (a part was lost or
+/// failed): replace the waiting message with an error.
+async fn check_estimation_run(
+    job: &SimulationJob,
+    run_id: &str,
+    parts: u32,
+    clients: &Clients,
+) -> Result<(), Error> {
+    let Some(done) = database::claim_estimation_run(run_id, &clients.dynamodb).await? else {
+        return Ok(());
+    };
+    error!(
+        "Estimation run {} incomplete after {} s: {}/{} parts done",
+        run_id, ESTIMATION_WATCHDOG_SECS, done, parts
+    );
+    reply(
+        job,
+        clients,
+        &format!(
+            "⏱️ La recherche n'a pas abouti ({done}/{parts} lots terminés). Veuillez réessayer."
+        ),
+    )
+    .await
 }
 
 /// Readings of the run, as the CLI would read them (MyHordes Optimizer or pasted text).
@@ -488,6 +519,32 @@ async fn plan_estimation(
         }
     }
     info!("Estimation run {} fanned out to {} parts", run_id, parts);
+
+    // Delayed check, so a lost or failed part cannot leave the waiting message forever.
+    let watchdog = SimulationJob {
+        token: job.token.clone(),
+        application_id: job.application_id.clone(),
+        job_type: JobType::Estimation,
+        estimation: Some(EstimationJob {
+            overrides: overrides.clone(),
+            stage: EstimationStage::Watchdog {
+                run_id: run_id.clone(),
+                parts,
+            },
+        }),
+        ..Default::default()
+    };
+    if let Err(e) = clients
+        .sqs
+        .send_message()
+        .queue_url(queue_url)
+        .message_body(serde_json::to_string(&watchdog)?)
+        .delay_seconds(ESTIMATION_WATCHDOG_SECS)
+        .send()
+        .await
+    {
+        error!("Failed to schedule the watchdog of run {}: {}", run_id, e);
+    }
     Ok(())
 }
 
@@ -563,11 +620,20 @@ async fn run_estimation_part(
         info!("Progress update of part {} skipped: {}", index, e);
     }
 
-    let Some(done) =
-        database::record_estimation_part(run_id, index, &matches, &clients.dynamodb).await?
-    else {
-        return Ok(());
-    };
+    let done =
+        match database::record_estimation_part(run_id, index, &matches, &clients.dynamodb).await {
+            Ok(Some(done)) => done,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                error!("Failed to record part {} of run {}: {}", index, run_id, e);
+                return reply(
+                    job,
+                    clients,
+                    "❌ La recherche a échoué (enregistrement impossible). Veuillez réessayer.",
+                )
+                .await;
+            }
+        };
     let content = match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
         Ok(estimate) => format!(
             "{}\n-# ⏱️ 4294967296 seeds testés en {} s ({parts} lots)",
