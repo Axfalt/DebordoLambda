@@ -211,13 +211,15 @@ pub fn estimation_run_id(token: &str) -> String {
     hex::encode(&Sha256::digest(token.as_bytes())[..16])
 }
 
+/// Creates the run item. Returns `false` when the run already exists (a redelivered plan job,
+/// which must not reset the run nor post over its result).
 pub async fn create_estimation_run(
     run_id: &str,
     parts: u32,
     db_client: &aws_sdk_dynamodb::Client,
-) -> Result<(), lambda_runtime::Error> {
+) -> Result<bool, lambda_runtime::Error> {
     let now = now_secs();
-    db_client
+    let created = db_client
         .put_item()
         .table_name(estimation_table())
         .item("run_id", AttributeValue::S(run_id.to_string()))
@@ -228,13 +230,63 @@ pub async fn create_estimation_run(
             AttributeValue::N((now + ESTIMATION_RUN_TTL_SECS).to_string()),
         )
         .item("matches", AttributeValue::M(Default::default()))
+        .condition_expression("attribute_not_exists(run_id)")
         .send()
-        .await
-        .map_err(|e| {
+        .await;
+    match created {
+        Ok(_) => Ok(true),
+        Err(e)
+            if e.as_service_error()
+                .is_some_and(|s| s.is_conditional_check_failed_exception()) =>
+        {
+            Ok(false)
+        }
+        Err(e) => {
             error!("DynamoDB put_item (estimation run) failed: {}", e);
-            lambda_runtime::Error::from(format!("Database write failed: {}", e))
-        })?;
-    Ok(())
+            Err(lambda_runtime::Error::from(format!(
+                "Database write failed: {}",
+                e
+            )))
+        }
+    }
+}
+
+/// Whether part `index` may still update the waiting message: the run has not posted its
+/// result and this part was not recorded before (a redelivered copy of a finished part must not
+/// overwrite the result posted since).
+pub async fn may_show_progress(
+    run_id: &str,
+    index: u32,
+    db_client: &aws_sdk_dynamodb::Client,
+) -> Result<bool, lambda_runtime::Error> {
+    let checked = db_client
+        .update_item()
+        .table_name(estimation_table())
+        .key("run_id", AttributeValue::S(run_id.to_string()))
+        .update_expression("SET last_progress = :part")
+        .condition_expression(
+            "attribute_exists(run_id) AND attribute_not_exists(posted) \
+             AND NOT contains(done, :part)",
+        )
+        .expression_attribute_values(":part", AttributeValue::N(index.to_string()))
+        .send()
+        .await;
+    match checked {
+        Ok(_) => Ok(true),
+        Err(e)
+            if e.as_service_error()
+                .is_some_and(|s| s.is_conditional_check_failed_exception()) =>
+        {
+            Ok(false)
+        }
+        Err(e) => {
+            error!("DynamoDB update_item (estimation progress) failed: {}", e);
+            Err(lambda_runtime::Error::from(format!(
+                "Database write failed: {}",
+                e
+            )))
+        }
+    }
 }
 
 /// All parts of a run are done: the merged matches, handed to exactly one caller.

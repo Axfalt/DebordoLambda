@@ -458,14 +458,25 @@ async fn plan_estimation(
 
     let parts = estimation_parts();
     let run_id = database::estimation_run_id(&job.token);
-    if let Err(e) = database::create_estimation_run(&run_id, parts, &clients.dynamodb).await {
-        error!("Failed to create estimation run {}: {}", run_id, e);
-        return reply(
-            job,
-            clients,
-            "❌ La recherche n'a pas pu démarrer. Réessayez.",
-        )
-        .await;
+    match database::create_estimation_run(&run_id, parts, &clients.dynamodb).await {
+        Ok(true) => {}
+        Ok(false) => {
+            // Redelivered plan job: the run is already going (or done); leave it alone.
+            info!(
+                "Estimation run {} already exists, skipping duplicate plan",
+                run_id
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            error!("Failed to create estimation run {}: {}", run_id, e);
+            return reply(
+                job,
+                clients,
+                "❌ La recherche n'a pas pu démarrer. Réessayez.",
+            )
+            .await;
+        }
     }
     reply(job, clients, progress_message(&run_id, 0)).await?;
 
@@ -607,17 +618,31 @@ async fn run_estimation_part(
     );
 
     // Rotate the waiting message *before* recording the part: the result is only posted once
-    // every part is recorded, so it can never be overwritten by a late progress update.
+    // every part is recorded, so a first delivery can never overwrite it. A redelivered copy of
+    // an already recorded part (or any part once the result is posted) must not touch the
+    // message: `may_show_progress` checks both atomically.
     // Best effort: parts finishing together may hit Discord's rate limit.
-    if let Err(e) = send_followup(
-        &clients.http,
-        &job.application_id,
-        &job.token,
-        progress_message(run_id, index + 1),
-    )
-    .await
-    {
-        info!("Progress update of part {} skipped: {}", index, e);
+    match database::may_show_progress(run_id, index, &clients.dynamodb).await {
+        Ok(true) => {
+            if let Err(e) = send_followup(
+                &clients.http,
+                &job.application_id,
+                &job.token,
+                progress_message(run_id, index + 1),
+            )
+            .await
+            {
+                info!("Progress update of part {} skipped: {}", index, e);
+            }
+        }
+        Ok(false) => info!(
+            "Part {} of run {} already recorded or run posted: no progress update",
+            index, run_id
+        ),
+        Err(e) => info!(
+            "Progress check of part {} failed, skipping update: {}",
+            index, e
+        ),
     }
 
     let done =
