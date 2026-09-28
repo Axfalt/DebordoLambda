@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_ITERATIONS: u32 = 10_000_000;
 pub const MAX_REPARO_TOTAL_WORK: u64 = 20_000_000;
-/// Iterations × TDG width allowed per evaluation of a defense search, which
-/// runs about 15 evaluations.
+/// Iterations × TDG width allowed for a defense search, which runs a rough pass
+/// and a few full-iteration simulations.
 pub const MAX_SEARCH_TOTAL_WORK: u64 = 5_000_000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

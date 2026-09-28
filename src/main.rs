@@ -978,7 +978,7 @@ async fn enqueue_simulation(
     Ok(build_json_response(200, &response))
 }
 
-/// A defense search runs about 15 simulations, so it gets a stricter work limit.
+/// A defense search runs several simulations, so it gets a stricter work limit.
 fn defense_search_work_error(job: &SimulationJob) -> Option<String> {
     let config = &job.config;
     if job.job_type != JobType::Debordo || config.target_death.is_none() {
