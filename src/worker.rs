@@ -821,7 +821,7 @@ async fn run_estimation_part(
         match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
             Ok(estimate) => (
                 format!(
-                    "{}\n-# ⏱️ 4294967296 runs testés en {} s",
+                    "{}\n-# ⏱️ 4294967296 runs testées en {} s",
                     format_summary(&input, &estimate),
                     database::seconds_since(done.started_at)
                 ),

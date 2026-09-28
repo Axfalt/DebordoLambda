@@ -152,7 +152,7 @@ fn run_search(
         result
     });
     let estimate = result.map_err(|e| format!("Erreur : {e}"))?;
-    Ok((estimate, format!("{total} runs testés")))
+    Ok((estimate, format!("{total} runs testées")))
 }
 
 fn read_readings(file: Option<&str>) -> Result<String, String> {
