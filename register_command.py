@@ -211,6 +211,72 @@ commands = [
         ]
     },
     {
+        "name": "estimation25",
+        "description": "Trouve la seed de la tour de guet et la plage d'attaque exacte",
+        "options": [
+            {
+                "name": "town_id",
+                "description": "Identifiant de la ville (relevés MyHordes Optimizer, sans clé API)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "day",
+                "description": "Jour actuel de la ville (requis avec town_id sans clé API)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "demain",
+                "description": "Estimer l'attaque de demain (relevés J+1 du planificateur) (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            },
+            {
+                "name": "ames",
+                "description": "Âmes rouges en ville (défaut: 0)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "ames_veille",
+                "description": "Âmes rouges lors des relevés J+1 de la veille (défaut: comme ames)",
+                "type": 4,  # INTEGER
+                "required": False
+            },
+            {
+                "name": "penalite",
+                "description": "Pénalité par âme rouge (défaut: 0.04, 0.02 avec l'âme bleue niveau 2)",
+                "type": 10,  # NUMBER
+                "required": False
+            },
+            {
+                "name": "penalite_veille",
+                "description": "Pénalité par âme rouge lors des relevés J+1 de la veille (défaut: comme penalite)",
+                "type": 10,  # NUMBER
+                "required": False
+            },
+            {
+                "name": "ames_max",
+                "description": "Plafond du facteur des âmes rouges (défaut: 1.2, 666 en Pandémonium)",
+                "type": 10,  # NUMBER
+                "required": False
+            },
+            {
+                "name": "no_api",
+                "description": "Ignorer la clé API enregistrée (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            },
+            {
+                "name": "coller",
+                "description": "Coller les relevés dans un formulaire au lieu de les récupérer (défaut: false)",
+                "type": 5,  # BOOLEAN
+                "required": False
+            }
+        ]
+    },
+    {
         "name": "register-key",
         "description": "Enregistre votre ExternalID MyHordes de manière sécurisée",
         "options": []

@@ -66,6 +66,7 @@ jobs:
             --env-var DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }} \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
             --env-var USER_TABLE_NAME=UserExternalIds-dev \
+            --env-var ESTIMATION_TABLE_NAME=EstimationRuns-dev \
             ${{ vars.LAMBDA_RECEIVER_FUNCTION_NAME || 'DebordoLambda-dev' }}
 
       - name: Deploy Dev Worker Lambda
@@ -75,6 +76,8 @@ jobs:
             --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --timeout 300 \
+            --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
+            --env-var ESTIMATION_TABLE_NAME=EstimationRuns-dev \
             ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker-dev' }}
 
   register:

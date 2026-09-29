@@ -6,16 +6,18 @@ use std::cmp;
 use tracing::{error, info};
 
 use debordo_lib::config::{
-    JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK, MAX_SEARCH_TOTAL_WORK, SimConfig,
-    SimulationCitizen, SimulationJob, format_conf, format_reparo_conf, parse_reparo_modal_text,
-    parse_reparo_result_content, parse_result_message_content, parse_risk_percent,
-    risk_percent_from_value,
+    ESTIMATION_CANCEL_BUTTON, ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationOptions,
+    EstimationSource, EstimationStage, JobType, MAX_ITERATIONS, MAX_REPARO_TOTAL_WORK,
+    MAX_SEARCH_TOTAL_WORK, SimConfig, SimulationCitizen, SimulationJob, format_conf,
+    format_reparo_conf, parse_reparo_modal_text, parse_reparo_result_content,
+    parse_result_message_content, parse_risk_percent, risk_percent_from_value,
 };
 use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
     verify_discord_signature,
 };
 use debordo_lib::{database, myhordes};
+use estimation25_lib::parse::InputOverrides;
 
 async fn handler(
     event: LambdaEvent<ApiGatewayV2httpRequest>,
@@ -69,6 +71,16 @@ async fn handler(
                 handle_register_key_command()
             } else if cmd_name == "reparo" {
                 handle_reparo_command(interaction, &dynamodb_client, &ssm_client, http_client).await
+            } else if cmd_name == "estimation25" {
+                handle_estimation25_command(
+                    interaction,
+                    &sqs_client,
+                    &queue_url,
+                    &dynamodb_client,
+                    &ssm_client,
+                    http_client,
+                )
+                .await
             } else {
                 handle_command(
                     interaction,
@@ -91,19 +103,72 @@ async fn handler(
             )
             .await
         }
-        interaction_types::MESSAGE_COMPONENT => handle_component_interaction(interaction),
+        interaction_types::MESSAGE_COMPONENT => {
+            handle_component_interaction(interaction, &dynamodb_client).await
+        }
         _ => Ok(build_response(400, "Unknown interaction type")),
     }
 }
 
-fn handle_component_interaction(
+async fn handle_component_interaction(
     interaction: DiscordInteraction,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     let custom_id = interaction
         .data
         .as_ref()
         .and_then(|d| d.custom_id.as_deref())
         .unwrap_or_default();
+
+    // `/estimation25` waiting message: only the caller may cancel the run.
+    if let Some(run_id) = custom_id.strip_prefix(ESTIMATION_CANCEL_BUTTON) {
+        let Some(user_id) = interaction.user_id() else {
+            return Ok(ephemeral_message("Erreur : utilisateur inconnu."));
+        };
+        return match database::cancel_estimation_run(run_id, user_id, dynamodb_client).await {
+            Ok(database::CancelOutcome::Cancelled) => {
+                info!("Estimation run {} cancelled by its caller", run_id);
+                let response = DiscordResponse {
+                    response_type: response_types::UPDATE_MESSAGE,
+                    data: Some(debordo_lib::discord::api::cancelled_message_body(
+                        "🛑 Recherche annulée.",
+                    )),
+                };
+                Ok(build_json_response(200, &response))
+            }
+            Ok(database::CancelOutcome::NotOwner) => Ok(ephemeral_message(
+                "Seul l'auteur de la commande peut annuler la recherche.",
+            )),
+            Ok(database::CancelOutcome::Finished) => {
+                Ok(ephemeral_message("La recherche est déjà terminée."))
+            }
+            Err(e) => {
+                error!("Failed to cancel /estimation25 run {}: {}", run_id, e);
+                Ok(ephemeral_message(
+                    "Erreur : annulation impossible pour le moment. Réessayez.",
+                ))
+            }
+        };
+    }
+
+    // `/estimation25`: the configuration lives in the run's DynamoDB item (kept 24 h).
+    if let Some(run_id) = custom_id.strip_prefix(ESTIMATION_CONFIG_BUTTON) {
+        return match database::get_estimation_config(run_id, dynamodb_client).await {
+            Ok(Some(config)) => respond_with_readings_modal(&config),
+            Ok(None) => Ok(ephemeral_message(
+                "Configuration expirée (conservée 24 h) : relancez `/estimation25`.",
+            )),
+            Err(e) => {
+                error!(
+                    "Failed to read /estimation25 configuration {}: {}",
+                    run_id, e
+                );
+                Ok(ephemeral_message(
+                    "Erreur : configuration indisponible pour le moment. Réessayez.",
+                ))
+            }
+        };
+    }
 
     if custom_id == "vconf" || custom_id.starts_with("vconf:") {
         let msg_content = interaction
@@ -197,6 +262,10 @@ async fn handle_modal_submit(
         return handle_reparo_modal_submit(interaction, sqs_client, queue_url).await;
     }
 
+    if custom_id == ESTIMATION_MODAL_ID {
+        return handle_estimation25_modal_submit(interaction, sqs_client, queue_url).await;
+    }
+
     if custom_id != "register_key_modal" {
         error!("Received unknown modal custom_id: {}", custom_id);
         return Ok(build_response(400, "Unknown modal custom_id"));
@@ -273,7 +342,7 @@ async fn handle_command(
         .and_then(|d| d.name.as_deref())
         .unwrap_or("debordo");
     let is_complete_cmd = command_name == "debordo-complete" || command_name == "debordo_complete";
-    
+
     let mut user_defense: Option<i32> = None;
     let mut user_tdg_min: Option<i32> = None;
     let mut user_tdg_max: Option<i32> = None;
@@ -374,7 +443,7 @@ async fn handle_command(
 
         return finalize_and_dispatch(job, sqs_client, queue_url, false).await;
     }
-    
+
     let user_id = interaction.user_id().unwrap_or("");
     let user_key = if !user_id.is_empty() {
         database::get_user_key(user_id, dynamodb_client, ssm_client)
@@ -708,7 +777,7 @@ async fn handle_reparo_command(
             .await
             .unwrap_or(None)
     };
-    
+
     let manual_fallback = || {
         (
             user_defense,
@@ -883,7 +952,7 @@ async fn handle_reparo_modal_submit(
 
     let buildings_val = interaction.get_modal_value("buildings_input").unwrap_or("");
     let (config, buildings) = parse_reparo_modal_text(buildings_val);
-    
+
     if config.defense < 0
         || config.veille < 0
         || config.tdg_min <= 0
@@ -926,8 +995,236 @@ async fn handle_reparo_modal_submit(
         citizens: Vec::new(),
         job_type: JobType::Reparation,
         buildings,
+        ..Default::default()
     };
 
+    enqueue_simulation(&job, sqs_client, queue_url).await
+}
+
+const ESTIMATION_MODAL_ID: &str = "em:estimation25";
+const ESTIMATION_MODAL_INPUT: &str = "readings_input";
+/// Limite `max_length` du champ TEXT_INPUT du modal Discord de /estimation25.
+const ESTIMATION_MODAL_MAX_LENGTH: usize = 4000;
+
+/// `/estimation25`: readings from MyHordes Optimizer (explicit `town_id` + `day`, or the town of
+/// the key registered with `/register-key`), or pasted in a modal otherwise.
+async fn handle_estimation25_command(
+    interaction: DiscordInteraction,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    dynamodb_client: &aws_sdk_dynamodb::Client,
+    ssm_client: &aws_sdk_ssm::Client,
+    http_client: &reqwest::Client,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    let options = interaction
+        .data
+        .as_ref()
+        .and_then(|d| d.options.as_deref())
+        .unwrap_or_default();
+    let opts = EstimationOptions::from_options(options);
+    if opts.paste {
+        return respond_with_readings_modal(&estimation_modal_prefill(&opts.overrides));
+    }
+
+    // The registered key fills in whatever town or day the options leave out.
+    let needs_town = opts.town_id.is_none() || opts.overrides.day.is_none();
+    let user_id = interaction.user_id().unwrap_or("");
+    let user_key = if opts.no_api || !needs_town || user_id.is_empty() {
+        None
+    } else {
+        database::get_user_key(user_id, dynamodb_client, ssm_client)
+            .await
+            .unwrap_or(None)
+    };
+    let map = match user_key {
+        Some(key) => match myhordes::fetch_mh_data(&key, ssm_client, http_client).await {
+            Ok(data) => data.map,
+            Err(e) => {
+                error!("MyHordes API call failed for /estimation25: {}", e);
+                None
+            }
+        },
+        None => None,
+    };
+
+    let town_id = opts.town_id.or(map.as_ref().and_then(|m| m.id));
+    let day = opts
+        .overrides
+        .day
+        .or(map.as_ref().map(|m| i64::from(m.days)));
+    // The Pandemonium flag describes the user's own town only.
+    let pandemonium = map
+        .as_ref()
+        .filter(|m| m.id.is_some() && m.id == town_id)
+        .and_then(|m| m.city.as_ref())
+        .is_some_and(|c| c.hard);
+
+    let (town_id, day) = match (town_id, day) {
+        (Some(town_id), Some(day)) => (town_id, day),
+        (Some(_), None) => {
+            return Ok(ephemeral_message(
+                "Erreur : précisez `day` (jour actuel de la ville) avec `town_id`, ou enregistrez votre clé via `/register-key`.",
+            ));
+        }
+        // Neither a town nor a usable key: paste the readings instead.
+        (None, _) => {
+            return respond_with_readings_modal(&estimation_modal_prefill(&opts.overrides));
+        }
+    };
+
+    let job = estimation_plan_job(
+        &interaction,
+        EstimationSource::Mho {
+            town_id,
+            day,
+            pandemonium,
+        },
+        opts.overrides,
+    );
+    enqueue_simulation(&job, sqs_client, queue_url).await
+}
+
+fn estimation_plan_job(
+    interaction: &DiscordInteraction,
+    source: EstimationSource,
+    overrides: InputOverrides,
+) -> SimulationJob {
+    SimulationJob {
+        token: interaction.token.clone().unwrap_or_default(),
+        application_id: interaction.application_id.clone().unwrap_or_default(),
+        job_type: JobType::Estimation,
+        estimation: Some(EstimationJob {
+            overrides,
+            stage: EstimationStage::Plan { source },
+            user_id: interaction.user_id().map(str::to_string),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Key lines understood by the readings parser, so the command options survive the modal.
+fn estimation_modal_prefill(o: &InputOverrides) -> String {
+    let mut text = String::new();
+    if let Some(day) = o.day {
+        text.push_str(&format!("jour: {day}\n"));
+    }
+    if o.future == Some(true) {
+        text.push_str("demain: oui\n");
+    }
+    text.push_str(&estimation25_lib::parse::format_overrides(o));
+    text.truncate(text.trim_end().len());
+    text
+}
+
+/// The readings modal, pre-filled with `prefill` (option lines, or a whole configuration from the
+/// "Voir la configuration" button).
+fn respond_with_readings_modal(prefill: &str) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Responding with /estimation25 readings modal");
+    let prefill = debordo_lib::config::truncate_for_discord(
+        prefill,
+        ESTIMATION_MODAL_MAX_LENGTH,
+        "\n… (tronqué)",
+    );
+    let mut input = serde_json::json!({
+        "type": 4, // TEXT_INPUT
+        "custom_id": ESTIMATION_MODAL_INPUT,
+        "label": "Relevés de la tour de guet",
+        "style": 2, // PARAGRAPH
+        "min_length": 1,
+        "max_length": ESTIMATION_MODAL_MAX_LENGTH,
+        "placeholder": "town_id: 8084 (sans relevés : lus sur MHO)\njour: 25\nEstimation J25\n33% : 9236 - 10804",
+        "required": true
+    });
+    if !prefill.is_empty() {
+        input["value"] = serde_json::Value::String(prefill);
+    }
+
+    let response = DiscordResponse {
+        response_type: response_types::MODAL,
+        data: Some(serde_json::json!({
+            "title": "Estimation de l'attaque",
+            "custom_id": ESTIMATION_MODAL_ID,
+            "components": [
+                {
+                    "type": 1, // ACTION_ROW
+                    "components": [input]
+                }
+            ]
+        })),
+    };
+    Ok(build_json_response(200, &response))
+}
+
+/// Error for pasted `key: value` lines the readings parser did not understand: a mistyped
+/// setting would otherwise be dropped silently and change the search.
+fn unknown_settings_message(lines: &[String]) -> String {
+    let listed: Vec<String> = lines.iter().map(|l| format!("`{l}`")).collect();
+    format!(
+        "Erreur : réglage non compris : {}.\nRéglages acceptés : `town_id`, `jour`, `âmes`, \
+         `âmes veille`, `pénalité`, `pénalité veille`, `âmes max`, `demain` \
+         (ex. `pénalité veille: 0.04`).",
+        listed.join(", ")
+    )
+}
+
+async fn handle_estimation25_modal_submit(
+    interaction: DiscordInteraction,
+    sqs_client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+) -> Result<ApiGatewayV2httpResponse, Error> {
+    info!("Handling /estimation25 readings modal submission");
+    let text = interaction
+        .get_modal_value(ESTIMATION_MODAL_INPUT)
+        .unwrap_or("")
+        .to_string();
+
+    // Same checks as the worker's plan stage, answered right away and privately.
+    let parsed = estimation25_lib::parse_text(&text);
+    if !parsed.unknown_settings.is_empty() {
+        return Ok(ephemeral_message(&unknown_settings_message(
+            &parsed.unknown_settings,
+        )));
+    }
+
+    // No reading but a town ("Voir la configuration" with the readings removed): fetch them
+    // again from MyHordes Optimizer, with the pasted settings.
+    if parsed.readings.is_empty() && parsed.planner.is_empty() {
+        if let Some(town_id) = parsed.town_id {
+            let Some(day) = parsed.day else {
+                return Ok(ephemeral_message(
+                    "Erreur : jour manquant : précisez `jour: N` avec `town_id`.",
+                ));
+            };
+            let overrides = InputOverrides {
+                future: parsed.future,
+                ..parsed.settings(&InputOverrides::default())
+            };
+            let job = estimation_plan_job(
+                &interaction,
+                EstimationSource::Mho {
+                    town_id,
+                    day,
+                    pandemonium: false,
+                },
+                overrides,
+            );
+            return enqueue_simulation(&job, sqs_client, queue_url).await;
+        }
+    }
+    let checked = parsed
+        .into_input(&InputOverrides::default())
+        .and_then(|input| {
+            estimation25_lib::check_input(&input, &estimation25_lib::EstimConf::default())
+        });
+    if let Err(e) = checked {
+        return Ok(ephemeral_message(&format!("Erreur : {e}")));
+    }
+
+    let job = estimation_plan_job(
+        &interaction,
+        EstimationSource::Text(text),
+        InputOverrides::default(),
+    );
     enqueue_simulation(&job, sqs_client, queue_url).await
 }
 
@@ -1062,7 +1359,7 @@ fn resolve_citizens(
         }
     } else {
         let mut added_names = std::collections::HashSet::new();
-        
+
         if let Some(s) = custom_defenses_str {
             for part in s.split([',', '\n', '\r']) {
                 let part = part.trim();
@@ -1086,7 +1383,7 @@ fn resolve_citizens(
                 }
             }
         }
-        
+
         let mut count = 1;
         while citizens.len() < nb_hab as usize {
             let gen_name = format!("Citoyen {}", count);

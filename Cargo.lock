@@ -14,6 +14,7 @@ dependencies = [
  "aws_lambda_events",
  "base64 0.22.1",
  "ed25519-dalek",
+ "estimation25_lib",
  "hex",
  "lambda_runtime",
  "rand",
@@ -1063,6 +1064,18 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "estimation25_lib"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "rand_mt",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2242,7 +2255,9 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http 1.4.2",
  "http-body 1.1.0",
  "http-body-util",

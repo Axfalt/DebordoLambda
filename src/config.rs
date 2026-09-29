@@ -102,6 +102,7 @@ pub enum JobType {
     #[default]
     Debordo,
     Reparation,
+    Estimation,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -115,6 +116,95 @@ pub struct SimulationJob {
     pub job_type: JobType,
     #[serde(default)]
     pub buildings: Vec<reparo_lib::SimBuilding>,
+    #[serde(default)]
+    pub estimation: Option<EstimationJob>,
+}
+
+/// `custom_id` prefix of the "Voir la configuration" button of an `/estimation25` result; the
+/// run id follows (its configuration is kept in the run's DynamoDB item).
+pub const ESTIMATION_CONFIG_BUTTON: &str = "vconf_est:";
+
+/// `custom_id` prefix of the "Annuler" button of an `/estimation25` waiting message; the run id
+/// follows.
+pub const ESTIMATION_CANCEL_BUTTON: &str = "cancel_est:";
+
+/// Where `/estimation25` reads the watchtower readings from.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum EstimationSource {
+    /// MyHordes Optimizer readings of `town_id` for the attack of `day` (`day + 1` with `demain`).
+    Mho {
+        town_id: i64,
+        day: i64,
+        pandemonium: bool,
+    },
+    /// Readings pasted in the modal, in the CLI text format.
+    Text(String),
+}
+
+/// One step of an `/estimation25` run: the plan resolves the readings and fans the 2^32 seeds
+/// out to `parts` part jobs; the last part to finish posts the result.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum EstimationStage {
+    Plan {
+        source: EstimationSource,
+    },
+    Part {
+        run_id: String,
+        index: u32,
+        parts: u32,
+        input: estimation25_lib::EstimationInput,
+    },
+    /// Delayed check: reports the run as failed if it has not posted its result by then (a part
+    /// lost to throttling or crashing would otherwise leave the waiting message forever).
+    Watchdog {
+        run_id: String,
+        parts: u32,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct EstimationJob {
+    pub overrides: estimation25_lib::parse::InputOverrides,
+    pub stage: EstimationStage,
+    /// Discord id of the caller, mentioned in the final message so they get notified.
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
+/// Options of the `/estimation25` slash command.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct EstimationOptions {
+    pub town_id: Option<i64>,
+    pub overrides: estimation25_lib::parse::InputOverrides,
+    /// Ignore the key registered with `/register-key`.
+    pub no_api: bool,
+    /// Paste the readings in a modal instead of fetching them.
+    pub paste: bool,
+}
+
+impl EstimationOptions {
+    pub fn from_options(options: &[CommandOption]) -> Self {
+        let mut o = EstimationOptions::default();
+        let int = |v: &serde_json::Value| v.as_i64();
+        let count = |v: &serde_json::Value| v.as_i64().and_then(|n| u32::try_from(n).ok());
+        for opt in options {
+            let v = &opt.value;
+            match opt.name.as_str() {
+                "town_id" => o.town_id = int(v),
+                "day" => o.overrides.day = int(v),
+                "demain" => o.overrides.future = v.as_bool(),
+                "ames" => o.overrides.red_souls = count(v),
+                "ames_veille" => o.overrides.planner_red_souls = count(v),
+                "penalite" => o.overrides.soul_penalty = v.as_f64(),
+                "penalite_veille" => o.overrides.planner_soul_penalty = v.as_f64(),
+                "ames_max" => o.overrides.soul_max = v.as_f64(),
+                "no_api" => o.no_api = v.as_bool().unwrap_or(false),
+                "coller" => o.paste = v.as_bool().unwrap_or(false),
+                _ => {}
+            }
+        }
+        o
+    }
 }
 
 pub fn format_conf(config: &SimConfig, citizens: &[SimulationCitizen]) -> String {
@@ -337,9 +427,8 @@ pub fn truncate_for_discord(text: &str, max_length: usize, notice: &str) -> Stri
 
     let mut truncated = String::new();
     for line in text.lines() {
-        let candidate_len = truncated.chars().count()
-            + line.chars().count()
-            + usize::from(!truncated.is_empty());
+        let candidate_len =
+            truncated.chars().count() + line.chars().count() + usize::from(!truncated.is_empty());
         if candidate_len > budget {
             break;
         }
@@ -482,7 +571,6 @@ pub fn parse_reparo_result_content(content: &str) -> SimConfig {
 }
 
 pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<SimulationCitizen>) {
-
     let mut config = SimConfig {
         iterations: 10000,
         day: 1,
@@ -510,17 +598,19 @@ pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<Simulation
             }
             // Format: • **Name**: 25 🛡️ — **5.000%**
             if line.starts_with("• **")
-                && let Some(colon_pos) = line.find(':') {
-                    let name = line[4..colon_pos].trim_matches('*').trim();
-                    let rest = line[colon_pos + 1..].trim();
-                    if let Some(def_str) = rest.split_whitespace().next()
-                        && let Ok(def) = def_str.parse::<i32>() {
-                            citizens.push(SimulationCitizen {
-                                name: name.to_string(),
-                                defense: def,
-                            });
-                        }
+                && let Some(colon_pos) = line.find(':')
+            {
+                let name = line[4..colon_pos].trim_matches('*').trim();
+                let rest = line[colon_pos + 1..].trim();
+                if let Some(def_str) = rest.split_whitespace().next()
+                    && let Ok(def) = def_str.parse::<i32>()
+                {
+                    citizens.push(SimulationCitizen {
+                        name: name.to_string(),
+                        defense: def,
+                    });
                 }
+            }
         } else {
             if line.contains("Risque visé") {
                 if let Some(pos) = line.rfind(':') {
@@ -528,14 +618,16 @@ pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<Simulation
                 }
             } else if line.contains("Défense min") {
                 if let Some(pos) = line.rfind(':')
-                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
-                        config.min_def = v;
-                    }
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+                {
+                    config.min_def = v;
+                }
             } else if line.contains("Défense") && line.contains("•") {
                 if let Some(pos) = line.rfind(':')
-                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
-                        config.defense = v;
-                    }
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+                {
+                    config.defense = v;
+                }
             } else if line.contains("TDG") {
                 if let Some(pos) = line.rfind(':') {
                     let val_str = line[pos + 1..].trim();
@@ -550,24 +642,28 @@ pub fn parse_result_message_content(content: &str) -> (SimConfig, Vec<Simulation
                 }
             } else if line.contains("Personnes en ville") {
                 if let Some(pos) = line.rfind(':')
-                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
-                        config.nb_hab = v;
-                    }
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+                {
+                    config.nb_hab = v;
+                }
             } else if line.contains("Jour") {
                 if let Some(pos) = line.rfind(':')
-                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
-                        config.day = v;
-                    }
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+                {
+                    config.day = v;
+                }
             } else if line.contains("Itérations") {
                 if let Some(pos) = line.rfind(':')
-                    && let Ok(v) = line[pos + 1..].trim().parse::<u32>() {
-                        config.iterations = v;
-                    }
+                    && let Ok(v) = line[pos + 1..].trim().parse::<u32>()
+                {
+                    config.iterations = v;
+                }
             } else if line.contains("Drapeaux") {
                 if let Some(pos) = line.rfind(':')
-                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>() {
-                        config.nb_drapo = v;
-                    }
+                    && let Ok(v) = line[pos + 1..].trim().parse::<i32>()
+                {
+                    config.nb_drapo = v;
+                }
             } else if line.contains("Réacteur") {
                 config.is_reactor_built = true;
             } else if line.contains("Chaos") {
@@ -729,7 +825,9 @@ mod tests {
             "Dévastée",
             "Max zombies actifs",
         ] {
-            let label_pos = output.find(label).unwrap_or_else(|| panic!("{label} line missing"));
+            let label_pos = output
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} line missing"));
             assert!(
                 iterations_pos > label_pos,
                 "Itérations (at {iterations_pos}) should come after {label} (at {label_pos})"
@@ -737,7 +835,9 @@ mod tests {
         }
 
         // Iterations must still appear before the blank line that ends the parameter block.
-        let params_end = output.find("💀 **Probabilité").expect("probability line missing");
+        let params_end = output
+            .find("💀 **Probabilité")
+            .expect("probability line missing");
         assert!(iterations_pos < params_end);
     }
 
@@ -754,11 +854,25 @@ mod tests {
         let results = vec![
             (
                 200,
-                reparo_lib::Statistics { mean: 10.0, median: 9.0, min: 2, max: 20, q1: 5.0, q3: 15.0 },
+                reparo_lib::Statistics {
+                    mean: 10.0,
+                    median: 9.0,
+                    min: 2,
+                    max: 20,
+                    q1: 5.0,
+                    q3: 15.0,
+                },
             ),
             (
                 201,
-                reparo_lib::Statistics { mean: 20.0, median: 19.0, min: 8, max: 40, q1: 15.0, q3: 25.0 },
+                reparo_lib::Statistics {
+                    mean: 20.0,
+                    median: 19.0,
+                    min: 8,
+                    max: 40,
+                    q1: 15.0,
+                    q3: 25.0,
+                },
             ),
         ];
         let buildings: Vec<reparo_lib::SimBuilding> = (0..60)
@@ -813,7 +927,14 @@ mod tests {
         };
         let results = vec![(
             200,
-            reparo_lib::Statistics { mean: 10.0, median: 9.0, min: 2, max: 20, q1: 5.0, q3: 15.0 },
+            reparo_lib::Statistics {
+                mean: 10.0,
+                median: 9.0,
+                min: 2,
+                max: 20,
+                q1: 5.0,
+                q3: 15.0,
+            },
         )];
         let buildings = vec![reparo_lib::SimBuilding {
             name: "Muraille".to_string(),
@@ -997,6 +1118,95 @@ mod tests {
         let job: SimulationJob = serde_json::from_value(old_json).unwrap();
         assert_eq!(job.job_type, JobType::Debordo);
         assert!(job.buildings.is_empty());
+        assert!(job.estimation.is_none());
+    }
+
+    #[test]
+    fn test_estimation_options_from_command_options() {
+        let opts = EstimationOptions::from_options(&[
+            make_opt("town_id", serde_json::json!(12345)),
+            make_opt("day", serde_json::json!(25)),
+            make_opt("demain", serde_json::json!(true)),
+            make_opt("ames", serde_json::json!(2)),
+            make_opt("ames_veille", serde_json::json!(1)),
+            make_opt("penalite", serde_json::json!(0.02)),
+            make_opt("penalite_veille", serde_json::json!(0.04)),
+            make_opt("ames_max", serde_json::json!(666)),
+            make_opt("no_api", serde_json::json!(true)),
+            make_opt("coller", serde_json::json!(true)),
+        ]);
+        assert_eq!(opts.town_id, Some(12345));
+        assert!(opts.no_api && opts.paste);
+        let o = &opts.overrides;
+        assert_eq!((o.day, o.future), (Some(25), Some(true)));
+        assert_eq!((o.red_souls, o.planner_red_souls), (Some(2), Some(1)));
+        assert_eq!((o.soul_penalty, o.soul_max), (Some(0.02), Some(666.0)));
+        assert_eq!(o.planner_soul_penalty, Some(0.04));
+
+        let empty = EstimationOptions::from_options(&[]);
+        assert_eq!(empty, EstimationOptions::default());
+    }
+
+    #[test]
+    fn test_estimation_jobs_roundtrip_through_json() {
+        let plan = SimulationJob {
+            token: "tok".into(),
+            application_id: "app".into(),
+            job_type: JobType::Estimation,
+            estimation: Some(EstimationJob {
+                overrides: estimation25_lib::parse::InputOverrides {
+                    red_souls: Some(1),
+                    ..Default::default()
+                },
+                stage: EstimationStage::Plan {
+                    source: EstimationSource::Mho {
+                        town_id: 42,
+                        day: 17,
+                        pandemonium: true,
+                    },
+                },
+                user_id: Some("123".into()),
+            }),
+            ..Default::default()
+        };
+        let part = SimulationJob {
+            estimation: Some(EstimationJob {
+                overrides: Default::default(),
+                stage: EstimationStage::Part {
+                    run_id: "abc".into(),
+                    index: 3,
+                    parts: 32,
+                    input: estimation25_lib::EstimationInput {
+                        day: 17,
+                        readings: vec![estimation25_lib::Reading {
+                            pct: 33,
+                            min: 3666,
+                            max: 4555,
+                        }],
+                        ..Default::default()
+                    },
+                },
+                user_id: Some("123".into()),
+            }),
+            ..plan.clone()
+        };
+        let watchdog = SimulationJob {
+            estimation: Some(EstimationJob {
+                overrides: Default::default(),
+                stage: EstimationStage::Watchdog {
+                    run_id: "abc".into(),
+                    parts: 8,
+                },
+                user_id: Some("123".into()),
+            }),
+            ..plan.clone()
+        };
+        for job in [plan, part, watchdog] {
+            let json = serde_json::to_string(&job).unwrap();
+            let back: SimulationJob = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.job_type, JobType::Estimation);
+            assert_eq!(back.estimation, job.estimation);
+        }
     }
 
     #[test]

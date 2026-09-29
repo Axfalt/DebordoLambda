@@ -47,6 +47,15 @@ In MyHordes, each night zombies attack the town. If the total zombie count excee
 - `src/config.rs` — Discord option parsing into `SimConfig`, result formatting
 - `src/discord/` — Discord protocol types, Ed25519 signature verification, follow-up API helpers (unused)
 - `test-events\*.json` — AWS Lambda Console fixtures (include the full API Gateway wrapper shape, not raw Discord payloads)
+- `estimation25_lib/` — watchtower seed search behind `/estimation25` and the local `estimation25` CLI (see below)
+
+### `/estimation25` (watchtower seed search)
+
+The watchtower offsets are shrunk by PHP's `mt_rand` after `mt_srand(seed)`, with a 32-bit seed. `estimation25_lib` replays all 2^32 seeds exactly and keeps those reproducing every reading; the seed pins the hidden range and hence the attack range. Readings come from MyHordes Optimizer (`town_id` + `day`, or the town of the key registered with `/register-key`) or are pasted in a modal (`coller`, or when neither is available).
+
+- **Fan-out**: the receiver enqueues a *plan* job; the worker resolves the readings, validates them (`check_input`), creates a run item in DynamoDB and enqueues `ESTIMATION_PARTS` (default 8) *part* jobs, one per `seed_slices` slice. Each part runs `search_seeds` on its slice and records its matches with an idempotent `UpdateItem`; the part that completes the run (and wins the conditional `posted` flag) runs `finish` and posts the result. While searching, every part reports its searched-seed count to the run item every 5 s (`report_estimation_progress`); a conditional `last_edit_at` claim lets at most one part per 5 s edit the waiting message (rotating phrase + progress bar). Reports stop once the part is recorded or the run is posted, and a part finishes its edit before recording itself, so a progress edit can never overwrite the result.
+- **Manual infra** (like the SQS queue): DynamoDB tables `EstimationRuns` / `EstimationRuns-dev` (partition key `run_id`, string; TTL on `expires_at`); the Lambda role needs `dynamodb:PutItem`/`UpdateItem` (worker) and `GetItem` + `UpdateItem` (receiver: the result's "Voir la configuration" button reopens the paste modal with the run's stored `config` (town, attack day and every red-soul setting, then the readings; submitted without readings but with `town_id` + `jour`, the readings are fetched again from MyHordes Optimizer); the waiting message's "Annuler" button, caller only, sets the run's `posted` flag so its parts cancel their search at their next progress check) on them and `sqs:SendMessage` for the worker; the SQS trigger of the worker should use **batch size 1** so parts run in parallel, and **maximum concurrency 8** so that, under the free tier's 10 concurrent executions, the receiver keeps free slots (otherwise every command is throttled while a search runs).
+- Local CLI: `cargo run --release -p estimation25_lib --bin estimation25 -- --town_id ID --jour N` (or a readings file). The Lambdas depend on `estimation25_lib` with `default-features = false` (no blocking HTTP client).
 
 ## Intentional simulation behaviors (do not "fix")
 
@@ -59,7 +68,7 @@ In MyHordes, each night zombies attack the town. If the total zombie count excee
 - Tests live inside modules compiled through **both** binary crates (`bootstrap` and `worker`), so targeted test runs should use module-path filters like `simulation::tests::...`.
 - `SKIP_SIGNATURE_CHECK=true` is the test-mode escape hatch for Lambda Console fixtures. Normal request handling expects `DISCORD_PUBLIC_KEY` and `SQS_QUEUE_URL` to be set.
 - The receiver Lambda (`bootstrap`) only verifies the signature, returns a deferred response (type 5), and enqueues a `SimulationJob` to SQS. It never runs the simulation.
-- The worker Lambda (`worker`) is SQS-triggered, runs the simulation in `spawn_blocking`, and PATCHes the Discord interaction via `discord::api::send_followup`. It must have a 300s timeout configured in AWS (set in `deploy.yml`).
+- The worker Lambda (`worker`) is SQS-triggered, runs the simulation in `spawn_blocking`, and PATCHes the Discord interaction via `discord::api::send_followup`. It must have a 300s timeout configured in AWS (set in `deploy.yml`). For `/estimation25` it also needs `SQS_QUEUE_URL` (to enqueue the parts) and `ESTIMATION_TABLE_NAME`, both set in the deploy workflows.
 - `SQS_QUEUE_URL` must be added as a GitHub Actions secret. The SQS queue visibility timeout must also be ≥ 300s (configured manually in AWS Console when creating the queue).
 - User-facing command descriptions and output text are written in French; keep additions and edits consistent with the existing language.
 - Deployment builds both binaries via `cargo lambda build --release --arm64` and deploys them separately: `DebordoLambda` (receiver) and `DebordoLambdaWorker` (worker).

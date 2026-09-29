@@ -1,0 +1,23 @@
+[package]
+name = "estimation25_lib"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["cli"]
+# HTTP client of the `estimation25` binary (`--api`); the library itself makes no network calls.
+cli = ["dep:reqwest"]
+
+[[bin]]
+name = "estimation25"
+required-features = ["cli"]
+
+[dependencies]
+rayon = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "query"], optional = true }
+
+[dev-dependencies]
+rand = "0.10.2"
+rand_mt = "6.0.3"
