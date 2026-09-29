@@ -1,15 +1,8 @@
-//! Runtime selection of the widest vector instruction set for the hot loops.
-//!
-//! Release builds target baseline x86-64 (SSE2), where `f64::floor`/`ceil` are libm calls and
-//! 32-bit multiplies vectorise poorly. Hot loops are therefore written as a [`Kernel`] and run
-//! through [`Isa::run`], which calls them from a `#[target_feature]` function: because
-//! [`Kernel::run`] implementations are `#[inline(always)]`, the loop and the `#[inline(always)]`
-//! helpers it uses are compiled for AVX2 or AVX-512 when the CPU supports it. (A closure would not
-//! do: stable Rust cannot force it to be inlined into the target-feature wrapper.) On aarch64 (the
-//! Lambda target) NEON and the rounding instructions are baseline: the portable path is optimal.
+//! Runtime dispatch of hot loops to AVX2 / AVX-512 on x86-64, whose baseline (SSE2) makes
+//! `floor`/`ceil` libm calls. aarch64 (the Lambda target) needs nothing: NEON is baseline.
 
-/// A hot loop to compile once per instruction set. Implementations must mark `run`
-/// `#[inline(always)]`.
+/// A hot loop compiled once per instruction set: `run` must be `#[inline(always)]` so it is
+/// inlined into the `#[target_feature]` wrappers (a closure cannot be forced to).
 pub(crate) trait Kernel {
     type Output;
     fn run(self) -> Self::Output;
@@ -25,7 +18,6 @@ pub(crate) enum Isa {
 }
 
 impl Isa {
-    /// Widest supported instruction set (`is_x86_feature_detected!` caches its result).
     pub(crate) fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
@@ -39,7 +31,6 @@ impl Isa {
         Isa::Portable
     }
 
-    /// Runs `kernel` compiled with this instruction set's target features.
     #[inline(always)]
     pub(crate) fn run<K: Kernel>(self, kernel: K) -> K::Output {
         match self {

@@ -187,11 +187,9 @@ pub async fn get_user_key(
     Ok(Some(plaintext))
 }
 
-// ---------------------------------------------------------------------------------------------
 // `/estimation25` runs: the 2^32 seeds are split across parallel worker invocations, which merge
 // their results in one DynamoDB item (table `ESTIMATION_TABLE_NAME`, key `run_id`, TTL
 // `expires_at`). Every write is idempotent so SQS redeliveries cannot corrupt a run.
-// ---------------------------------------------------------------------------------------------
 
 const ESTIMATION_RUN_TTL_SECS: u64 = 24 * 3600;
 
@@ -414,17 +412,17 @@ pub async fn report_estimation_progress(
 /// All parts of a run are done: the merged matches, handed to exactly one caller.
 #[derive(Debug)]
 pub struct CompletedRun {
-    pub matches: Vec<estimation25_lib::SeedMatch>,
+    pub matches: Vec<estimation25_lib::WindowMatch>,
     pub started_at: u64,
 }
 
-/// Records the matches of part `index` (which searched `searched` seeds); returns the whole run
-/// once every part is recorded, to the single caller that wins the right to post the result.
+/// Records the matching windows of part `index` (which searched `searched` seeds); returns the
+/// whole run once every part is recorded, to the single caller that wins the right to post it.
 pub async fn record_estimation_part(
     run_id: &str,
     index: u32,
     searched: u64,
-    matches: &[estimation25_lib::SeedMatch],
+    matches: &[estimation25_lib::WindowMatch],
     db_client: &aws_sdk_dynamodb::Client,
 ) -> Result<Option<CompletedRun>, lambda_runtime::Error> {
     let table = estimation_table();
@@ -492,7 +490,7 @@ pub async fn record_estimation_part(
     if let Some(slots) = attrs.get("matches").and_then(|v| v.as_m().ok()) {
         for slot in slots.values() {
             if let Ok(json) = slot.as_s() {
-                all.extend(serde_json::from_str::<Vec<estimation25_lib::SeedMatch>>(
+                all.extend(serde_json::from_str::<Vec<estimation25_lib::WindowMatch>>(
                     json,
                 )?);
             }

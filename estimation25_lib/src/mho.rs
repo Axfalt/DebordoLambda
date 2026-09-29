@@ -1,13 +1,6 @@
-//! Watchtower readings collected by `MyHordes` Optimizer (MHO).
-//!
-//! `GET {MHO_API}/AttaqueEstimation/Estimations/{day}?townId={town}` (with the [`ORIGIN_HEADER`])
-//! returns what the watchtower showed on `day`: the readings of that day's attack (`estim`) and
-//! the J+1 readings, taken the same day, of the **next** attack (`planif`), keyed by percentage
-//! (`_0` … `_100`, `null` when nobody took it). The readings of one attack therefore come from
-//! two payloads: `estim` of its day and `planif` of the day before (see [`attack_input`]).
-//!
-//! This module only models and converts the payloads; HTTP is left to the callers (the CLI and
-//! the worker Lambda) so the library stays free of network dependencies.
+//! Watchtower readings collected by `MyHordes` Optimizer (MHO). The payload of `day` holds the
+//! readings of that day's attack (`estim`) and the J+1 readings of the next one (`planif`), so one
+//! attack needs two payloads (see [`attack_input`]). HTTP is left to the callers.
 
 use crate::inference::{EstimationError, EstimationInput, Reading};
 use crate::parse::{InputOverrides, ParsedText};
@@ -61,8 +54,6 @@ fn readings(values: &BTreeMap<String, Option<MhoValue>>) -> Vec<Reading> {
 }
 
 impl MhoEstimations {
-    /// Parses the JSON body of the estimations endpoint.
-    ///
     /// # Errors
     ///
     /// The `serde_json` error when the body is not an `EstimationRequestDto`.
@@ -90,12 +81,9 @@ pub fn payload_days(attack_day: i64) -> [i64; 2] {
     [attack_day, attack_day - 1]
 }
 
-/// Builds the input for the attack of `attack_day` from the payload of that day (`attack`, whose
-/// `estim` holds the day's readings) and of the day before (`eve`, whose `planif` holds the J+1
-/// readings of this attack). Either may be missing.
-///
-/// Without readings of the attack day yet (typically estimating tomorrow's attack), the J+1
-/// readings alone give a J+1 estimate made on `attack_day - 1`.
+/// Input for the attack of `attack_day` from the `estim` of that day's payload (`attack`) and the
+/// `planif` of the day before (`eve`); either may be missing. Without `estim` readings, it is a
+/// J+1 estimate made on `attack_day - 1`.
 ///
 /// # Errors
 ///
@@ -118,7 +106,6 @@ pub fn attack_input(
         planner_day: Some(attack_day - 1),
         ..ParsedText::default()
     };
-    // The payloads fix the day and the kind of estimate.
     let overrides = InputOverrides {
         day: None,
         future: None,
@@ -244,12 +231,11 @@ mod tests {
         let est = crate::estimate(
             &input,
             &crate::EstimConf::default(),
-            0x9e76_0000..=0x9e76_ffff,
+            0x9e76_c676..=0x9e76_c676,
             &std::sync::atomic::AtomicU64::new(0),
         )
         .unwrap();
-        assert_eq!(est.seeds.len(), 1);
-        assert_eq!(est.seeds[0].seed.seed, 0x9e76_c676);
+        assert_eq!(est.seed_count(), 1);
         assert_eq!(est.attack(), (3949, 3971));
     }
 

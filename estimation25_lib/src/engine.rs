@@ -285,14 +285,19 @@ pub fn displayed_range(
 }
 
 /// Red-soul penalty per soul (`BuildingValueQuery::NightlyRedSoulPenalty`, 0.02 with the
-/// level-2 blue soul building) and default cap (`modifiers.red_soul_max_factor`, 666 in Pandemonium).
+/// level-2 blue soul building) and cap (`modifiers.red_soul_max_factor`).
 pub const DEFAULT_SOUL_PENALTY: f64 = 0.04;
 pub const DEFAULT_SOUL_MAX: f64 = 1.2;
+pub const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
 /// `$soulFactor`: multiplies both displayed bounds and the night attack.
 #[must_use]
 pub fn soul_factor(red_souls: u32, penalty: f64, max: f64) -> f64 {
     (1.0 + penalty * f64::from(red_souls)).min(max)
+}
+
+pub(crate) fn factors_differ(a: f64, b: f64) -> bool {
+    (a - b).abs() > f64::EPSILON
 }
 
 /// Rounding block of the J+1 estimate for the estimated day (`ceil(day / 5) * 5`).

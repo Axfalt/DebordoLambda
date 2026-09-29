@@ -1,10 +1,6 @@
-//! French result message of an estimate (Discord markdown, same layout as the bot's other
-//! commands), shared by `/estimation25` and the local CLI.
-//!
-//! The tightened attack range is the headline; the parameters are secondary.
-//! Everything is written straight into one `String` (`fmt::Write`), with no intermediate strings.
+//! French result message of an estimate (Discord markdown), shared by `/estimation25` and the CLI.
 
-use crate::engine::{AttackMode, future_blocks};
+use crate::engine::{AttackMode, factors_differ, future_blocks};
 use crate::inference::{Estimate, EstimationInput};
 use std::fmt::{self, Write};
 
@@ -63,14 +59,10 @@ fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estima
     if input.mode != AttackMode::Normal {
         writeln!(out, "• **⚔️ Mode**: {}", input.mode.label())?;
     }
-    // The J+1 readings of the eve can have their own factor (souls or penalty changed since).
-    let eve = input
-        .planner_soul_factor
-        .filter(|_| !input.future && !input.planner.is_empty())
-        .filter(|f| (f - input.soul_factor).abs() > f64::EPSILON);
-    // So can tonight's attack when only yesterday's J+1 readings are known.
-    let night =
-        Some(input.night_soul_factor()).filter(|f| (f - input.soul_factor).abs() > f64::EPSILON);
+    let eve = input.planner_soul_factor.filter(|&f| {
+        !input.future && !input.planner.is_empty() && factors_differ(f, input.soul_factor)
+    });
+    let night = Some(input.night_soul_factor()).filter(|&f| factors_differ(f, input.soul_factor));
     if input.has_red_souls() || eve.is_some() {
         write!(out, "• **👻 Âmes rouges**: ×{}", input.soul_factor)?;
         if let Some(f) = eve {
@@ -85,7 +77,6 @@ fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estima
     Ok(())
 }
 
-/// The headline: the attack range the watchtower readings were tightened to.
 fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
     let (lo, hi) = estimate.attack();
     if input.has_red_souls() {
@@ -100,9 +91,8 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
     Ok(())
 }
 
-/// Several compatible seeds make the range a union: say how many.
 fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
-    let count = estimate.seeds.len();
+    let count = estimate.seed_count();
     if count > 1 {
         writeln!(out, "-# {count} runs compatibles")?;
     }
@@ -112,20 +102,10 @@ fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::{Observation, Reading, SeedEstimate};
-    use crate::seed::SeedMatch;
+    use crate::inference::{Observation, Reading, WindowEstimate};
+    use crate::seed::Window;
 
-    fn estimate(seeds: usize) -> Estimate {
-        let seed = |i: usize| SeedEstimate {
-            seed: SeedMatch {
-                seed: 0x9e76_c676 + u32::try_from(i).unwrap(),
-                om0: 11,
-                ox0: 10,
-                tmin: (3759, 3759),
-                tmax: (4056, 4056),
-            },
-            attack: (3949, 3971),
-        };
+    fn estimate(seeds: u64) -> Estimate {
         Estimate {
             observations: vec![
                 Observation {
@@ -141,7 +121,16 @@ mod tests {
                     max: 4218,
                 },
             ],
-            seeds: (0..seeds).map(seed).collect(),
+            windows: vec![WindowEstimate {
+                window: Window {
+                    om0: 11,
+                    ox0: 10,
+                    tmin: (3759, 3759),
+                    tmax: (4056, 4056),
+                },
+                seeds,
+                attack: (3949, 3971),
+            }],
         }
     }
 

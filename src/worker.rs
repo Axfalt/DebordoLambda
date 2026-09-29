@@ -26,12 +26,13 @@ use debordo_lib::simulation::{
 use estimation25_lib::mho::{self, MhoEstimations};
 use estimation25_lib::parse::InputOverrides;
 use estimation25_lib::{
-    EstimConf, EstimationError, EstimationInput, format_summary, parse_text, seed_slices,
+    EstimConf, EstimationError, EstimationInput, format_summary, parse_text, seed_slice,
 };
 
 const SIMULATION_TIMEOUT_SECS: u64 = 120;
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DISCORD_MESSAGE_MAX_LENGTH: usize = 2000;
+const TRUNCATED_NOTICE: &str = "\n… (message tronqué, réponse trop longue pour Discord)";
 /// One `/estimation25` part must finish within the 300 s Lambda timeout.
 const ESTIMATION_TIMEOUT_SECS: u64 = 280;
 /// Parallel parts of an `/estimation25` run (`ESTIMATION_PARTS` overrides it).
@@ -41,9 +42,6 @@ const DEFAULT_ESTIMATION_PARTS: u32 = 8;
 /// Delay of the watchdog of a run: well past a normal run, within Discord's 15 minutes to edit
 /// the interaction reply (and SQS's 900 s maximum delay).
 const ESTIMATION_WATCHDOG_SECS: i32 = 600;
-/// `modifiers.red_soul_max_factor` of Pandemonium towns.
-const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
-/// Seeds of a whole `/estimation25` run (2^32).
 const ESTIMATION_SEEDS: u64 = 1 << 32;
 /// How often each part reports how many seeds it has searched.
 const PROGRESS_REPORT_SECS: u64 = 5;
@@ -52,12 +50,10 @@ const PROGRESS_REPORT_SECS: u64 = 5;
 const PROGRESS_EDIT_GAP_SECS: u64 = 5;
 /// A progress edit slower than this is abandoned, so it cannot land after the next one.
 const PROGRESS_EDIT_TIMEOUT_SECS: u64 = 3;
-/// Waiting-message edits per phrase: the bar moves every edit, the phrase every other one.
+/// The bar moves every edit, the phrase every other one.
 const EDITS_PER_PHRASE: u64 = 2;
-/// Cells of the progress bar.
 const PROGRESS_BAR_CELLS: u64 = 10;
 
-/// Waiting messages of an `/estimation25` run, rotated as the search goes.
 const PROGRESS_MESSAGES: [&str; 16] = [
     "⏳ Recompte les zombies avec attention...",
     "⏳ Nettoie la lunette de la tour...",
@@ -77,8 +73,8 @@ const PROGRESS_MESSAGES: [&str; 16] = [
     "⏳ Et un peu de vitriole ...",
 ];
 
-/// Waiting message number `step` of a run. Each run starts at its own place in the list (taken
-/// from its id), so consecutive runs do not all open with the same line.
+/// Waiting message number `step` of a run, starting at a place taken from its id so consecutive
+/// runs do not all open with the same line.
 fn progress_message(run_id: &str, step: u64) -> &'static str {
     let offset = run_id
         .get(..8)
@@ -88,7 +84,6 @@ fn progress_message(run_id: &str, step: u64) -> &'static str {
     PROGRESS_MESSAGES[((offset % len + step % len) % len) as usize]
 }
 
-/// Waiting message after `searched` seeds: phrase `step` and a progress bar.
 fn waiting_message(run_id: &str, step: u64, searched: u64) -> String {
     // Capped at 99 %: the search is only over once the result replaces the message.
     let pct = (searched.min(ESTIMATION_SEEDS) * 100 / ESTIMATION_SEEDS).min(99);
@@ -108,8 +103,12 @@ struct Clients {
     http: reqwest::Client,
     sqs: aws_sdk_sqs::Client,
     dynamodb: aws_sdk_dynamodb::Client,
-    /// Queue the `/estimation25` parts are sent to (`SQS_QUEUE_URL`).
+    /// Queue the `/estimation25` parts are sent to.
     queue_url: Option<String>,
+}
+
+fn discord_text(content: &str) -> String {
+    truncate_for_discord(content, DISCORD_MESSAGE_MAX_LENGTH, TRUNCATED_NOTICE)
 }
 
 async fn handler(event: LambdaEvent<SqsEvent>, clients: &Clients) -> Result<(), Error> {
@@ -315,11 +314,7 @@ async fn process_reparo_job(
         }
     };
 
-    let content = truncate_for_discord(
-        &content,
-        DISCORD_MESSAGE_MAX_LENGTH,
-        "\n… (message tronqué, réponse trop longue pour Discord)",
-    );
+    let content = discord_text(&content);
 
     send_followup(http_client, &job.application_id, &job.token, &content).await?;
 
@@ -327,10 +322,8 @@ async fn process_reparo_job(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------
 // /estimation25: the plan job resolves the readings and fans the 2^32 seeds out to part jobs;
 // each part searches its slice and records it in DynamoDB; the last one posts the result.
-// ---------------------------------------------------------------------------------------------
 
 fn estimation_parts() -> u32 {
     std::env::var("ESTIMATION_PARTS")
@@ -340,14 +333,10 @@ fn estimation_parts() -> u32 {
         .clamp(1, 256)
 }
 
-/// Replaces the deferred message with `content` (truncated to Discord's limit), removing the
-/// "Annuler" button of a waiting message.
+/// Replaces the deferred message with `content`, removing the "Annuler" button of a waiting
+/// message.
 async fn reply(job: &SimulationJob, clients: &Clients, content: &str) -> Result<(), Error> {
-    let content = truncate_for_discord(
-        content,
-        DISCORD_MESSAGE_MAX_LENGTH,
-        "\n… (message tronqué, réponse trop longue pour Discord)",
-    );
+    let content = discord_text(content);
     send_followup_without_buttons(&clients.http, &job.application_id, &job.token, &content).await?;
     Ok(())
 }
@@ -357,12 +346,29 @@ fn caller(job: &SimulationJob) -> Option<String> {
     job.estimation.as_ref().and_then(|e| e.user_id.clone())
 }
 
-/// `custom_id` of the "Annuler" button of a run's waiting message.
+/// A follow-up job of the same interaction and caller.
+fn estimation_job(
+    job: &SimulationJob,
+    overrides: &InputOverrides,
+    stage: EstimationStage,
+) -> SimulationJob {
+    SimulationJob {
+        token: job.token.clone(),
+        application_id: job.application_id.clone(),
+        job_type: JobType::Estimation,
+        estimation: Some(EstimationJob {
+            overrides: overrides.clone(),
+            stage,
+            user_id: caller(job),
+        }),
+        ..Default::default()
+    }
+}
+
 fn cancel_button_id(run_id: &str) -> String {
     format!("{ESTIMATION_CANCEL_BUTTON}{run_id}")
 }
 
-/// `custom_id` of the "Voir la configuration" button of a run's result.
 fn config_button_id(run_id: &str) -> String {
     format!("{ESTIMATION_CONFIG_BUTTON}{run_id}")
 }
@@ -381,11 +387,7 @@ async fn deliver(
     let edit_waiting_message = || async {
         match button {
             Some(custom_id) => {
-                let content = truncate_for_discord(
-                    content,
-                    DISCORD_MESSAGE_MAX_LENGTH,
-                    "\n… (message tronqué, réponse trop longue pour Discord)",
-                );
+                let content = discord_text(content);
                 send_followup_with_button(http, app, token, &content, custom_id).await?;
                 Ok(())
             }
@@ -395,11 +397,7 @@ async fn deliver(
     let Some(user_id) = caller(job) else {
         return edit_waiting_message().await;
     };
-    let text = truncate_for_discord(
-        &format!("<@{user_id}>\n{content}"),
-        DISCORD_MESSAGE_MAX_LENGTH,
-        "\n… (message tronqué, réponse trop longue pour Discord)",
-    );
+    let text = discord_text(&format!("<@{user_id}>\n{content}"));
     match post_followup_mentioning(http, app, token, &text, &user_id, button).await {
         Ok(()) => {
             if let Err(e) = delete_original(http, app, token).await {
@@ -505,7 +503,6 @@ async fn resolve_readings(
         } => (town_id, day, pandemonium),
     };
 
-    // The attack's readings are `estim` of its day and `planif` (J+1) of the day before.
     let attack_day = day + i64::from(overrides.future.unwrap_or(false));
     let [attack_payload, eve_payload] = mho::payload_days(attack_day);
     let (attack, eve) = tokio::join!(
@@ -514,10 +511,7 @@ async fn resolve_readings(
     );
     let (attack, eve) = (attack?, eve?);
 
-    let mut overrides = overrides.clone();
-    if pandemonium && overrides.soul_max.is_none() {
-        overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
-    }
+    let overrides = overrides.clone().for_town(pandemonium);
     let input = mho::attack_input(attack_day, attack.as_ref(), eve.as_ref(), &overrides)
         .map_err(|e| match e {
             EstimationError::NoReadings => format!(
@@ -529,7 +523,7 @@ async fn resolve_readings(
     Ok((input, config))
 }
 
-/// What the watchtower showed on `day` according to MyHordes Optimizer (`None` before day 1).
+/// What the watchtower showed on `day` (`None` before day 1).
 async fn fetch_mho(
     http: &reqwest::Client,
     day: i64,
@@ -624,22 +618,16 @@ async fn plan_estimation(
     for chunk in indices.chunks(10) {
         let mut entries = Vec::with_capacity(chunk.len());
         for &index in chunk {
-            let part = SimulationJob {
-                token: job.token.clone(),
-                application_id: job.application_id.clone(),
-                job_type: JobType::Estimation,
-                estimation: Some(EstimationJob {
-                    overrides: overrides.clone(),
-                    stage: EstimationStage::Part {
-                        run_id: run_id.clone(),
-                        index,
-                        parts,
-                        input: input.clone(),
-                    },
-                    user_id: caller(job),
-                }),
-                ..Default::default()
-            };
+            let part = estimation_job(
+                job,
+                overrides,
+                EstimationStage::Part {
+                    run_id: run_id.clone(),
+                    index,
+                    parts,
+                    input: input.clone(),
+                },
+            );
             entries.push(
                 SendMessageBatchRequestEntry::builder()
                     .id(index.to_string())
@@ -673,20 +661,14 @@ async fn plan_estimation(
     info!("Estimation run {} fanned out to {} parts", run_id, parts);
 
     // Delayed check, so a lost or failed part cannot leave the waiting message forever.
-    let watchdog = SimulationJob {
-        token: job.token.clone(),
-        application_id: job.application_id.clone(),
-        job_type: JobType::Estimation,
-        estimation: Some(EstimationJob {
-            overrides: overrides.clone(),
-            stage: EstimationStage::Watchdog {
-                run_id: run_id.clone(),
-                parts,
-            },
-            user_id: caller(job),
-        }),
-        ..Default::default()
-    };
+    let watchdog = estimation_job(
+        job,
+        overrides,
+        EstimationStage::Watchdog {
+            run_id: run_id.clone(),
+            parts,
+        },
+    );
     if let Err(e) = clients
         .sqs
         .send_message()
@@ -709,7 +691,7 @@ async fn run_estimation_part(
     input: EstimationInput,
     clients: &Clients,
 ) -> Result<(), Error> {
-    let Some(slice) = seed_slices(parts).into_iter().nth(index as usize) else {
+    let Some(slice) = seed_slice(index, parts) else {
         error!("Part {} out of range for {} parts", index, parts);
         return Ok(());
     };
@@ -821,7 +803,7 @@ async fn run_estimation_part(
         match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
             Ok(estimate) => (
                 format!(
-                    "{}\n-# ⏱️ 4294967296 runs testées en {} s",
+                    "{}\n-# ⏱️ {ESTIMATION_SEEDS} runs testées en {} s",
                     format_summary(&input, &estimate),
                     database::seconds_since(done.started_at)
                 ),

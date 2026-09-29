@@ -30,6 +30,6 @@ fn main() {
         "{path}: {seeds} seeds in {secs:.2} s = {:.1} M seeds/s, full sweep ≈ {:.0} s, matches: {}",
         rate / 1e6,
         (f64::from(u32::MAX) + 1.0) / rate,
-        result.map_or(0, |r| r.seeds.len())
+        result.map_or(0, |r| r.seed_count())
     );
 }

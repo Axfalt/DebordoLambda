@@ -1,16 +1,14 @@
-//! Exact inversion of the watchtower: the attack range compatible with every reading of the day.
-//!
-//! All readings of a day replay the same seeded offset path, the reading at `n` weighted citizens
-//! being that path after `n` rounds. [`estimate`] finds the seeds whose path reproduces every
-//! reading (see [`crate::seed`]); each one pins the hidden target `(tmin, tmax, om0, ox0)`, and the
-//! generator draws leading to that target give the attack range.
+//! Exact inversion of the watchtower: every reading of a day replays the same seeded offset path,
+//! so [`estimate`] finds the seeds reproducing them all (see [`crate::seed`]) and the attack
+//! range of the hidden targets they allow.
 
 use crate::engine::{
-    AttackMode, DayModel, EstimConf, HiddenTarget, future_blocks, rounds_for_percent,
+    AttackMode, DayModel, EstimConf, HiddenTarget, MAX_ROUNDS, factors_differ, future_blocks,
+    rounds_for_percent,
 };
-use crate::seed::SeedMatch;
+use crate::seed::{Window, WindowMatch};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -27,12 +25,11 @@ pub struct Reading {
 pub struct EstimationInput {
     /// Current town day.
     pub day: i64,
-    /// `true` for the J+1 estimate (watchtower upgrade), which targets `day + 1`.
+    /// J+1 estimate (watchtower upgrade), targeting `day + 1`.
     pub future: bool,
     pub mode: AttackMode,
     pub readings: Vec<Reading>,
-    /// J+1 readings taken the day before for this same attack (`future == false` only). They
-    /// replay the same seeded path as today's readings, rounded to blocks.
+    /// J+1 readings taken the day before for this same attack (`future == false` only).
     #[serde(default)]
     pub planner: Vec<Reading>,
     /// Red-soul factor of today's readings, also applied to the night attack.
@@ -41,9 +38,8 @@ pub struct EstimationInput {
     /// Red-soul factor when the planner readings were taken (defaults to `soul_factor`).
     #[serde(default)]
     pub planner_soul_factor: Option<f64>,
-    /// Red-soul factor of the night attack when it differs from the readings' (defaults to
-    /// `soul_factor`): a J+1 estimate made yesterday was displayed with yesterday's penalty,
-    /// while tonight's attack uses today's (the level-2 blue soul building may apply between).
+    /// Red-soul factor of the night attack when it differs from the readings' (a J+1 estimate
+    /// displayed with yesterday's penalty, tonight's attack using today's).
     #[serde(default)]
     pub attack_soul_factor: Option<f64>,
 }
@@ -82,11 +78,9 @@ impl EstimationInput {
         }
     }
 
-    /// Whether the readings or the night attack carry a red-soul factor.
     #[must_use]
     pub fn has_red_souls(&self) -> bool {
-        (self.soul_factor - 1.0).abs() > f64::EPSILON
-            || (self.night_soul_factor() - 1.0).abs() > f64::EPSILON
+        factors_differ(self.soul_factor, 1.0) || factors_differ(self.night_soul_factor(), 1.0)
     }
 
     /// Red-soul factor of the night attack (`NightlyHandler`: `round(zombies * soulFactor)`).
@@ -116,7 +110,6 @@ pub enum EstimationError {
     /// Today's reading and yesterday's J+1 reading at this percentage cannot share one path.
     PlannerMismatch(u32),
     Inconsistent,
-    /// The search was cancelled before covering its seeds.
     Cancelled,
 }
 
@@ -179,39 +172,36 @@ pub fn observations(input: &EstimationInput) -> Result<Vec<Observation>, Estimat
 }
 
 fn validate(readings: &[Reading]) -> Result<Vec<Observation>, EstimationError> {
-    let mut by_rounds: HashMap<usize, Reading> = HashMap::new();
-    for reading in readings {
+    let mut by_rounds = [None::<Reading>; MAX_ROUNDS + 1];
+    for &reading in readings {
         if reading.min > reading.max {
-            return Err(EstimationError::InvertedRange(*reading));
+            return Err(EstimationError::InvertedRange(reading));
         }
         let rounds =
             rounds_for_percent(reading.pct).ok_or(EstimationError::InvalidPercent(reading.pct))?;
-        match by_rounds.get(&rounds) {
-            Some(prev) if prev.min != reading.min || prev.max != reading.max => {
-                return Err(EstimationError::ConflictingReadings(*prev, *reading));
+        match by_rounds[rounds] {
+            Some(prev) if (prev.min, prev.max) != (reading.min, reading.max) => {
+                return Err(EstimationError::ConflictingReadings(prev, reading));
             }
             Some(_) => {}
-            None => {
-                by_rounds.insert(rounds, *reading);
-            }
+            None => by_rounds[rounds] = Some(reading),
         }
     }
-
-    let mut obs: Vec<Observation> = by_rounds
-        .into_iter()
-        .map(|(rounds, r)| Observation {
-            rounds,
-            pct: r.pct,
-            min: r.min,
-            max: r.max,
+    Ok(by_rounds
+        .iter()
+        .enumerate()
+        .filter_map(|(rounds, r)| {
+            r.map(|r| Observation {
+                rounds,
+                pct: r.pct,
+                min: r.min,
+                max: r.max,
+            })
         })
-        .collect();
-    obs.sort_by_key(|o| o.rounds);
-    Ok(obs)
+        .collect())
 }
 
-/// Tolerance on the unscaled bounds: exact rounding ties are accepted on both sides, since PHP's
-/// float path may land either way there.
+/// Tolerance on the unscaled bounds: PHP's float path may round exact ties either way.
 const BOUND_EPS: f64 = 1e-6;
 
 /// Observation as ranges of the unscaled bounds `tmin - tmin*om/100` and `tmax + tmax*ox/100`,
@@ -268,8 +258,8 @@ fn raw_observations(
     Ok(raw)
 }
 
-/// Calls `f(value, target)` for every generator draw whose targets lie in `[t_lo, t_hi]`.
-/// Consecutive shifts mostly give the same targets, so each run is reported once.
+/// Calls `f(value, target)` for every generator draw whose targets lie in `[t_lo, t_hi]`, once
+/// per run of consecutive shifts giving the same targets.
 fn for_each_draw(
     input: &EstimationInput,
     conf: &EstimConf,
@@ -279,20 +269,22 @@ fn for_each_draw(
     let model = DayModel::new(input.estimated_day(), input.mode, conf);
     let (value_lo, value_hi) = model.range;
 
-    // tmin <= value <= tmax, so the value lies within the outer bounds as well.
+    // tmin <= value <= tmax.
     for value in t_lo.max(value_lo)..=t_hi.min(value_hi) {
         let mut emit = |(tmin, tmax): (i64, i64)| {
             if tmin < t_lo || tmax > t_hi {
                 return;
             }
             for (om0, ox0) in model.offset_pairs(tmin, tmax) {
-                let target = HiddenTarget {
-                    tmin,
-                    tmax,
-                    om0,
-                    ox0,
-                };
-                f(value, target);
+                f(
+                    value,
+                    HiddenTarget {
+                        tmin,
+                        tmax,
+                        om0,
+                        ox0,
+                    },
+                );
             }
         };
         let mut run = model.shifted_targets(value, 0);
@@ -307,12 +299,9 @@ fn for_each_draw(
     }
 }
 
-/// Validated observations, their raw ranges and the outer `[tmin, tmax]` bounds they allow.
-type Prepared = (Vec<Observation>, Vec<RawObservation>, (i64, i64));
-
-fn prepare(input: &EstimationInput) -> Result<Prepared, EstimationError> {
-    let observations = observations(input)?;
-    let raw = raw_observations(input, &observations)?;
+/// Raw observations and the outer `[tmin, tmax]` bounds they allow.
+fn prepare(input: &EstimationInput) -> Result<(Vec<RawObservation>, (i64, i64)), EstimationError> {
+    let raw = raw_observations(input, &observations(input)?)?;
 
     // Offsets are non-negative: every displayed min is <= tmin and every displayed max >= tmax.
     let t_lo = raw
@@ -328,7 +317,7 @@ fn prepare(input: &EstimationInput) -> Result<Prepared, EstimationError> {
     if t_lo > t_hi {
         return Err(EstimationError::Inconsistent);
     }
-    Ok((observations, raw, (t_lo, t_hi)))
+    Ok((raw, (t_lo, t_hi)))
 }
 
 /// Initial offset pairs the generator can produce within the outer bounds.
@@ -344,17 +333,12 @@ fn candidate_pairs(
     pairs.into_iter().collect()
 }
 
-/// Attack values the generator can draw, per hidden target, for every target within `bounds`:
-/// `(om0, ox0)` -> `[(tmin, tmax, attack_lo, attack_hi)]`.
+/// `(om0, ox0)` -> `[(tmin, tmax, attack_lo, attack_hi)]` for every hidden target in `bounds`.
 type DrawTable = HashMap<(i64, i64), Vec<(i64, i64, i64, i64)>>;
 
-/// Hidden-target window a compatible seed allows: `(om0, ox0, tmin range, tmax range)`.
-type TargetWindow = (i64, i64, (i64, i64), (i64, i64));
-
-/// Enumerates the generator once for all compatible seeds (enumerating it per seed made
-/// sparse readings, with 10^5 compatible seeds, take tens of minutes).
+/// Enumerates the generator once for all windows.
 fn draw_table(input: &EstimationInput, conf: &EstimConf, bounds: (i64, i64)) -> DrawTable {
-    let mut attacks: HashMap<(i64, i64, i64, i64), (i64, i64)> = HashMap::new();
+    let mut attacks: HashMap<HiddenTarget, (i64, i64)> = HashMap::new();
     for_each_draw(input, conf, bounds, |value, t| {
         // Hard mode redraws the attack anywhere in [tmin, tmax].
         let (lo, hi) = if input.mode == AttackMode::Hard {
@@ -363,74 +347,79 @@ fn draw_table(input: &EstimationInput, conf: &EstimConf, bounds: (i64, i64)) -> 
             (value, value)
         };
         attacks
-            .entry((t.om0, t.ox0, t.tmin, t.tmax))
+            .entry(t)
             .and_modify(|(a, b)| (*a, *b) = ((*a).min(lo), (*b).max(hi)))
             .or_insert((lo, hi));
     });
     let mut table = DrawTable::new();
-    for ((om0, ox0, tmin, tmax), (lo, hi)) in attacks {
+    for (t, (lo, hi)) in attacks {
         table
-            .entry((om0, ox0))
+            .entry((t.om0, t.ox0))
             .or_default()
-            .push((tmin, tmax, lo, hi));
+            .push((t.tmin, t.tmax, lo, hi));
     }
     table
 }
 
-/// Attack values the generator can draw for the hidden targets a seed allows.
-fn seed_attack_range(table: &DrawTable, m: &SeedMatch) -> Option<(i64, i64)> {
+fn window_attack(table: &DrawTable, w: &Window) -> Option<(i64, i64)> {
     table
-        .get(&(m.om0, m.ox0))?
+        .get(&(w.om0, w.ox0))?
         .iter()
         .filter(|&&(tmin, tmax, _, _)| {
-            (m.tmin.0..=m.tmin.1).contains(&tmin) && (m.tmax.0..=m.tmax.1).contains(&tmax)
+            (w.tmin.0..=w.tmin.1).contains(&tmin) && (w.tmax.0..=w.tmax.1).contains(&tmax)
         })
-        .fold(None, |range, &(_, _, lo, hi)| {
-            Some(range.map_or((lo, hi), |(a, b): (i64, i64)| (a.min(lo), b.max(hi))))
-        })
+        .map(|&(_, _, lo, hi)| (lo, hi))
+        .reduce(|(a, b), (lo, hi)| (a.min(lo), b.max(hi)))
 }
 
-/// Attack range implied by one compatible seed (before the red-soul factor).
+/// Attack range the generator can draw within one window (before the red-soul factor).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SeedEstimate {
-    pub seed: SeedMatch,
+pub struct WindowEstimate {
+    pub window: Window,
+    pub seeds: u64,
     pub attack: (i64, i64),
 }
 
 #[derive(Debug, Clone)]
 pub struct Estimate {
     pub observations: Vec<Observation>,
-    /// Compatible seeds, sorted by seed.
-    pub seeds: Vec<SeedEstimate>,
+    /// Never empty, sorted by window.
+    pub windows: Vec<WindowEstimate>,
 }
 
 impl Estimate {
-    /// Union of the attack ranges of every compatible seed (before the red-soul factor).
+    /// Number of compatible (seed, initial pair) runs.
+    #[must_use]
+    pub fn seed_count(&self) -> u64 {
+        self.windows.iter().map(|w| w.seeds).sum()
+    }
+
+    /// Union of the attack ranges of every window (before the red-soul factor).
     #[must_use]
     pub fn attack(&self) -> (i64, i64) {
-        self.seeds.iter().fold((i64::MAX, i64::MIN), |(a, b), s| {
-            (a.min(s.attack.0), b.max(s.attack.1))
+        self.windows.iter().fold((i64::MAX, i64::MIN), |(a, b), w| {
+            (a.min(w.attack.0), b.max(w.attack.1))
         })
     }
 }
 
-/// Checks that the readings are usable (valid, consistent between sections, reachable by the
-/// generator) without searching any seed.
+/// Checks that the readings are valid, consistent and reachable by the generator, without
+/// searching any seed.
 ///
 /// # Errors
 ///
 /// Any validation error of [`observations`], [`EstimationError::PlannerMismatch`], or
 /// [`EstimationError::Inconsistent`] when no hidden target fits the readings' bounds.
 pub fn check_input(input: &EstimationInput, conf: &EstimConf) -> Result<(), EstimationError> {
-    let (_, _, bounds) = prepare(input)?;
+    let (_, bounds) = prepare(input)?;
     if candidate_pairs(input, conf, bounds).is_empty() {
         return Err(EstimationError::Inconsistent);
     }
     Ok(())
 }
 
-/// Seeds of `seeds` whose offset path replays every reading (possibly none). `progress` counts
-/// processed seeds; setting `cancel` (from another thread) stops the search early.
+/// Windows of the seeds of `seeds` whose offset path replays every reading (possibly none).
+/// `progress` counts processed seeds; setting `cancel` stops the search early.
 ///
 /// # Errors
 ///
@@ -442,57 +431,57 @@ pub fn search_seeds(
     seeds: RangeInclusive<u32>,
     progress: &AtomicU64,
     cancel: &AtomicBool,
-) -> Result<Vec<SeedMatch>, EstimationError> {
-    let (_, raw, bounds) = prepare(input)?;
+) -> Result<Vec<WindowMatch>, EstimationError> {
+    let (raw, bounds) = prepare(input)?;
     let pairs = candidate_pairs(input, conf, bounds);
     crate::seed::search(&raw, &pairs, bounds, conf, seeds, progress, cancel)
         .ok_or(EstimationError::Cancelled)
 }
 
-/// Attack range of each compatible seed, typically gathered by [`search_seeds`] over slices of
-/// the seed space.
+/// Attack range of the windows gathered by [`search_seeds`], typically over slices of the seed
+/// space.
 ///
 /// # Errors
 ///
-/// Any validation error of [`observations`], or [`EstimationError::Inconsistent`] when no seed
-/// was found.
+/// Any validation error of [`observations`], or [`EstimationError::Inconsistent`] when no window
+/// is left.
 pub fn finish(
     input: &EstimationInput,
     conf: &EstimConf,
-    mut matches: Vec<SeedMatch>,
+    matches: Vec<WindowMatch>,
 ) -> Result<Estimate, EstimationError> {
     let observations = observations(input)?;
-    matches.sort_unstable_by_key(|m| (m.seed, m.om0));
-    matches.dedup();
-    let bounds = matches.iter().fold((i64::MAX, i64::MIN), |(lo, hi), m| {
-        (lo.min(m.tmin.0), hi.max(m.tmax.1))
+    let mut seeds: BTreeMap<Window, u64> = BTreeMap::new();
+    for m in matches {
+        *seeds.entry(m.window).or_default() += m.seeds;
+    }
+    if seeds.is_empty() {
+        return Err(EstimationError::Inconsistent);
+    }
+    let bounds = seeds.keys().fold((i64::MAX, i64::MIN), |(lo, hi), w| {
+        (lo.min(w.tmin.0), hi.max(w.tmax.1))
     });
     let table = draw_table(input, conf, bounds);
-    // Compatible seeds mostly share a few hidden-target windows: compute each window once.
-    let mut ranges: HashMap<TargetWindow, Option<(i64, i64)>> = HashMap::new();
-    let seeds: Vec<SeedEstimate> = matches
+    let windows: Vec<WindowEstimate> = seeds
         .into_iter()
-        .filter_map(|seed| {
-            let key = (seed.om0, seed.ox0, seed.tmin, seed.tmax);
-            let attack = *ranges
-                .entry(key)
-                .or_insert_with(|| seed_attack_range(&table, &seed));
-            attack.map(|attack| SeedEstimate { seed, attack })
+        .filter_map(|(window, seeds)| {
+            Some(WindowEstimate {
+                attack: window_attack(&table, &window)?,
+                window,
+                seeds,
+            })
         })
         .collect();
-    if seeds.is_empty() {
+    if windows.is_empty() {
         return Err(EstimationError::Inconsistent);
     }
     Ok(Estimate {
         observations,
-        seeds,
+        windows,
     })
 }
 
-/// Attack range from the seeds of `seeds` whose offset path replays every reading
-/// ([`search_seeds`] then [`finish`]).
-///
-/// `seeds` is normally the full `0..=u32::MAX` range; `progress` counts processed seeds.
+/// [`search_seeds`] then [`finish`]; `seeds` is normally `0..=u32::MAX`.
 ///
 /// # Errors
 ///
@@ -511,7 +500,7 @@ pub fn estimate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{MAX_ROUNDS, displayed_range, percent_for_rounds};
+    use crate::engine::{displayed_range, percent_for_rounds};
     use crate::parse::{InputOverrides, parse_text};
     use crate::seed::php_path;
     use rand::RngExt;
@@ -554,12 +543,29 @@ mod tests {
         estimate(input, &EstimConf::default(), seeds, &AtomicU64::new(0))
     }
 
-    /// Search a small window around the seed a full 2^32 sweep found.
-    fn search_fixture(text: &str, seeds: RangeInclusive<u32>) -> Estimate {
-        let input = parse_text(text)
+    fn fixture_input(text: &str) -> EstimationInput {
+        parse_text(text)
             .into_input(&InputOverrides::default())
-            .unwrap();
-        search(&input, seeds).unwrap()
+            .unwrap()
+    }
+
+    /// The single window found around `seed` (found by a full 2^32 sweep), and `seed` alone
+    /// replays the readings.
+    fn pinned_window(text: &str, seeds: RangeInclusive<u32>, seed: u32) -> Estimate {
+        let input = fixture_input(text);
+        let est = search(&input, seeds).unwrap();
+        assert_eq!(est.seed_count(), 1);
+        assert_eq!(search(&input, seed..=seed).unwrap().windows, est.windows);
+        est
+    }
+
+    fn window(om0: i64, ox0: i64, tmin: i64, tmax: i64) -> Window {
+        Window {
+            om0,
+            ox0,
+            tmin: (tmin, tmin),
+            tmax: (tmax, tmax),
+        }
     }
 
     /// A random generator draw of `day` (uniform value, no reroll: only the target matters).
@@ -593,8 +599,13 @@ mod tests {
             .collect()
     }
 
-    fn around(seed: u32) -> RangeInclusive<u32> {
-        seed - 20_000..=seed + 20_000
+    /// `seed` alone replays the readings, and the windows around it cover `value`.
+    fn assert_recovered(input: &EstimationInput, seed: u32, value: i64) {
+        search(input, seed..=seed).unwrap();
+        let (lo, hi) = search(input, seed - 20_000..=seed + 20_000)
+            .unwrap()
+            .attack();
+        assert!(lo <= value && value <= hi, "{value} outside {lo}-{hi}");
     }
 
     #[test]
@@ -673,11 +684,8 @@ mod tests {
     #[test]
     fn test_real_day_14_seed_pins_the_attack() {
         let text = include_str!("../tests/data/j14_real_attack_2362.txt");
-        let est = search_fixture(text, 0x471c_0000..=0x471c_ffff);
-        assert_eq!(est.seeds.len(), 1);
-        let m = est.seeds[0].seed;
-        assert_eq!((m.seed, m.om0, m.ox0), (0x471c_9b8d, 11, 17));
-        assert_eq!((m.tmin, m.tmax), ((2276, 2276), (2512, 2512)));
+        let est = pinned_window(text, 0x471c_0000..=0x471c_ffff, 0x471c_9b8d);
+        assert_eq!(est.windows[0].window, window(11, 17, 2276, 2512));
         assert_eq!(est.attack(), (2351, 2368));
     }
 
@@ -685,11 +693,8 @@ mod tests {
     #[test]
     fn test_real_day_15_seed_pins_the_attack() {
         let text = include_str!("../tests/data/j15_real_attack_2587.txt");
-        let est = search_fixture(text, 0x123f_0000..=0x123f_ffff);
-        assert_eq!(est.seeds.len(), 1);
-        let m = est.seeds[0].seed;
-        assert_eq!((m.seed, m.om0, m.ox0), (0x123f_81e5, 4, 24));
-        assert_eq!((m.tmin, m.tmax), ((2518, 2518), (2777, 2777)));
+        let est = pinned_window(text, 0x123f_0000..=0x123f_ffff, 0x123f_81e5);
+        assert_eq!(est.windows[0].window, window(4, 24, 2518, 2777));
         assert_eq!(est.attack(), (2582, 2597));
     }
 
@@ -697,11 +702,8 @@ mod tests {
     #[test]
     fn test_real_day_17_with_a_red_soul_seed_pins_the_attack() {
         let text = include_str!("../tests/data/j17_real_attack_4115_red_soul.txt");
-        let est = search_fixture(text, 0x9e76_0000..=0x9e76_ffff);
-        assert_eq!(est.seeds.len(), 1);
-        let m = est.seeds[0].seed;
-        assert_eq!((m.seed, m.om0, m.ox0), (0x9e76_c676, 11, 10));
-        assert_eq!((m.tmin, m.tmax), ((3759, 3759), (4056, 4056)));
+        let est = pinned_window(text, 0x9e76_0000..=0x9e76_ffff, 0x9e76_c676);
+        assert_eq!(est.windows[0].window, window(11, 10, 3759, 4056));
         let (lo, hi) = est.attack();
         assert_eq!((lo, hi), (3949, 3971));
         let night = |v: i64| (v as f64 * 1.04).round() as i64;
@@ -709,11 +711,26 @@ mod tests {
     }
 
     #[test]
+    fn test_lone_zero_percent_reading_skips_the_replay() {
+        let input = EstimationInput {
+            day: 16,
+            future: true,
+            readings: vec![Reading {
+                pct: 0,
+                min: 3460,
+                max: 4640,
+            }],
+            ..EstimationInput::default()
+        };
+        let progress = AtomicU64::new(0);
+        let est = estimate(&input, &EstimConf::default(), 0..=u32::MAX, &progress).unwrap();
+        assert_eq!(progress.into_inner(), 1 << 32);
+        assert!(est.windows.iter().all(|w| w.seeds == 1 << 32));
+    }
+
+    #[test]
     fn test_cancelled_search_stops() {
-        let text = include_str!("../tests/data/j15_real_attack_2587.txt");
-        let input = parse_text(text)
-            .into_input(&InputOverrides::default())
-            .unwrap();
+        let input = fixture_input(include_str!("../tests/data/j15_real_attack_2587.txt"));
         let progress = AtomicU64::new(0);
         let cancel = AtomicBool::new(true);
         let searched = search_seeds(
@@ -729,10 +746,7 @@ mod tests {
 
     #[test]
     fn test_split_search_matches_single_search() {
-        let text = include_str!("../tests/data/j15_real_attack_2587.txt");
-        let input = parse_text(text)
-            .into_input(&InputOverrides::default())
-            .unwrap();
+        let input = fixture_input(include_str!("../tests/data/j15_real_attack_2587.txt"));
         let conf = EstimConf::default();
         let whole = search(&input, 0x123f_0000..=0x123f_ffff).unwrap();
 
@@ -743,7 +757,7 @@ mod tests {
             matches.extend(search_seeds(&input, &conf, slice, &progress, &cancel).unwrap());
         }
         let split = finish(&input, &conf, matches).unwrap();
-        assert_eq!(split.seeds, whole.seeds);
+        assert_eq!(split.windows, whole.windows);
         assert_eq!(split.attack(), (2582, 2597));
         assert_eq!(
             finish(&input, &conf, Vec::new()).unwrap_err(),
@@ -761,10 +775,7 @@ mod tests {
             readings: php_readings(&target, seed, 8..=MAX_ROUNDS, 1, 1.0),
             ..EstimationInput::default()
         };
-        let est = search(&input, around(seed)).unwrap();
-        assert!(est.seeds.iter().any(|s| s.seed.seed == seed));
-        let (lo, hi) = est.attack();
-        assert!(lo <= value && value <= hi, "{value} outside {lo}-{hi}");
+        assert_recovered(&input, seed, value);
     }
 
     #[test]
@@ -778,10 +789,7 @@ mod tests {
             readings: php_readings(&target, seed, 0..=12, future_blocks(18), 1.0),
             ..EstimationInput::default()
         };
-        let est = search(&input, around(seed)).unwrap();
-        assert!(est.seeds.iter().any(|s| s.seed.seed == seed));
-        let (lo, hi) = est.attack();
-        assert!(lo <= value && value <= hi, "{value} outside {lo}-{hi}");
+        assert_recovered(&input, seed, value);
     }
 
     #[test]
@@ -796,9 +804,6 @@ mod tests {
             soul_factor: 1.04,
             ..EstimationInput::default()
         };
-        let est = search(&input, around(seed)).unwrap();
-        assert!(est.seeds.iter().any(|s| s.seed.seed == seed));
-        let (lo, hi) = est.attack();
-        assert!(lo <= value && value <= hi, "{value} outside {lo}-{hi}");
+        assert_recovered(&input, seed, value);
     }
 }

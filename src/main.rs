@@ -1104,29 +1104,16 @@ fn estimation_plan_job(
 
 /// Key lines understood by the readings parser, so the command options survive the modal.
 fn estimation_modal_prefill(o: &InputOverrides) -> String {
-    let mut lines = Vec::new();
+    let mut text = String::new();
     if let Some(day) = o.day {
-        lines.push(format!("jour: {day}"));
+        text.push_str(&format!("jour: {day}\n"));
     }
     if o.future == Some(true) {
-        lines.push("demain: oui".to_string());
+        text.push_str("demain: oui\n");
     }
-    if let Some(n) = o.red_souls {
-        lines.push(format!("âmes: {n}"));
-    }
-    if let Some(n) = o.planner_red_souls {
-        lines.push(format!("âmes veille: {n}"));
-    }
-    if let Some(p) = o.soul_penalty {
-        lines.push(format!("pénalité: {p}"));
-    }
-    if let Some(p) = o.planner_soul_penalty {
-        lines.push(format!("pénalité veille: {p}"));
-    }
-    if let Some(m) = o.soul_max {
-        lines.push(format!("âmes max: {m}"));
-    }
-    lines.join("\n")
+    text.push_str(&estimation25_lib::parse::format_overrides(o));
+    text.truncate(text.trim_end().len());
+    text
 }
 
 /// The readings modal, pre-filled with `prefill` (option lines, or a whole configuration from the

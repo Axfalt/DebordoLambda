@@ -1,19 +1,10 @@
-//! Local CLI: `estimation25 [--api [--userkey K]] [--town_id ID] [--jour N] [--demain]
-//! [--seeds A-B] [--ames N] [--ames-veille N] [--penalite P] [--penalite-veille P] [--ames-max M] [FICHIER]`.
-//!
-//! Readings come from one of:
-//! - `--town_id ID --jour N`: `MyHordes` Optimizer, no `MyHordes` key needed;
-//! - `--api`: `MyHordes` Optimizer, the town and day coming from the `MyHordes` API (user key from
-//!   `--userkey` or `MH_USER_KEY`, application key from `MH_APP_KEY`), either overridable;
-//! - otherwise FICHIER, or stdin when omitted.
-//!
-//! The 2^32 PHP seeds are then replayed to find the ones reproducing every reading, and the attack
-//! range they imply is printed.
+//! Local CLI of `/estimation25` (see `USAGE`): reads the readings from `MyHordes` Optimizer or a
+//! file / stdin, replays the 2^32 seeds and prints the attack range.
 
 use estimation25_lib::mho::{self, MhoEstimations};
 use estimation25_lib::parse::{InputOverrides, parse_bool};
 use estimation25_lib::{
-    EstimConf, Estimate, EstimationInput, estimate, format_summary, parse_text,
+    EstimConf, Estimate, EstimationError, EstimationInput, estimate, format_summary, parse_text,
 };
 use serde::Deserialize;
 use std::fmt::Display;
@@ -41,8 +32,6 @@ const USAGE: &str = concat!(
 
 const MH_ME_URL: &str = "https://myhordes.eu/api/x/json/me";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
-/// `modifiers.red_soul_max_factor` of Pandemonium towns.
-const PANDEMONIUM_SOUL_MAX: f64 = 666.0;
 
 struct Args {
     overrides: InputOverrides,
@@ -293,13 +282,10 @@ fn api_input(args: &Args) -> Result<EstimationInput, String> {
         }
     );
 
-    let mut overrides = args.overrides.clone();
-    if town.pandemonium && overrides.soul_max.is_none() {
-        overrides.soul_max = Some(PANDEMONIUM_SOUL_MAX);
-    }
+    let overrides = args.overrides.clone().for_town(town.pandemonium);
     mho::attack_input(attack_day, attack.as_ref(), eve.as_ref(), &overrides)
         .map_err(|e| match e {
-            estimation25_lib::EstimationError::NoReadings => format!(
+            EstimationError::NoReadings => format!(
                 "Erreur : MyHordes Optimizer n'a aucun relevé pour la ville {} (attaque du J{attack_day}).",
                 town.id
             ),

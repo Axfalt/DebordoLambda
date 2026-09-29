@@ -1,31 +1,25 @@
-//! Exact replay of the seeded offset path.
+//! Exact replay of the seeded offset path: `EstimateZombieAttackAction` calls
+//! `mt_srand($estimation->getSeed())` (low 32 bits) before shrinking the offsets, so replaying
+//! PHP's MT19937 for all 2^32 seeds and keeping those consistent with the readings pins them.
 //!
-//! `EstimateZombieAttackAction` calls `mt_srand($estimation->getSeed())` before shrinking the
-//! offsets, and PHP keeps only the low 32 bits of that seed. The whole path is therefore one of
-//! 2^32 deterministic sequences: replaying PHP's MT19937 `mt_rand` for every seed and keeping those
-//! consistent with the readings pins the offsets exactly, hence `tmin`/`tmax` and the attack.
-//!
-//! Performance: almost every seed is rejected within ~30 draws, so the cost is dominated by the
-//! MT19937 initialisation chain (output `j` needs state word `j + 397`, each word depending on the
-//! previous one). [`SeedBatch`] runs that chain for [`LANES`] seeds side by side so it vectorises,
-//! and keeps only the words the first [`BATCH_OUTPUTS`] outputs read. Nothing is heap-allocated in
-//! the hot loop.
+//! Almost every seed is rejected within ~30 draws, so the cost is the MT19937 initialisation
+//! chain: [`SeedBatch`] runs it for [`LANES`] seeds side by side so it vectorises.
 
 use crate::engine::{EstimConf, MAX_ROUNDS};
 use crate::inference::RawObservation;
 use crate::isa::{Isa, Kernel};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const N: usize = 624;
 const M: usize = 397;
-/// Outputs computable without a full reload: output `j` only needs original words `j`, `j+1`, `j+M`.
+/// Output `j < N - M` only needs original words `j`, `j + 1` and `j + M`.
 const LAZY_OUTPUTS: usize = N - M;
 const INIT_MULTIPLIER: u32 = 1_812_433_253;
 
-/// Seeds initialised together by [`SeedBatch`].
 const LANES: usize = 64;
 /// Outputs served from a [`SeedBatch`] before a seed spills into a scalar [`PhpMt`].
 const BATCH_OUTPUTS: usize = 48;
@@ -40,7 +34,7 @@ fn temper(mut y: u32) -> u32 {
     y ^ (y >> 18)
 }
 
-/// MT19937 `twist(m, u, v)` as in PHP's `engine_mt19937.c`.
+/// `twist(m, u, v)` of PHP's `engine_mt19937.c`.
 #[inline(always)]
 fn twist(m: u32, u: u32, v: u32) -> u32 {
     let mixed = (u & 0x8000_0000) | (v & 0x7fff_ffff);
@@ -91,8 +85,7 @@ pub trait MtSource {
     }
 }
 
-/// PHP's `mt_rand` engine (MT19937, `MT_RAND_MT19937` mode), lazily initialised: output `j` is
-/// computed straight from the original words `j`, `j+1`, `j+M` until a full reload is needed.
+/// PHP's `mt_rand` engine (MT19937), lazily initialised until a full reload is needed.
 pub struct PhpMt {
     seed: u32,
     state: [u32; N],
@@ -115,9 +108,8 @@ impl PhpMt {
         mt
     }
 
-    /// `mt_srand($seed)`: PHP truncates the integer seed to 32 bits.
+    /// `mt_srand($seed)`; replaying the same seed keeps the words already derived.
     pub fn reseed(&mut self, seed: u32) {
-        // Replaying the same seed keeps the original words already derived.
         if seed != self.seed || self.initialised == 0 || self.reloaded {
             self.seed = seed;
             self.state[0] = seed;
@@ -127,7 +119,7 @@ impl PhpMt {
         self.pos = 0;
     }
 
-    /// Positions the generator so that the next output is output number `pos`.
+    /// Makes output number `pos` the next one.
     fn seek(&mut self, pos: usize) {
         debug_assert!(!self.reloaded || pos >= self.pos);
         self.pos = pos;
@@ -173,9 +165,9 @@ impl MtSource for PhpMt {
     }
 }
 
-/// Original MT19937 words of [`LANES`] consecutive seeds, limited to what their first
-/// [`BATCH_OUTPUTS`] outputs read: words `0..=BATCH_OUTPUTS` and `M..M + BATCH_OUTPUTS`.
-/// Stored lane-interleaved so the initialisation chain vectorises across seeds.
+/// Original MT19937 words of [`LANES`] consecutive seeds that their first [`BATCH_OUTPUTS`]
+/// outputs read, lane-interleaved so the initialisation chain vectorises across seeds. Outputs
+/// are tempered lazily: most seeds are rejected long before [`BATCH_OUTPUTS`] draws.
 struct SeedBatch {
     head: [[u32; LANES]; BATCH_OUTPUTS + 1],
     tail: [[u32; LANES]; BATCH_OUTPUTS],
@@ -189,8 +181,8 @@ impl SeedBatch {
         }
     }
 
-    /// Initialises seeds `first..first + LANES` (wrapping past `u32::MAX`). Always inlined so it
-    /// vectorises with the target features of the caller (see [`Replay::run_range`]).
+    /// Seeds `first..first + LANES` (wrapping). Inlined so it vectorises with the target features
+    /// of [`Replay::run_range`].
     #[inline(always)]
     fn fill(&mut self, first: u32) {
         #[inline(always)]
@@ -287,14 +279,20 @@ pub fn php_path(seed: u32, om0: i64, ox0: i64, conf: &EstimConf) -> Vec<(f64, f6
     path
 }
 
-/// A seed (and initial pair) reproducing every reading, with the hidden bounds it allows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SeedMatch {
-    pub seed: u32,
+/// Initial pair and hidden bounds a compatible seed allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Window {
     pub om0: i64,
     pub ox0: i64,
     pub tmin: (i64, i64),
     pub tmax: (i64, i64),
+}
+
+/// Number of seeds of a search that replay every reading within `window`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WindowMatch {
+    pub window: Window,
+    pub seeds: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -317,7 +315,19 @@ impl Bounds {
         self.tmax.1 = self.tmax.1.min(r.max_y.1 * inv_g + EPS);
         self.tmin.0.ceil() <= self.tmin.1.floor() && self.tmax.0.ceil() <= self.tmax.1.floor()
     }
+
+    #[inline(always)]
+    fn window(&self, (om0, ox0): (i64, i64)) -> Window {
+        Window {
+            om0,
+            ox0,
+            tmin: (self.tmin.0.ceil() as i64, self.tmin.1.floor() as i64),
+            tmax: (self.tmax.0.ceil() as i64, self.tmax.1.floor() as i64),
+        }
+    }
 }
+
+type Counts = HashMap<Window, u64>;
 
 /// What the replay of one seed checks against, shared by all seeds of a search.
 struct Replay {
@@ -326,22 +336,15 @@ struct Replay {
     min_spread: f64,
     /// Candidate initial pairs with their bounds after the seed-independent 0-round observation.
     starts: Vec<((i64, i64), Bounds)>,
-    /// Lowest `(om, ox)` still able to reach every later observation after `r` rounds: offsets
-    /// only shrink, so a path already below these can be dropped before the next reading.
+    /// Lowest offsets still able to reach every later observation: offsets only shrink.
     floors: [(f64, f64); MAX_ROUNDS + 1],
 }
 
 impl Replay {
     #[inline(always)]
-    fn run<R: MtSource>(
-        &self,
-        rng: &mut R,
-        seed: u32,
-        (om0, ox0): (i64, i64),
-        start: Bounds,
-    ) -> Option<SeedMatch> {
+    fn run<R: MtSource>(&self, rng: &mut R, pair: (i64, i64), start: Bounds) -> Option<Window> {
         let mut bounds = start;
-        let (mut om, mut ox) = (om0 as f64, ox0 as f64);
+        let (mut om, mut ox) = (pair.0 as f64, pair.1 as f64);
         for round in 0..self.last {
             (om, ox) = php_step(om, ox, round, self.min_spread, rng);
             let (floor_m, floor_x) = self.floors[round + 1];
@@ -354,27 +357,12 @@ impl Replay {
                 return None;
             }
         }
-        Some(SeedMatch {
-            seed,
-            om0,
-            ox0,
-            tmin: (bounds.tmin.0.ceil() as i64, bounds.tmin.1.floor() as i64),
-            tmax: (bounds.tmax.0.ceil() as i64, bounds.tmax.1.floor() as i64),
-        })
+        Some(bounds.window(pair))
     }
 
-    /// Replays seeds `lo..hi` (as `u64` so the range can end at 2^32), appending matches to `found`.
-    ///
-    /// The whole loop (batch fill and replay) is compiled once per instruction set: besides the
-    /// vectorised fill, SSE4.1+ turns every `floor`/`ceil` into one instruction instead of a libm call.
-    fn run_range(
-        &self,
-        lo: u64,
-        hi: u64,
-        isa: Isa,
-        state: &mut ThreadState,
-        found: &mut Vec<SeedMatch>,
-    ) {
+    /// Replays seeds `lo..hi` (`u64` so the range can end at 2^32), compiled once per
+    /// instruction set (SSE4.1+ also turns `floor`/`ceil` into single instructions).
+    fn run_range(&self, lo: u64, hi: u64, isa: Isa, state: &mut ThreadState, found: &mut Counts) {
         isa.run(SeedRange {
             replay: self,
             lo,
@@ -385,13 +373,7 @@ impl Replay {
     }
 
     #[inline(always)]
-    fn run_range_impl(
-        &self,
-        lo: u64,
-        hi: u64,
-        state: &mut ThreadState,
-        found: &mut Vec<SeedMatch>,
-    ) {
+    fn run_range_impl(&self, lo: u64, hi: u64, state: &mut ThreadState, found: &mut Counts) {
         let ThreadState { batch, spill } = state;
         for base in (lo..hi).step_by(LANES) {
             batch.fill(base as u32);
@@ -407,20 +389,22 @@ impl Replay {
                         pos: 0,
                         spill: &mut *spill,
                     };
-                    found.extend(self.run(&mut rng, seed, pair, start));
+                    if let Some(window) = self.run(&mut rng, pair, start) {
+                        *found.entry(window).or_default() += 1;
+                    }
                 }
             }
         }
     }
 }
 
-/// [`Replay::run_range_impl`] as a [`Kernel`], so it is compiled per instruction set.
+/// [`Replay::run_range_impl`] as a [`Kernel`].
 struct SeedRange<'a> {
     replay: &'a Replay,
     lo: u64,
     hi: u64,
     state: &'a mut ThreadState,
-    found: &'a mut Vec<SeedMatch>,
+    found: &'a mut Counts,
 }
 
 impl Kernel for SeedRange<'_> {
@@ -433,14 +417,13 @@ impl Kernel for SeedRange<'_> {
     }
 }
 
-/// Per-thread scratch reused across rayon tasks.
 struct ThreadState {
     batch: SeedBatch,
     spill: PhpMt,
 }
 
 /// Suffix maxima of the smallest offsets each observation allows over the whole `[tmin, tmax]`
-/// range (with a margin well above float noise, so no valid path is ever dropped).
+/// range, with a margin well above float noise so no valid path is dropped.
 fn offset_floors(
     observed: &[Option<RawObservation>; MAX_ROUNDS + 1],
     (t_lo, t_hi): (i64, i64),
@@ -451,8 +434,8 @@ fn offset_floors(
     let mut running = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for (floor, obs) in floors.iter_mut().zip(observed).rev() {
         if let Some(r) = obs {
-            // tmin*(1 - om/100) <= min_y.1 with tmin >= t_lo, and tmax*(1 + ox/100) >= max_y.0
-            // with tmax <= t_hi.
+            // tmin*(1 - om/100) <= min_y.1 with tmin >= t_lo; tmax*(1 + ox/100) >= max_y.0 with
+            // tmax <= t_hi.
             let om = 100.0 * (1.0 - r.min_y.1 / t_lo) - MARGIN;
             let ox = 100.0 * (r.max_y.0 / t_hi - 1.0) - MARGIN;
             running = (running.0.max(om), running.1.max(ox));
@@ -462,25 +445,23 @@ fn offset_floors(
     floors
 }
 
-/// Splits the whole seed space `0..=u32::MAX` into `parts` contiguous, non-overlapping slices
-/// (for running the search across several machines).
+/// Slice `index` of the seed space `0..=u32::MAX` cut into `parts` contiguous slices, `None` when
+/// `index >= parts`.
 #[must_use]
-pub fn seed_slices(parts: u32) -> Vec<RangeInclusive<u32>> {
-    let parts = u64::from(parts.max(1));
+pub fn seed_slice(index: u32, parts: u32) -> Option<RangeInclusive<u32>> {
+    let (index, parts) = (u64::from(index), u64::from(parts.max(1)));
+    if index >= parts {
+        return None;
+    }
     let total = u64::from(u32::MAX) + 1;
-    (0..parts)
-        .map(|i| {
-            let lo = total * i / parts;
-            let hi = total * (i + 1) / parts - 1;
-            // Both bounds lie in 0..=u32::MAX by construction.
-            u32::try_from(lo).unwrap_or(u32::MAX)..=u32::try_from(hi).unwrap_or(u32::MAX)
-        })
-        .collect()
+    let lo = u32::try_from(total * index / parts).ok()?;
+    let hi = u32::try_from(total * (index + 1) / parts - 1).ok()?;
+    Some(lo..=hi)
 }
 
-/// Replays every seed in `seeds` for each candidate initial pair and returns the consistent ones,
-/// sorted by seed. `progress` is incremented by the number of seeds processed. Setting `cancel`
-/// stops the search within a chunk per thread; it then returns `None`.
+/// Replays every seed in `seeds` for each candidate initial pair and counts the consistent ones
+/// per [`Window`], sorted. `progress` counts processed seeds; setting `cancel` stops the search
+/// within a chunk per thread and returns `None`.
 pub(crate) fn search(
     raw: &[RawObservation],
     pairs: &[(i64, i64)],
@@ -489,7 +470,7 @@ pub(crate) fn search(
     seeds: RangeInclusive<u32>,
     progress: &AtomicU64,
     cancel: &AtomicBool,
-) -> Option<Vec<SeedMatch>> {
+) -> Option<Vec<WindowMatch>> {
     let mut observed = [None; MAX_ROUNDS + 1];
     for r in raw {
         observed[r.rounds] = Some(*r);
@@ -499,7 +480,7 @@ pub(crate) fn search(
         tmin: (lo, hi),
         tmax: (lo, hi),
     };
-    let starts = pairs
+    let starts: Vec<_> = pairs
         .iter()
         .filter_map(|&(om0, ox0)| {
             let mut bounds = outer;
@@ -509,45 +490,65 @@ pub(crate) fn search(
             }
         })
         .collect();
-    let replay = Replay {
-        floors: offset_floors(&observed, t_bounds),
-        observed,
-        last: raw.iter().map(|r| r.rounds).max().unwrap_or(0),
-        min_spread: conf.min_spread(),
-        starts,
-    };
-    let isa = Isa::detect();
-
     let (first, end) = (u64::from(*seeds.start()), u64::from(*seeds.end()) + 1);
-    let chunks = (end - first).div_ceil(CHUNK);
-    let mut matches: Vec<SeedMatch> = (0..chunks)
-        .into_par_iter()
-        .map_init(
-            // Boxed: rayon keeps the init value on the stack of every split level.
-            || {
-                Box::new(ThreadState {
-                    batch: SeedBatch::new(),
-                    spill: PhpMt::new(0),
-                })
-            },
-            |state, c| {
-                if cancel.load(Ordering::Relaxed) {
-                    return Vec::new();
+    let last = raw.iter().map(|r| r.rounds).max().unwrap_or(0);
+
+    let counts = if last == 0 {
+        // Only 0 % readings: the seed never comes into play, every seed matches.
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        progress.fetch_add(end - first, Ordering::Relaxed);
+        starts
+            .iter()
+            .map(|&(pair, bounds)| (bounds.window(pair), end - first))
+            .collect()
+    } else {
+        let replay = Replay {
+            floors: offset_floors(&observed, t_bounds),
+            observed,
+            last,
+            min_spread: conf.min_spread(),
+            starts,
+        };
+        let isa = Isa::detect();
+        (0..(end - first).div_ceil(CHUNK))
+            .into_par_iter()
+            .map_init(
+                // Boxed: rayon keeps the init value on the stack of every split level.
+                || {
+                    Box::new(ThreadState {
+                        batch: SeedBatch::new(),
+                        spill: PhpMt::new(0),
+                    })
+                },
+                |state, c| {
+                    let mut found = Counts::new();
+                    if cancel.load(Ordering::Relaxed) {
+                        return found;
+                    }
+                    let lo = first + c * CHUNK;
+                    let hi = (lo + CHUNK).min(end);
+                    replay.run_range(lo, hi, isa, state, &mut found);
+                    progress.fetch_add(hi - lo, Ordering::Relaxed);
+                    found
+                },
+            )
+            .reduce(Counts::new, |mut acc, found| {
+                for (window, n) in found {
+                    *acc.entry(window).or_default() += n;
                 }
-                let lo = first + c * CHUNK;
-                let hi = (lo + CHUNK).min(end);
-                let mut found = Vec::new();
-                replay.run_range(lo, hi, isa, state, &mut found);
-                progress.fetch_add(hi - lo, Ordering::Relaxed);
-                found
-            },
-        )
-        .flatten()
-        .collect();
+                acc
+            })
+    };
     if cancel.load(Ordering::Relaxed) {
         return None;
     }
-    matches.sort_unstable_by_key(|m| (m.seed, m.om0));
+    let mut matches: Vec<WindowMatch> = counts
+        .into_iter()
+        .map(|(window, seeds)| WindowMatch { window, seeds })
+        .collect();
+    matches.sort_unstable();
     Some(matches)
 }
 
@@ -613,15 +614,16 @@ mod tests {
     #[test]
     fn test_seed_slices_cover_the_seed_space_once() {
         for parts in [1, 3, 32, 1000] {
-            let slices = seed_slices(parts);
+            let slices: Vec<_> = (0..parts).map_while(|i| seed_slice(i, parts)).collect();
             assert_eq!(slices.len(), parts as usize);
             assert_eq!(*slices[0].start(), 0);
             assert_eq!(*slices.last().unwrap().end(), u32::MAX);
             for pair in slices.windows(2) {
                 assert_eq!(u64::from(*pair[0].end()) + 1, u64::from(*pair[1].start()));
             }
+            assert_eq!(seed_slice(parts, parts), None);
         }
-        assert_eq!(seed_slices(0).len(), 1);
+        assert_eq!(seed_slice(0, 0), Some(0..=u32::MAX));
     }
 
     #[test]

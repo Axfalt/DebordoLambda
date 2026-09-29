@@ -1,12 +1,11 @@
-//! Parsing of pasted watchtower readings, e.g. `[b][33%][/b] 2047 - 2749 🧟`,
-//! with optional `jour: 14`, `demain: oui`, `âmes: 1`, `pénalité: 0.02`, `pénalité veille: 0.04`
-//! lines.
-//!
-//! A paste may hold two sections: `Planificateur J17` (J+1 readings taken on day 17) and
-//! `Estimation J18` (today's readings). Readings before any header are today's; an `âmes: N`
-//! line inside the `Planificateur` section gives the red souls of that day.
+//! Parsing of pasted watchtower readings (`[b][33%][/b] 2047 - 2749 🧟`) and `key: value` settings,
+//! in an optional `Planificateur J17` section (J+1 readings taken on day 17, whose `âmes: N` is
+//! that day's) followed by today's readings (`Estimation J18`, or no header).
 
-use crate::engine::{AttackMode, DEFAULT_SOUL_MAX, DEFAULT_SOUL_PENALTY, soul_factor};
+use crate::engine::{
+    AttackMode, DEFAULT_SOUL_MAX, DEFAULT_SOUL_PENALTY, PANDEMONIUM_SOUL_MAX, factors_differ,
+    soul_factor,
+};
 use crate::inference::{EstimationError, EstimationInput, Reading};
 use serde::{Deserialize, Serialize};
 
@@ -18,10 +17,20 @@ pub struct InputOverrides {
     pub red_souls: Option<u32>,
     pub planner_red_souls: Option<u32>,
     pub soul_penalty: Option<f64>,
-    /// Penalty per red soul when the planner (J+1) readings were taken, when it differs from
-    /// today's (the level-2 blue soul building was voted in between).
+    /// Penalty per red soul when the planner (J+1) readings were taken, if it differs from today's.
     pub planner_soul_penalty: Option<f64>,
     pub soul_max: Option<f64>,
+}
+
+impl InputOverrides {
+    /// Pandemonium towns cap the red-soul factor at 666 unless told otherwise.
+    #[must_use]
+    pub fn for_town(mut self, pandemonium: bool) -> Self {
+        if pandemonium {
+            self.soul_max.get_or_insert(PANDEMONIUM_SOUL_MAX);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -29,38 +38,29 @@ pub struct ParsedText {
     pub day: Option<i64>,
     pub future: Option<bool>,
     pub readings: Vec<Reading>,
-    /// Readings of a `Planificateur` (J+1) section.
+    /// Readings of the `Planificateur` (J+1) section, taken on `planner_day`.
     pub planner: Vec<Reading>,
-    /// Day on which the `Planificateur` readings were taken.
     pub planner_day: Option<i64>,
-    /// Red souls in town today / when the planner readings were taken.
     pub red_souls: Option<u32>,
     pub planner_red_souls: Option<u32>,
-    /// Penalty per red soul (0.04, or 0.02 with the level-2 blue soul building), today / when
-    /// the planner readings were taken (defaults to today's).
     pub soul_penalty: Option<f64>,
     pub planner_soul_penalty: Option<f64>,
-    /// Cap of the red-soul factor (1.2, or 666 in Pandemonium).
     pub soul_max: Option<f64>,
     /// Non-empty lines that were neither a reading nor a known key.
     pub ignored: Vec<String>,
-    /// Ignored lines shaped like a setting (`key: value`): an unknown key or an invalid value,
-    /// most likely a typo that would silently change the search.
+    /// Ignored `key: value` lines: most likely a typo that would silently change the search.
     pub unknown_settings: Vec<String>,
 }
 
 impl ParsedText {
-    /// Builds the inference input; explicit arguments override what the text says.
-    ///
-    /// A paste holding only a `Planificateur` section is a J+1 estimate made on `planner_day`.
-    /// With both sections, the J+1 readings sharpen today's (same seeded path).
+    /// Builds the inference input; `o` overrides what the text says. A paste holding only a
+    /// `Planificateur` section is a J+1 estimate made on `planner_day`.
     ///
     /// # Errors
     ///
     /// [`EstimationError::MissingDay`] when neither the overrides nor the text give a day.
     pub fn into_input(self, o: &InputOverrides) -> Result<EstimationInput, EstimationError> {
-        // Every town type of the game uses normal attacks except custom private towns, which
-        // the tool does not support (their `attacks` setting cannot be read).
+        // Only custom private towns (unsupported) change the attack mode.
         let mode = AttackMode::Normal;
         let penalty = o
             .soul_penalty
@@ -74,12 +74,10 @@ impl ParsedText {
         let factor = |souls: u32| soul_factor(souls, penalty, max);
         let planner_factor = |souls: u32| soul_factor(souls, planner_penalty, max);
         let souls = o.red_souls.or(self.red_souls);
-        // The red souls of the planner day default to today's.
         let planner_souls = o.planner_red_souls.or(self.planner_red_souls).or(souls);
 
         if self.readings.is_empty() && !self.planner.is_empty() {
-            // Only yesterday's J+1 readings: they were displayed with the planner day's factor,
-            // tonight's attack uses today's.
+            // Displayed with the planner day's factor; tonight's attack uses today's.
             let readings_factor = planner_factor(planner_souls.unwrap_or(0));
             let night_factor = factor(souls.or(planner_souls).unwrap_or(0));
             return Ok(EstimationInput {
@@ -95,7 +93,7 @@ impl ParsedText {
                 soul_factor: readings_factor,
                 planner_soul_factor: None,
                 attack_soul_factor: Some(night_factor)
-                    .filter(|f| (f - readings_factor).abs() > f64::EPSILON),
+                    .filter(|&f| factors_differ(f, readings_factor)),
             });
         }
         Ok(EstimationInput {
@@ -115,8 +113,8 @@ impl ParsedText {
     }
 }
 
-/// Digit runs of a line with their byte span.
-fn numbers(line: &str) -> Vec<(usize, usize, i64)> {
+/// Digit runs of a line, with the byte offset where each one ends.
+fn numbers(line: &str) -> Vec<(usize, i64)> {
     let mut out = Vec::new();
     let mut start = None;
     for (i, c) in line
@@ -127,7 +125,7 @@ fn numbers(line: &str) -> Vec<(usize, usize, i64)> {
             (true, None) => start = Some(i),
             (false, Some(s)) => {
                 if let Ok(v) = line[s..i].parse() {
-                    out.push((s, i, v));
+                    out.push((i, v));
                 }
                 start = None;
             }
@@ -141,15 +139,10 @@ fn parse_reading(line: &str) -> Option<Reading> {
     let nums = numbers(line);
     let pct_index = nums
         .iter()
-        .position(|&(_, end, _)| line[end..].trim_start().starts_with('%'))?;
-    let pct = u32::try_from(nums[pct_index].2).ok()?;
-    let rest = &nums[pct_index + 1..];
-    match rest {
-        [(_, _, min), (_, _, max), ..] => Some(Reading {
-            pct,
-            min: *min,
-            max: *max,
-        }),
+        .position(|&(end, _)| line[end..].trim_start().starts_with('%'))?;
+    let pct = u32::try_from(nums[pct_index].1).ok()?;
+    match nums[pct_index + 1..] {
+        [(_, min), (_, max), ..] => Some(Reading { pct, min, max }),
         _ => None,
     }
 }
@@ -163,22 +156,12 @@ pub fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// Pasteable text of an input: `overrides`' red-soul lines, then the readings in
-/// `Planificateur J… / Estimation J…` sections. [`parse_text`] reads it back into the same input,
-/// so a result can be re-run after editing (the `/estimation25` "Voir la configuration" button).
+/// Setting lines of `overrides` that [`parse_text`] reads back (day and J+1 flag excluded).
 #[must_use]
-pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) -> String {
+pub fn format_overrides(overrides: &InputOverrides) -> String {
     use std::fmt::Write as _;
 
-    fn section(out: &mut String, title: &str, readings: &[Reading]) {
-        out.push_str(title);
-        out.push('\n');
-        for r in readings {
-            let _ = writeln!(out, "{}% : {} - {}", r.pct, r.min, r.max);
-        }
-    }
-
-    let mut out = String::with_capacity(64 + 24 * (input.readings.len() + input.planner.len()));
+    let mut out = String::new();
     if let Some(n) = overrides.red_souls {
         let _ = writeln!(out, "âmes: {n}");
     }
@@ -194,26 +177,30 @@ pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) ->
     if let Some(m) = overrides.soul_max {
         let _ = writeln!(out, "âmes max: {m}");
     }
+    out
+}
+
+/// Pasteable text of an input, which [`parse_text`] reads back into the same input (the
+/// `/estimation25` "Voir la configuration" button).
+#[must_use]
+pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) -> String {
+    use std::fmt::Write as _;
+
+    fn section(out: &mut String, title: &str, day: i64, readings: &[Reading]) {
+        let _ = writeln!(out, "{title} J{day}");
+        for r in readings {
+            let _ = writeln!(out, "{}% : {} - {}", r.pct, r.min, r.max);
+        }
+    }
+
+    let mut out = format_overrides(overrides);
     if input.future {
-        // A J+1 estimate: its readings were taken on `day`.
-        section(
-            &mut out,
-            &format!("Planificateur J{}", input.day),
-            &input.readings,
-        );
+        section(&mut out, "Planificateur", input.day, &input.readings);
     } else {
         if !input.planner.is_empty() {
-            section(
-                &mut out,
-                &format!("Planificateur J{}", input.day - 1),
-                &input.planner,
-            );
+            section(&mut out, "Planificateur", input.day - 1, &input.planner);
         }
-        section(
-            &mut out,
-            &format!("Estimation J{}", input.day),
-            &input.readings,
-        );
+        section(&mut out, "Estimation", input.day, &input.readings);
     }
     out
 }
@@ -240,30 +227,35 @@ pub fn parse_text(text: &str) -> ParsedText {
         }
 
         let lower = line.to_lowercase();
-        let first_number = numbers(line).first().map(|&(_, _, v)| v);
+        let first_number = || numbers(line).first().map(|&(_, v)| v);
         if lower.starts_with("planificateur") {
             in_planner = true;
-            parsed.planner_day = first_number.or(parsed.planner_day);
+            parsed.planner_day = first_number().or(parsed.planner_day);
             continue;
         }
         if lower.starts_with("estimation") && !line.contains(':') {
             in_planner = false;
-            parsed.day = first_number.or(parsed.day);
+            parsed.day = first_number().or(parsed.day);
             continue;
         }
 
         let recognised = line.split_once([':', '=']).is_some_and(|(key, value)| {
             // `pénalité_veille`, `Pénalité-veille` and `penalite  veille` are the same key.
-            let key = key
+            let key: String = key
                 .to_lowercase()
-                .replace('â', "a")
-                .replace('é', "e")
-                .replace(['_', '-'], " ");
+                .chars()
+                .map(|c| match c {
+                    'â' => 'a',
+                    'é' => 'e',
+                    '_' | '-' => ' ',
+                    c => c,
+                })
+                .collect();
             let key = key.split_whitespace().collect::<Vec<_>>().join(" ");
             let count = || {
                 numbers(value)
                     .first()
-                    .and_then(|&(_, _, v)| u32::try_from(v).ok())
+                    .and_then(|&(_, v)| u32::try_from(v).ok())
             };
             match key.as_str() {
                 "ames" | "ames rouges" | "red souls" if in_planner => count()
@@ -288,7 +280,7 @@ pub fn parse_text(text: &str) -> ParsedText {
                 }
                 "jour" | "day" | "j" => numbers(value)
                     .first()
-                    .map(|&(_, _, d)| parsed.day = Some(d))
+                    .map(|&(_, d)| parsed.day = Some(d))
                     .is_some(),
                 "demain" | "j+1" | "futur" | "future" => {
                     parse_bool(value).map(|b| parsed.future = Some(b)).is_some()
