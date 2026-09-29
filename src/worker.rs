@@ -491,10 +491,13 @@ async fn resolve_readings(
 ) -> Result<(EstimationInput, String), String> {
     let (town_id, day, pandemonium) = match source {
         EstimationSource::Text(text) => {
-            let input = parse_text(&text)
+            let parsed = parse_text(&text);
+            let (settings, town_id) = (parsed.settings(overrides), parsed.town_id);
+            let input = parsed
                 .into_input(overrides)
                 .map_err(|e| format!("❌ Erreur : {e}"))?;
-            return Ok((input, text));
+            let config = estimation25_lib::parse::format_input_text(&input, &settings, town_id);
+            return Ok((input, config));
         }
         EstimationSource::Mho {
             town_id,
@@ -519,7 +522,7 @@ async fn resolve_readings(
             ),
             e => format!("❌ Erreur : {e}"),
         })?;
-    let config = estimation25_lib::parse::format_input_text(&input, &overrides);
+    let config = estimation25_lib::parse::format_input_text(&input, &overrides, Some(town_id));
     Ok((input, config))
 }
 

@@ -1132,7 +1132,7 @@ fn respond_with_readings_modal(prefill: &str) -> Result<ApiGatewayV2httpResponse
         "style": 2, // PARAGRAPH
         "min_length": 1,
         "max_length": ESTIMATION_MODAL_MAX_LENGTH,
-        "placeholder": "jour: 25\nPlanificateur J24 / Estimation J25\n33% : 9236 - 10804",
+        "placeholder": "town_id: 8084 (sans relevés : lus sur MHO)\njour: 25\nEstimation J25\n33% : 9236 - 10804",
         "required": true
     });
     if !prefill.is_empty() {
@@ -1160,8 +1160,9 @@ fn respond_with_readings_modal(prefill: &str) -> Result<ApiGatewayV2httpResponse
 fn unknown_settings_message(lines: &[String]) -> String {
     let listed: Vec<String> = lines.iter().map(|l| format!("`{l}`")).collect();
     format!(
-        "Erreur : réglage non compris : {}.\nRéglages acceptés : `âmes`, `âmes veille`, \
-         `pénalité`, `pénalité veille`, `âmes max`, `jour`, `demain` (ex. `pénalité veille: 0.04`).",
+        "Erreur : réglage non compris : {}.\nRéglages acceptés : `town_id`, `jour`, `âmes`, \
+         `âmes veille`, `pénalité`, `pénalité veille`, `âmes max`, `demain` \
+         (ex. `pénalité veille: 0.04`).",
         listed.join(", ")
     )
 }
@@ -1183,6 +1184,32 @@ async fn handle_estimation25_modal_submit(
         return Ok(ephemeral_message(&unknown_settings_message(
             &parsed.unknown_settings,
         )));
+    }
+
+    // No reading but a town ("Voir la configuration" with the readings removed): fetch them
+    // again from MyHordes Optimizer, with the pasted settings.
+    if parsed.readings.is_empty() && parsed.planner.is_empty() {
+        if let Some(town_id) = parsed.town_id {
+            let Some(day) = parsed.day else {
+                return Ok(ephemeral_message(
+                    "Erreur : jour manquant : précisez `jour: N` avec `town_id`.",
+                ));
+            };
+            let overrides = InputOverrides {
+                future: parsed.future,
+                ..parsed.settings(&InputOverrides::default())
+            };
+            let job = estimation_plan_job(
+                &interaction,
+                EstimationSource::Mho {
+                    town_id,
+                    day,
+                    pandemonium: false,
+                },
+                overrides,
+            );
+            return enqueue_simulation(&job, sqs_client, queue_url).await;
+        }
     }
     let checked = parsed
         .into_input(&InputOverrides::default())

@@ -23,6 +23,22 @@ pub struct InputOverrides {
 }
 
 impl InputOverrides {
+    /// Every red-soul setting made explicit with the value the search uses (defaults filled
+    /// in, the eve's settings falling back to today's).
+    #[must_use]
+    pub fn resolved(&self) -> Self {
+        let red_souls = self.red_souls.unwrap_or(0);
+        let soul_penalty = self.soul_penalty.unwrap_or(DEFAULT_SOUL_PENALTY);
+        InputOverrides {
+            red_souls: Some(red_souls),
+            planner_red_souls: Some(self.planner_red_souls.unwrap_or(red_souls)),
+            soul_penalty: Some(soul_penalty),
+            planner_soul_penalty: Some(self.planner_soul_penalty.unwrap_or(soul_penalty)),
+            soul_max: Some(self.soul_max.unwrap_or(DEFAULT_SOUL_MAX)),
+            ..self.clone()
+        }
+    }
+
     /// Pandemonium towns cap the red-soul factor at 666 unless told otherwise.
     #[must_use]
     pub fn for_town(mut self, pandemonium: bool) -> Self {
@@ -35,6 +51,9 @@ impl InputOverrides {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedText {
+    /// Town the readings come from (`town_id: N`): with no reading, they are fetched from
+    /// MyHordes Optimizer.
+    pub town_id: Option<i64>,
     pub day: Option<i64>,
     pub future: Option<bool>,
     pub readings: Vec<Reading>,
@@ -53,6 +72,20 @@ pub struct ParsedText {
 }
 
 impl ParsedText {
+    /// The text's red-soul settings, overridden by `o` (day and J+1 flag excluded).
+    #[must_use]
+    pub fn settings(&self, o: &InputOverrides) -> InputOverrides {
+        InputOverrides {
+            day: None,
+            future: None,
+            red_souls: o.red_souls.or(self.red_souls),
+            planner_red_souls: o.planner_red_souls.or(self.planner_red_souls),
+            soul_penalty: o.soul_penalty.or(self.soul_penalty),
+            planner_soul_penalty: o.planner_soul_penalty.or(self.planner_soul_penalty),
+            soul_max: o.soul_max.or(self.soul_max),
+        }
+    }
+
     /// Builds the inference input; `o` overrides what the text says. A paste holding only a
     /// `Planificateur` section is a J+1 estimate made on `planner_day`.
     ///
@@ -96,6 +129,7 @@ impl ParsedText {
                     .filter(|&f| factors_differ(f, readings_factor)),
             });
         }
+        let today_factor = factor(souls.unwrap_or(0));
         Ok(EstimationInput {
             day: o
                 .day
@@ -106,8 +140,11 @@ impl ParsedText {
             mode,
             readings: self.readings,
             planner: self.planner,
-            soul_factor: factor(souls.unwrap_or(0)),
-            planner_soul_factor: planner_souls.map(planner_factor),
+            soul_factor: today_factor,
+            // Only kept when it differs, so explicit and implicit settings give the same input.
+            planner_soul_factor: planner_souls
+                .map(planner_factor)
+                .filter(|&f| factors_differ(f, today_factor)),
             attack_soul_factor: None,
         })
     }
@@ -181,9 +218,14 @@ pub fn format_overrides(overrides: &InputOverrides) -> String {
 }
 
 /// Pasteable text of an input, which [`parse_text`] reads back into the same input (the
-/// `/estimation25` "Voir la configuration" button).
+/// `/estimation25` "Voir la configuration" button): the town (when the readings came from
+/// MyHordes Optimizer), the attack day and every red-soul setting, then the readings.
 #[must_use]
-pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) -> String {
+pub fn format_input_text(
+    input: &EstimationInput,
+    settings: &InputOverrides,
+    town_id: Option<i64>,
+) -> String {
     use std::fmt::Write as _;
 
     fn section(out: &mut String, title: &str, day: i64, readings: &[Reading]) {
@@ -193,7 +235,12 @@ pub fn format_input_text(input: &EstimationInput, overrides: &InputOverrides) ->
         }
     }
 
-    let mut out = format_overrides(overrides);
+    let mut out = String::new();
+    if let Some(town_id) = town_id {
+        let _ = writeln!(out, "town_id: {town_id}");
+    }
+    let _ = writeln!(out, "jour: {}", input.estimated_day());
+    out.push_str(&format_overrides(&settings.resolved()));
     if input.future {
         section(&mut out, "Planificateur", input.day, &input.readings);
     } else {
@@ -278,6 +325,10 @@ pub fn parse_text(text: &str) -> ParsedText {
                 "ames max" | "ames rouges max" | "plafond ames" => {
                     decimal(value).map(|m| parsed.soul_max = Some(m)).is_some()
                 }
+                "town id" | "townid" | "ville" => numbers(value)
+                    .first()
+                    .map(|&(_, id)| parsed.town_id = Some(id))
+                    .is_some(),
                 "jour" | "day" | "j" => numbers(value)
                     .first()
                     .map(|&(_, d)| parsed.day = Some(d))
@@ -422,7 +473,7 @@ mod tests {
         )
         .into_input(&InputOverrides::default())
         .unwrap();
-        assert!((input.planner_soul_factor.unwrap() - 1.04).abs() < 1e-12);
+        assert_eq!(input.planner_soul_factor, None);
     }
 
     #[test]
@@ -481,16 +532,27 @@ mod tests {
             ..InputOverrides::default()
         };
         let today = parse_text(TWO_SECTIONS).into_input(&overrides).unwrap();
-        let text = format_input_text(&today, &overrides);
-        let back = parse_text(&text)
-            .into_input(&InputOverrides::default())
-            .unwrap();
+        let text = format_input_text(&today, &overrides, Some(8084));
+        assert!(text.starts_with(
+            "town_id: 8084\njour: 18\nâmes: 1\nâmes veille: 1\npénalité: 0.02\n\
+             pénalité veille: 0.04\nâmes max: 666\nPlanificateur J17\n"
+        ));
+        let parsed = parse_text(&text);
+        assert_eq!(parsed.town_id, Some(8084));
+        assert!(parsed.unknown_settings.is_empty());
+        let back = parsed.into_input(&InputOverrides::default()).unwrap();
         assert_eq!(back, today);
 
+        // Defaults are written out too.
         let future = parse_text("Planificateur J17\n0% : 4060 - 5340\n100% : 4180 - 4580\n")
             .into_input(&InputOverrides::default())
             .unwrap();
-        let back = parse_text(&format_input_text(&future, &InputOverrides::default()))
+        let text = format_input_text(&future, &InputOverrides::default(), None);
+        assert!(text.starts_with(
+            "jour: 18\nâmes: 0\nâmes veille: 0\npénalité: 0.04\npénalité veille: 0.04\n\
+             âmes max: 1.2\nPlanificateur J17\n"
+        ));
+        let back = parse_text(&text)
             .into_input(&InputOverrides::default())
             .unwrap();
         assert_eq!(back, future);
