@@ -331,28 +331,50 @@ fn candidate_pairs(
     pairs.into_iter().collect()
 }
 
-/// Attack values the generator can draw for the hidden targets a seed allows.
-fn seed_attack_range(
-    input: &EstimationInput,
-    conf: &EstimConf,
-    m: &SeedMatch,
-) -> Option<(i64, i64)> {
-    let mut range: Option<(i64, i64)> = None;
-    for_each_draw(input, conf, (m.tmin.0, m.tmax.1), |value, t| {
-        let fits = (t.om0, t.ox0) == (m.om0, m.ox0)
-            && (m.tmin.0..=m.tmin.1).contains(&t.tmin)
-            && (m.tmax.0..=m.tmax.1).contains(&t.tmax);
-        if fits {
-            // Hard mode redraws the attack anywhere in [tmin, tmax].
-            let (lo, hi) = if input.mode == AttackMode::Hard {
-                (t.tmin, t.tmax)
-            } else {
-                (value, value)
-            };
-            range = Some(range.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
-        }
+/// Attack values the generator can draw, per hidden target, for every target within `bounds`:
+/// `(om0, ox0)` -> `[(tmin, tmax, attack_lo, attack_hi)]`.
+type DrawTable = HashMap<(i64, i64), Vec<(i64, i64, i64, i64)>>;
+
+/// Hidden-target window a compatible seed allows: `(om0, ox0, tmin range, tmax range)`.
+type TargetWindow = (i64, i64, (i64, i64), (i64, i64));
+
+/// Enumerates the generator once for all compatible seeds (enumerating it per seed made
+/// sparse readings, with 10^5 compatible seeds, take tens of minutes).
+fn draw_table(input: &EstimationInput, conf: &EstimConf, bounds: (i64, i64)) -> DrawTable {
+    let mut attacks: HashMap<(i64, i64, i64, i64), (i64, i64)> = HashMap::new();
+    for_each_draw(input, conf, bounds, |value, t| {
+        // Hard mode redraws the attack anywhere in [tmin, tmax].
+        let (lo, hi) = if input.mode == AttackMode::Hard {
+            (t.tmin, t.tmax)
+        } else {
+            (value, value)
+        };
+        attacks
+            .entry((t.om0, t.ox0, t.tmin, t.tmax))
+            .and_modify(|(a, b)| (*a, *b) = ((*a).min(lo), (*b).max(hi)))
+            .or_insert((lo, hi));
     });
-    range
+    let mut table = DrawTable::new();
+    for ((om0, ox0, tmin, tmax), (lo, hi)) in attacks {
+        table
+            .entry((om0, ox0))
+            .or_default()
+            .push((tmin, tmax, lo, hi));
+    }
+    table
+}
+
+/// Attack values the generator can draw for the hidden targets a seed allows.
+fn seed_attack_range(table: &DrawTable, m: &SeedMatch) -> Option<(i64, i64)> {
+    table
+        .get(&(m.om0, m.ox0))?
+        .iter()
+        .filter(|&&(tmin, tmax, _, _)| {
+            (m.tmin.0..=m.tmin.1).contains(&tmin) && (m.tmax.0..=m.tmax.1).contains(&tmax)
+        })
+        .fold(None, |range, &(_, _, lo, hi)| {
+            Some(range.map_or((lo, hi), |(a, b): (i64, i64)| (a.min(lo), b.max(hi))))
+        })
 }
 
 /// Attack range implied by one compatible seed (before the red-soul factor).
@@ -429,10 +451,20 @@ pub fn finish(
     let observations = observations(input)?;
     matches.sort_unstable_by_key(|m| (m.seed, m.om0));
     matches.dedup();
+    let bounds = matches.iter().fold((i64::MAX, i64::MIN), |(lo, hi), m| {
+        (lo.min(m.tmin.0), hi.max(m.tmax.1))
+    });
+    let table = draw_table(input, conf, bounds);
+    // Compatible seeds mostly share a few hidden-target windows: compute each window once.
+    let mut ranges: HashMap<TargetWindow, Option<(i64, i64)>> = HashMap::new();
     let seeds: Vec<SeedEstimate> = matches
         .into_iter()
         .filter_map(|seed| {
-            seed_attack_range(input, conf, &seed).map(|attack| SeedEstimate { seed, attack })
+            let key = (seed.om0, seed.ox0, seed.tmin, seed.tmax);
+            let attack = *ranges
+                .entry(key)
+                .or_insert_with(|| seed_attack_range(&table, &seed));
+            attack.map(|attack| SeedEstimate { seed, attack })
         })
         .collect();
     if seeds.is_empty() {
