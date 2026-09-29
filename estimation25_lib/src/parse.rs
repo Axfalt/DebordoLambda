@@ -78,6 +78,10 @@ impl ParsedText {
         let planner_souls = o.planner_red_souls.or(self.planner_red_souls).or(souls);
 
         if self.readings.is_empty() && !self.planner.is_empty() {
+            // Only yesterday's J+1 readings: they were displayed with the planner day's factor,
+            // tonight's attack uses today's.
+            let readings_factor = planner_factor(planner_souls.unwrap_or(0));
+            let night_factor = factor(souls.or(planner_souls).unwrap_or(0));
             return Ok(EstimationInput {
                 day: o
                     .day
@@ -88,8 +92,10 @@ impl ParsedText {
                 mode,
                 readings: self.planner,
                 planner: Vec::new(),
-                soul_factor: planner_factor(planner_souls.unwrap_or(0)),
+                soul_factor: readings_factor,
                 planner_soul_factor: None,
+                attack_soul_factor: Some(night_factor)
+                    .filter(|f| (f - readings_factor).abs() > f64::EPSILON),
             });
         }
         Ok(EstimationInput {
@@ -104,6 +110,7 @@ impl ParsedText {
             planner: self.planner,
             soul_factor: factor(souls.unwrap_or(0)),
             planner_soul_factor: planner_souls.map(planner_factor),
+            attack_soul_factor: None,
         })
     }
 }
@@ -439,6 +446,28 @@ mod tests {
         );
         // A line without `:` is only ignored.
         assert!(parsed.ignored.contains(&"Tour de guet".to_string()));
+    }
+
+    #[test]
+    fn test_planner_only_attack_uses_todays_penalty() {
+        // Only yesterday's J+1 readings (0.04 per soul then), SPA2 active tonight (0.02).
+        let text = "Planificateur J26\nâmes: 1\n8% : 12180 - 14730\n83% : 13140 - 14370\n";
+        let overrides = InputOverrides {
+            soul_penalty: Some(0.02),
+            planner_soul_penalty: Some(0.04),
+            ..InputOverrides::default()
+        };
+        let input = parse_text(text).into_input(&overrides).unwrap();
+        assert!(input.future);
+        assert!((input.soul_factor - 1.04).abs() < 1e-12);
+        assert!((input.night_soul_factor() - 1.02).abs() < 1e-12);
+
+        // Same penalty both days: a single factor.
+        let input = parse_text(text)
+            .into_input(&InputOverrides::default())
+            .unwrap();
+        assert_eq!(input.attack_soul_factor, None);
+        assert!((input.night_soul_factor() - 1.04).abs() < 1e-12);
     }
 
     #[test]

@@ -68,10 +68,16 @@ fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estima
         .planner_soul_factor
         .filter(|_| !input.future && !input.planner.is_empty())
         .filter(|f| (f - input.soul_factor).abs() > f64::EPSILON);
+    // So can tonight's attack when only yesterday's J+1 readings are known.
+    let night =
+        Some(input.night_soul_factor()).filter(|f| (f - input.soul_factor).abs() > f64::EPSILON);
     if input.has_red_souls() || eve.is_some() {
         write!(out, "• **👻 Âmes rouges**: ×{}", input.soul_factor)?;
         if let Some(f) = eve {
             write!(out, " (veille ×{f})")?;
+        }
+        if let Some(f) = night {
+            write!(out, " (attaque ×{f})")?;
         }
         out.push('\n');
     }
@@ -84,7 +90,7 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
     let (lo, hi) = estimate.attack();
     if input.has_red_souls() {
         // NightlyHandler: the night attack is round(zombies * soulFactor).
-        let soul = input.soul_factor;
+        let soul = input.night_soul_factor();
         let night = |v: i64| (v as f64 * soul).round() as i64;
         writeln!(out, "🎯 **Attaque: {} - {}**", night(lo), night(hi))?;
         writeln!(out, "-# Attaque avant âmes rouges : {lo} - {hi}")?;
@@ -182,6 +188,21 @@ mod tests {
         };
         let text = format_summary(&input, &estimate(1));
         assert!(text.contains("• **👻 Âmes rouges**: ×1.04 (veille ×1.08)\n"));
+    }
+
+    #[test]
+    fn test_night_soul_factor_drives_the_headline() {
+        let input = EstimationInput {
+            day: 26,
+            future: true,
+            soul_factor: 1.04,
+            attack_soul_factor: Some(1.02),
+            ..EstimationInput::default()
+        };
+        let text = format_summary(&input, &estimate(1));
+        // round(3949 × 1.02) - round(3971 × 1.02)
+        assert!(text.contains("🎯 **Attaque: 4028 - 4050**\n"));
+        assert!(text.contains("• **👻 Âmes rouges**: ×1.04 (attaque ×1.02)\n"));
     }
 
     #[test]

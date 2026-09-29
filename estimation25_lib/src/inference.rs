@@ -41,6 +41,11 @@ pub struct EstimationInput {
     /// Red-soul factor when the planner readings were taken (defaults to `soul_factor`).
     #[serde(default)]
     pub planner_soul_factor: Option<f64>,
+    /// Red-soul factor of the night attack when it differs from the readings' (defaults to
+    /// `soul_factor`): a J+1 estimate made yesterday was displayed with yesterday's penalty,
+    /// while tonight's attack uses today's (the level-2 blue soul building may apply between).
+    #[serde(default)]
+    pub attack_soul_factor: Option<f64>,
 }
 
 fn unit_factor() -> f64 {
@@ -57,6 +62,7 @@ impl Default for EstimationInput {
             planner: Vec::new(),
             soul_factor: 1.0,
             planner_soul_factor: None,
+            attack_soul_factor: None,
         }
     }
 }
@@ -76,10 +82,17 @@ impl EstimationInput {
         }
     }
 
-    /// Whether today's readings (and the night attack) carry a red-soul factor.
+    /// Whether the readings or the night attack carry a red-soul factor.
     #[must_use]
     pub fn has_red_souls(&self) -> bool {
         (self.soul_factor - 1.0).abs() > f64::EPSILON
+            || (self.night_soul_factor() - 1.0).abs() > f64::EPSILON
+    }
+
+    /// Red-soul factor of the night attack (`NightlyHandler`: `round(zombies * soulFactor)`).
+    #[must_use]
+    pub fn night_soul_factor(&self) -> f64 {
+        self.attack_soul_factor.unwrap_or(self.soul_factor)
     }
 }
 
