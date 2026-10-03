@@ -24,8 +24,10 @@ them after changing the job schema, run
 - **Function memory**: new accounts can be capped at 3008 MB. Request 10240 MB if it is capped.
 - **Concurrent executions**: request an increase (default 10). Dev and prod share this pool.
 - Deploy **aws-lambda-power-tuning** from the Serverless Application Repository with
-  `totalExecutionTimeout = 900` and `lambdaResource` set to the ARN of
-  `DebordoLambdaWorker-dev`. It changes the memory of the function it tunes, so never point it at
+  `totalExecutionTimeout = 900` and
+  `lambdaResource = arn:aws:lambda:eu-west-3:<ACCOUNT>:function:DebordoLambdaWorker-dev*`. The
+  trailing `*` covers the aliases it invokes (`…:RAM1769`) and doesn't match the prod
+  `DebordoLambdaWorker`. It changes the memory of the function it tunes, so never point it at
   prod.
 
 ## 1. Memory sweep
