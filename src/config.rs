@@ -160,6 +160,12 @@ pub enum EstimationStage {
         run_id: String,
         parts: u32,
     },
+    /// Searches the first of `parts` slices without DynamoDB nor Discord: the payload of AWS
+    /// Lambda Power Tuning (`power-tuning/`), never sent by the receiver.
+    Bench {
+        input: estimation25_lib::EstimationInput,
+        parts: u32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -1201,7 +1207,18 @@ mod tests {
             }),
             ..plan.clone()
         };
-        for job in [plan, part, watchdog] {
+        let bench = SimulationJob {
+            estimation: Some(EstimationJob {
+                overrides: Default::default(),
+                stage: EstimationStage::Bench {
+                    input: Default::default(),
+                    parts: 8,
+                },
+                user_id: None,
+            }),
+            ..plan.clone()
+        };
+        for job in [plan, part, watchdog, bench] {
             let json = serde_json::to_string(&job).unwrap();
             let back: SimulationJob = serde_json::from_str(&json).unwrap();
             assert_eq!(back.job_type, JobType::Estimation);
