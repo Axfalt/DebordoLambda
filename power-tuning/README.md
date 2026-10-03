@@ -48,9 +48,17 @@ Start an execution of the state machine with this input:
 
 - Drop the values above your memory quota.
 - `autoOptimize: false`: the deploy workflows own the memory setting.
-- `parallelInvocation: false`: the 5 invocations run one after another and use only one
-  concurrent execution. They must fit in the 900 s executor timeout, which is why this sweep uses
-  the 1/64 slice.
+- `parallelInvocation` only sets how the `num` invocations of one memory size run. Each
+  invocation searches on all its vCPUs either way, so the measured durations don't change. Power
+  Tuning already tests the memory sizes side by side:
+  - `false` uses about one concurrent execution per power value (6 here), with the 5 invocations
+    one after another. They must fit in the 900 s executor timeout, which is why this sweep uses
+    the 1/64 slice.
+  - `true` uses power values × `num` concurrent executions (30 here). The account's default
+    limit of 10 throttles them, and the prod bot with them.
+  - Use `true` once the concurrency quota is raised: the sweep then takes about one invocation
+    per memory size, and `payload.json` (a real 1/8 part) fits as well.
+  - Until then, avoid running a sweep while the bot is in use, or test fewer sizes at a time.
 
 Read the result as `duration × vCPUs`. While it stays flat, the extra memory buys proportional
 speed. Choose the fastest size (**M**) whose result is still at least ~10% better than the next
