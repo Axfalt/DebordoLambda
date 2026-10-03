@@ -3,6 +3,7 @@
 use aws_lambda_events::sqs::SqsEvent;
 use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -129,11 +130,38 @@ async fn handler(event: LambdaEvent<SqsEvent>, clients: &Clients) -> Result<(), 
             }
         };
 
-        if let Err(e) = process_job(job, clients).await {
-            error!("Failed to process simulation job: {}", e);
+        let stage = job.estimation.as_ref().map(|e| &e.stage);
+        if let Some(EstimationStage::Part {
+            run_id,
+            index,
+            parts,
+            ..
+        }) = stage
+            && let Some(wait) = queue_wait_ms(&record.attributes)
+        {
+            info!(
+                "Estimation part {}/{} of {} waited {} ms in the queue",
+                index + 1,
+                parts,
+                run_id,
+                wait
+            );
+        }
+        // A failed bench fails the invocation, so Power Tuning does not time it as a success.
+        let bench = matches!(stage, Some(EstimationStage::Bench { .. }));
+        match process_job(job, clients).await {
+            Err(e) if bench => return Err(e),
+            Err(e) => error!("Failed to process simulation job: {}", e),
+            Ok(()) => {}
         }
     }
     Ok(())
+}
+
+/// Time between the sending of an SQS message and its first delivery.
+fn queue_wait_ms(attributes: &HashMap<String, String>) -> Option<u64> {
+    let millis = |name: &str| attributes.get(name)?.parse::<u64>().ok();
+    Some(millis("ApproximateFirstReceiveTimestamp")?.saturating_sub(millis("SentTimestamp")?))
 }
 
 async fn process_job(job: SimulationJob, clients: &Clients) -> Result<(), Error> {
@@ -455,7 +483,47 @@ async fn process_estimation_job(job: SimulationJob, clients: &Clients) -> Result
         EstimationStage::Watchdog { run_id, parts } => {
             check_estimation_run(&job, &run_id, parts, clients).await
         }
+        EstimationStage::Bench { input, parts } => run_estimation_bench(input, parts).await,
     }
+}
+
+/// Searches the first of `parts` slices like a part would, without DynamoDB nor Discord: the
+/// duration of the invocation is what AWS Lambda Power Tuning measures.
+async fn run_estimation_bench(input: EstimationInput, parts: u32) -> Result<(), Error> {
+    let Some(slice) = seed_slice(0, parts) else {
+        return Err(format!("Bench slice out of range for {parts} parts").into());
+    };
+    let start = Instant::now();
+    let slice_len = u64::from(slice.end() - slice.start()) + 1;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let search_cancel = Arc::clone(&cancel);
+    let search = tokio::task::spawn_blocking(move || {
+        estimation25_lib::search_seeds(
+            &input,
+            &EstimConf::default(),
+            slice,
+            &AtomicU64::new(0),
+            &search_cancel,
+        )
+    });
+    let matches = match timeout(Duration::from_secs(ESTIMATION_TIMEOUT_SECS), search).await {
+        Ok(Ok(Ok(matches))) => matches,
+        Ok(Ok(Err(e))) => return Err(format!("Estimation bench failed: {e}").into()),
+        Ok(Err(e)) => return Err(format!("Estimation bench panicked: {e}").into()),
+        Err(_) => {
+            cancel.store(true, Ordering::Relaxed);
+            return Err("Estimation bench timed out".into());
+        }
+    };
+    info!(
+        "Estimation bench: {} window(s), {} seeds (1/{} of the space) in {:.1} s on {} thread(s)",
+        matches.len(),
+        slice_len,
+        parts.max(1),
+        start.elapsed().as_secs_f64(),
+        rayon::current_num_threads()
+    );
+    Ok(())
 }
 
 /// Watchdog: if the run has not posted its result yet, it never will (a part was lost or
@@ -891,6 +959,67 @@ async fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Power Tuning payloads (`power-tuning/`): one `Bench` job each, over the j15 fixture.
+    const POWER_TUNING_PAYLOADS: [(&str, u32); 2] = [
+        (include_str!("../power-tuning/payload.json"), 8),
+        (include_str!("../power-tuning/payload-p64.json"), 64),
+    ];
+
+    fn bench_job(parts: u32) -> SimulationJob {
+        let text = include_str!("../estimation25_lib/tests/data/j15_real_attack_2587.txt");
+        let input = parse_text(text)
+            .into_input(&InputOverrides::default())
+            .unwrap();
+        SimulationJob {
+            job_type: JobType::Estimation,
+            estimation: Some(EstimationJob {
+                overrides: InputOverrides::default(),
+                stage: EstimationStage::Bench { input, parts },
+                user_id: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_power_tuning_payloads_are_bench_jobs_of_the_fixture() {
+        for (payload, parts) in POWER_TUNING_PAYLOADS {
+            let event: SqsEvent = serde_json::from_str(payload).unwrap();
+            assert_eq!(event.records.len(), 1);
+            let body = event.records[0].body.as_deref().unwrap();
+            let job: SimulationJob = serde_json::from_str(body).unwrap();
+            assert_eq!(job.job_type, JobType::Estimation);
+            assert_eq!(job.estimation, bench_job(parts).estimation, "{parts} parts");
+        }
+    }
+
+    #[test]
+    fn test_queue_wait_is_first_receive_minus_sent() {
+        let attributes = HashMap::from([
+            ("SentTimestamp".to_string(), "1000".to_string()),
+            (
+                "ApproximateFirstReceiveTimestamp".to_string(),
+                "1250".to_string(),
+            ),
+        ]);
+        assert_eq!(queue_wait_ms(&attributes), Some(250));
+        assert_eq!(queue_wait_ms(&HashMap::new()), None);
+    }
+
+    #[test]
+    #[ignore = "writes power-tuning/*.json"]
+    fn generate_power_tuning_payloads() {
+        for (name, parts) in [("payload.json", 8), ("payload-p64.json", 64)] {
+            let body = serde_json::to_string(&bench_job(parts)).unwrap();
+            let event = serde_json::json!({ "Records": [{ "body": body }] });
+            std::fs::write(
+                format!("power-tuning/{name}"),
+                serde_json::to_string_pretty(&event).unwrap() + "\n",
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn test_progress_message_rotates_from_the_run_offset() {
