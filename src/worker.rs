@@ -933,9 +933,14 @@ async fn show_progress(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // INFO unless RUST_LOG says otherwise (`from_default_env` alone keeps only errors).
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let aws_config = aws_config::load_from_env().await;
