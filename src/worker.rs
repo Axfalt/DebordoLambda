@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
-use tokio::time::{Duration, MissedTickBehavior, interval, sleep, timeout};
+use tokio::time::{Duration, MissedTickBehavior, interval_at, sleep, timeout};
 use tracing::{error, info};
 
 use debordo_lib::config::{
@@ -809,8 +809,10 @@ async fn run_estimation_part(
     let deadline = sleep(Duration::from_secs(ESTIMATION_TIMEOUT_SECS));
     tokio::pin!(search, deadline);
     let period = Duration::from_secs(PROGRESS_REPORT_SECS);
-    // The first tick is immediate: a part of a cancelled run stops before doing any work.
-    let mut ticks = interval(period);
+    // The parts' reports are spread over the period, as they all write the same run item: 128
+    // simultaneous first reports got the run's writes throttled. Part 0 still reports at once.
+    let offset = period.mul_f64(f64::from(index) / f64::from(parts.max(1)));
+    let mut ticks = interval_at(tokio::time::Instant::now() + offset, period);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // Progress is reported from this task, between polls of the search: an edit is always
     // finished before the part is recorded, hence before the result can be posted.

@@ -2,10 +2,13 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
 };
+use aws_sdk_dynamodb::config::retry::RetryConfig;
+use aws_sdk_dynamodb::error::DisplayErrorContext;
 use aws_sdk_dynamodb::types::AttributeValue;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 use tracing::{error, info};
 
 async fn derive_key(ssm_client: &aws_sdk_ssm::Client) -> Result<[u8; 32], lambda_runtime::Error> {
@@ -251,7 +254,10 @@ pub async fn create_estimation_run(
             Ok(false)
         }
         Err(e) => {
-            error!("DynamoDB put_item (estimation run) failed: {}", e);
+            error!(
+                "DynamoDB put_item (estimation run) failed: {}",
+                DisplayErrorContext(&e)
+            );
             Err(lambda_runtime::Error::from(format!(
                 "Database write failed: {}",
                 e
@@ -274,7 +280,10 @@ pub async fn get_estimation_config(
         .send()
         .await
         .map_err(|e| {
-            error!("DynamoDB get_item (estimation config) failed: {}", e);
+            error!(
+                "DynamoDB get_item (estimation config) failed: {}",
+                DisplayErrorContext(&e)
+            );
             lambda_runtime::Error::from(format!("Database read failed: {}", e))
         })?
         .item;
@@ -339,7 +348,10 @@ pub async fn report_estimation_progress(
             return Ok(None);
         }
         Err(e) => {
-            error!("DynamoDB update_item (estimation progress) failed: {}", e);
+            error!(
+                "DynamoDB update_item (estimation progress) failed: {}",
+                DisplayErrorContext(&e)
+            );
             return Err(lambda_runtime::Error::from(format!(
                 "Database write failed: {}",
                 e
@@ -399,7 +411,10 @@ pub async fn report_estimation_progress(
             None
         }
         Err(e) => {
-            error!("DynamoDB update_item (estimation edit claim) failed: {}", e);
+            error!(
+                "DynamoDB update_item (estimation edit claim) failed: {}",
+                DisplayErrorContext(&e)
+            );
             None
         }
     };
@@ -414,6 +429,16 @@ pub async fn report_estimation_progress(
 pub struct CompletedRun {
     pub matches: Vec<estimation25_lib::WindowMatch>,
     pub started_at: u64,
+}
+
+/// Retries of the writes a part must not lose: up to 128 parts write the same run item within a
+/// few seconds, more than DynamoDB absorbs on one item, and the default 3 attempts give up.
+fn patient_retries() -> aws_sdk_dynamodb::config::Builder {
+    aws_sdk_dynamodb::config::Builder::default().retry_config(
+        RetryConfig::standard()
+            .with_max_attempts(10)
+            .with_max_backoff(Duration::from_secs(5)),
+    )
 }
 
 /// Records the matching windows of part `index` (which searched `searched` seeds); returns the
@@ -441,10 +466,15 @@ pub async fn record_estimation_part(
         .expression_attribute_values(":part", AttributeValue::Ns(vec![index.to_string()]))
         .expression_attribute_values(":matches", AttributeValue::S(json))
         .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
+        .customize()
+        .config_override(patient_retries())
         .send()
         .await
         .map_err(|e| {
-            error!("DynamoDB update_item (estimation part) failed: {}", e);
+            error!(
+                "DynamoDB update_item (estimation part) failed: {}",
+                DisplayErrorContext(&e)
+            );
             lambda_runtime::Error::from(format!("Database write failed: {}", e))
         })?;
     let attrs = updated.attributes.unwrap_or_default();
@@ -471,6 +501,8 @@ pub async fn record_estimation_part(
         .update_expression("SET posted = :true")
         .condition_expression("attribute_not_exists(posted)")
         .expression_attribute_values(":true", AttributeValue::Bool(true))
+        .customize()
+        .config_override(patient_retries())
         .send()
         .await;
     if let Err(e) = claim {
@@ -479,7 +511,10 @@ pub async fn record_estimation_part(
         {
             return Ok(None);
         }
-        error!("DynamoDB update_item (estimation claim) failed: {}", e);
+        error!(
+            "DynamoDB update_item (estimation claim) failed: {}",
+            DisplayErrorContext(&e)
+        );
         return Err(lambda_runtime::Error::from(format!(
             "Database write failed: {}",
             e
@@ -545,7 +580,10 @@ pub async fn claim_estimation_run(
             Ok(None)
         }
         Err(e) => {
-            error!("DynamoDB update_item (estimation watchdog) failed: {}", e);
+            error!(
+                "DynamoDB update_item (estimation watchdog) failed: {}",
+                DisplayErrorContext(&e)
+            );
             Err(lambda_runtime::Error::from(format!(
                 "Database write failed: {}",
                 e
@@ -593,7 +631,10 @@ pub async fn cancel_estimation_run(
             if e.as_service_error()
                 .is_some_and(|s| s.is_conditional_check_failed_exception()) => {}
         Err(e) => {
-            error!("DynamoDB update_item (estimation cancel) failed: {}", e);
+            error!(
+                "DynamoDB update_item (estimation cancel) failed: {}",
+                DisplayErrorContext(&e)
+            );
             return Err(lambda_runtime::Error::from(format!(
                 "Database write failed: {}",
                 e
@@ -610,7 +651,10 @@ pub async fn cancel_estimation_run(
         .send()
         .await
         .map_err(|e| {
-            error!("DynamoDB get_item (estimation cancel) failed: {}", e);
+            error!(
+                "DynamoDB get_item (estimation cancel) failed: {}",
+                DisplayErrorContext(&e)
+            );
             lambda_runtime::Error::from(format!("Database read failed: {}", e))
         })?
         .item;
