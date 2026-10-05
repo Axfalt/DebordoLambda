@@ -76,6 +76,7 @@ jobs:
             --role ${{ secrets.LAMBDA_ROLE_ARN }} \
             --region eu-west-3 \
             --timeout 300 \
+            --memory 2560 \
             --env-var SQS_QUEUE_URL=${{ secrets.SQS_QUEUE_URL }} \
             --env-var ESTIMATION_TABLE_NAME=EstimationRuns-dev \
             ${{ vars.LAMBDA_WORKER_FUNCTION_NAME || 'DebordoLambdaWorker-dev' }}

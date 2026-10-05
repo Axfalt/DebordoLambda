@@ -105,3 +105,24 @@ For P in 8, 16, 32, 64 and 128 (and each P must fit within the concurrency quota
   so that a running search never throttles commands.
 - Cost: one run uses ≈ `P × M/1024 × (a + b/P)` GB-s. Compare it with the 400 000 GB-s/month
   free tier.
+
+## Results (2026-10-05, j15 readings)
+
+Memory sweep (1/64 of the seeds): duration halves with memory up to 1536 MB, keeps scaling
+linearly from 1769 to 2560 MB (7.8 s), and 3008 MB is no faster (8.0-8.2 s in two sweeps) for
+19% more GB-s. **Memory: 2560 MB.** One part over all 2^32 seeds would take ~520 s there.
+
+Fan-out at 2560 MB, parts started by asynchronous invocation:
+
+| P | Slowest start | Fastest part | Slowest part | Matches in the item | Footer |
+|---|---|---|---|---|---|
+| 8 | 0.40 s | 53.3 s | 79.2 s | 95 B | 82 s |
+| 16 | 0.48 s | 26.6 s | 39.8 s | 111 B | 42 s |
+| 32 | 0.52 s | 13.4 s | 20.0 s | 143 B | 21 s |
+| 64 | 0.43 s | 6.2 s | 10.3 s | 207 B | 11 s |
+| 128 | 0.54 s | 3.1 s | 5.7 s | 335 B | 7 s |
+
+Through SQS, the last parts of a 16-part run waited ~14 s to start, hence the asynchronous
+invocations. The footer is the slowest part plus 1-2 s, and the slowest part is consistently
+~1.5x the fastest for the same work (instances differ in speed). **Parts: 128**, i.e. 7 s
+instead of 82 s, for the same GB-s per run (~1,300).

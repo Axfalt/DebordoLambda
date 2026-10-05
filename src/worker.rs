@@ -41,7 +41,9 @@ const ESTIMATION_TIMEOUT_SECS: u64 = 280;
 /// Parallel parts of an `/estimation25` run (`ESTIMATION_PARTS` overrides it), each an
 /// asynchronous invocation of this worker: the account's concurrency (or the worker's reserved
 /// concurrency) bounds how many run at once, not its SQS trigger.
-const DEFAULT_ESTIMATION_PARTS: u32 = 8;
+/// Measured at 2560 MB (`power-tuning/`): 8 parts took 82 s, 64 took 11 s and 128 take 7 s;
+/// past 128 the spread between instances eats most of the gain.
+const DEFAULT_ESTIMATION_PARTS: u32 = 128;
 /// Delay of the watchdog of a run: well past a normal run, within Discord's 15 minutes to edit
 /// the interaction reply (and SQS's 900 s maximum delay).
 const ESTIMATION_WATCHDOG_SECS: i32 = 600;
