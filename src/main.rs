@@ -1633,10 +1633,14 @@ async fn handle_debordo_modal_submit(
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Initialiser le logging structuré pour CloudWatch
+    // Initialiser le logging structuré pour CloudWatch (INFO, sauf si RUST_LOG dit autre chose)
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let aws_config = aws_config::load_from_env().await;

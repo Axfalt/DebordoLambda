@@ -38,6 +38,7 @@ aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1"
 aws-sdk-dynamodb = "1"
 aws-sdk-ssm = "1"
+aws-sdk-lambda = "1"
 aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"

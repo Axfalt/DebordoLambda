@@ -487,15 +487,22 @@ pub async fn record_estimation_part(
     }
 
     let mut all = Vec::new();
+    // Every part's matches share the run item (400 KB maximum, written on each progress report).
+    let mut stored = 0;
     if let Some(slots) = attrs.get("matches").and_then(|v| v.as_m().ok()) {
         for slot in slots.values() {
             if let Ok(json) = slot.as_s() {
+                stored += json.len();
                 all.extend(serde_json::from_str::<Vec<estimation25_lib::WindowMatch>>(
                     json,
                 )?);
             }
         }
     }
+    info!(
+        "Estimation run {} complete: {} part(s), {} bytes of matches in its item",
+        run_id, parts, stored
+    );
     let started_at = attrs
         .get("started_at")
         .and_then(|v| v.as_n().ok())

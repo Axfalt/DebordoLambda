@@ -153,11 +153,20 @@ pub enum EstimationStage {
         index: u32,
         parts: u32,
         input: estimation25_lib::EstimationInput,
+        /// When the plan started this part (ms since the epoch), to log how long it took to run.
+        #[serde(default)]
+        sent_at_ms: Option<u64>,
     },
     /// Delayed check: reports the run as failed if it has not posted its result by then (a part
     /// lost to throttling or crashing would otherwise leave the waiting message forever).
     Watchdog {
         run_id: String,
+        parts: u32,
+    },
+    /// Searches the first of `parts` slices without DynamoDB nor Discord: the payload of AWS
+    /// Lambda Power Tuning (`power-tuning/`), never sent by the receiver.
+    Bench {
+        input: estimation25_lib::EstimationInput,
         parts: u32,
     },
 }
@@ -1185,6 +1194,7 @@ mod tests {
                         }],
                         ..Default::default()
                     },
+                    sent_at_ms: Some(1_700_000_000_000),
                 },
                 user_id: Some("123".into()),
             }),
@@ -1201,7 +1211,18 @@ mod tests {
             }),
             ..plan.clone()
         };
-        for job in [plan, part, watchdog] {
+        let bench = SimulationJob {
+            estimation: Some(EstimationJob {
+                overrides: Default::default(),
+                stage: EstimationStage::Bench {
+                    input: Default::default(),
+                    parts: 8,
+                },
+                user_id: None,
+            }),
+            ..plan.clone()
+        };
+        for job in [plan, part, watchdog, bench] {
             let json = serde_json::to_string(&job).unwrap();
             let back: SimulationJob = serde_json::from_str(&json).unwrap();
             assert_eq!(back.job_type, JobType::Estimation);
