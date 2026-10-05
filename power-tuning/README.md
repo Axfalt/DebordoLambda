@@ -79,30 +79,28 @@ concurrent executions.
 
 ## 3. End-to-end runs on the dev bot
 
-For P in 8, 16, 32 and 64 (and each P must fit within the concurrency quota):
+For P in 8, 16, 32, 64 and 128 (and each P must fit within the concurrency quota):
 
-1. On `DebordoLambdaWorker-dev`, set memory M and the env var `ESTIMATION_PARTS=P`, and set the
-   maximum concurrency of its SQS trigger to P. The next dev deploy resets these settings, so do
-   the runs before it.
+1. On `DebordoLambdaWorker-dev`, set memory M and the env var `ESTIMATION_PARTS=P`. The parts are
+   asynchronous invocations of the worker, so its SQS trigger doesn't limit them. The next dev
+   deploy resets these settings, so do the runs before it.
 2. Run `/estimation25` with the same readings (e.g. paste the j15 fixture). Check that the result
    matches the 8-part result.
 3. Note the "runs testées en N s" footer, then read the worker logs (CloudWatch Logs Insights,
    `filter @message like "waited" or @message like "complete:"`):
-   - `Estimation part i/P of <run> waited N ms in the queue`: the largest wait is the start-up
-     ramp. The SQS trigger starts 5 pollers and adds up to 300 per minute.
+   - `Estimation part i/P of <run> waited N ms to start`: from the plan's invoke to the start of
+     the part. The largest wait is the start-up ramp. Through SQS (before the asynchronous
+     invocations), the last parts of a 16-part run waited ~14 s.
    - `Estimation run <run> complete: P part(s), N bytes of matches in its item`: the item is
      limited to 400 KB and rewritten by every 5 s progress report.
 
 ## 4. Choosing P and applying it
 
 - Choose the smallest P whose footer time is within ~10% of the best one.
-- Two conditions trigger a code change before going further:
-  - **Item size**: if the matches near ~100 KB, move each part's matches to its own item.
-  - **Ramp**: if the queue ramp is a large share of the run, fan the parts out with
-    asynchronous `lambda:Invoke` instead of SQS.
+- **Item size**: if the matches near ~100 KB, move each part's matches to its own item before
+  going further.
 - Apply M and P to the "Deploy Worker Lambda" steps of both workflows (`--memory M`,
-  `--env-var ESTIMATION_PARTS=P`) and to `DEFAULT_ESTIMATION_PARTS` in `src/worker.rs`. Set the
-  maximum concurrency of both SQS triggers to P.
+  `--env-var ESTIMATION_PARTS=P`) and to `DEFAULT_ESTIMATION_PARTS` in `src/worker.rs`.
 - Once at least 100 executions stay unreserved, give the receiver reserved concurrency (e.g. 10)
   so that a running search never throttles commands.
 - Cost: one run uses ≈ `P × M/1024 × (a + b/P)` GB-s. Compare it with the 400 000 GB-s/month

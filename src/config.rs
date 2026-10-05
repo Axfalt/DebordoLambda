@@ -153,6 +153,9 @@ pub enum EstimationStage {
         index: u32,
         parts: u32,
         input: estimation25_lib::EstimationInput,
+        /// When the plan started this part (ms since the epoch), to log how long it took to run.
+        #[serde(default)]
+        sent_at_ms: Option<u64>,
     },
     /// Delayed check: reports the run as failed if it has not posted its result by then (a part
     /// lost to throttling or crashing would otherwise leave the waiting message forever).
@@ -1191,6 +1194,7 @@ mod tests {
                         }],
                         ..Default::default()
                     },
+                    sent_at_ms: Some(1_700_000_000_000),
                 },
                 user_id: Some("123".into()),
             }),

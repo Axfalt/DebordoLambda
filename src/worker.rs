@@ -1,12 +1,14 @@
 //! Worker Lambda - déclenché par SQS, exécute la simulation et envoie le résultat à Discord.
 
 use aws_lambda_events::sqs::SqsEvent;
-use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
+use aws_sdk_lambda::error::DisplayErrorContext;
+use aws_sdk_lambda::primitives::Blob;
+use aws_sdk_lambda::types::InvocationType;
 use lambda_runtime::{Error, LambdaEvent, service_fn};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::task::JoinSet;
 use tokio::time::{Duration, MissedTickBehavior, interval, sleep, timeout};
 use tracing::{error, info};
 
@@ -36,9 +38,9 @@ const DISCORD_MESSAGE_MAX_LENGTH: usize = 2000;
 const TRUNCATED_NOTICE: &str = "\n… (message tronqué, réponse trop longue pour Discord)";
 /// One `/estimation25` part must finish within the 300 s Lambda timeout.
 const ESTIMATION_TIMEOUT_SECS: u64 = 280;
-/// Parallel parts of an `/estimation25` run (`ESTIMATION_PARTS` overrides it).
-/// 8 fits the free tier's 10 concurrent executions in a single wave, while the worker's SQS
-/// trigger (maximum concurrency 8) leaves 2 slots for the receiver.
+/// Parallel parts of an `/estimation25` run (`ESTIMATION_PARTS` overrides it), each an
+/// asynchronous invocation of this worker: the account's concurrency (or the worker's reserved
+/// concurrency) bounds how many run at once, not its SQS trigger.
 const DEFAULT_ESTIMATION_PARTS: u32 = 8;
 /// Delay of the watchdog of a run: well past a normal run, within Discord's 15 minutes to edit
 /// the interaction reply (and SQS's 900 s maximum delay).
@@ -104,8 +106,11 @@ struct Clients {
     http: reqwest::Client,
     sqs: aws_sdk_sqs::Client,
     dynamodb: aws_sdk_dynamodb::Client,
-    /// Queue the `/estimation25` parts are sent to.
+    lambda: aws_sdk_lambda::Client,
+    /// Queue of the `/estimation25` watchdogs.
     queue_url: Option<String>,
+    /// This worker, which the `/estimation25` parts invoke asynchronously (set by Lambda).
+    function_name: Option<String>,
 }
 
 fn discord_text(content: &str) -> String {
@@ -130,25 +135,11 @@ async fn handler(event: LambdaEvent<SqsEvent>, clients: &Clients) -> Result<(), 
             }
         };
 
-        let stage = job.estimation.as_ref().map(|e| &e.stage);
-        if let Some(EstimationStage::Part {
-            run_id,
-            index,
-            parts,
-            ..
-        }) = stage
-            && let Some(wait) = queue_wait_ms(&record.attributes)
-        {
-            info!(
-                "Estimation part {}/{} of {} waited {} ms in the queue",
-                index + 1,
-                parts,
-                run_id,
-                wait
-            );
-        }
         // A failed bench fails the invocation, so Power Tuning does not time it as a success.
-        let bench = matches!(stage, Some(EstimationStage::Bench { .. }));
+        let bench = matches!(
+            job.estimation.as_ref().map(|e| &e.stage),
+            Some(EstimationStage::Bench { .. })
+        );
         match process_job(job, clients).await {
             Err(e) if bench => return Err(e),
             Err(e) => error!("Failed to process simulation job: {}", e),
@@ -158,10 +149,10 @@ async fn handler(event: LambdaEvent<SqsEvent>, clients: &Clients) -> Result<(), 
     Ok(())
 }
 
-/// Time between the sending of an SQS message and its first delivery.
-fn queue_wait_ms(attributes: &HashMap<String, String>) -> Option<u64> {
-    let millis = |name: &str| attributes.get(name)?.parse::<u64>().ok();
-    Some(millis("ApproximateFirstReceiveTimestamp")?.saturating_sub(millis("SentTimestamp")?))
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 async fn process_job(job: SimulationJob, clients: &Clients) -> Result<(), Error> {
@@ -479,7 +470,19 @@ async fn process_estimation_job(job: SimulationJob, clients: &Clients) -> Result
             index,
             parts,
             input,
-        } => run_estimation_part(&job, &run_id, index, parts, input, clients).await,
+            sent_at_ms,
+        } => {
+            if let Some(sent) = sent_at_ms {
+                info!(
+                    "Estimation part {}/{} of {} waited {} ms to start",
+                    index + 1,
+                    parts,
+                    run_id,
+                    now_ms().saturating_sub(sent)
+                );
+            }
+            run_estimation_part(&job, &run_id, index, parts, input, clients).await
+        }
         EstimationStage::Watchdog { run_id, parts } => {
             check_estimation_run(&job, &run_id, parts, clients).await
         }
@@ -636,8 +639,14 @@ async fn plan_estimation(
     if let Err(e) = estimation25_lib::check_input(&input, &EstimConf::default()) {
         return reply(job, clients, &format!("❌ Erreur : {e}")).await;
     }
-    let Some(queue_url) = clients.queue_url.as_deref() else {
-        error!("SQS_QUEUE_URL is not set on the worker: cannot fan /estimation25 out");
+    let (Some(queue_url), Some(function_name)) = (
+        clients.queue_url.as_deref(),
+        clients.function_name.as_deref(),
+    ) else {
+        error!(
+            "SQS_QUEUE_URL or AWS_LAMBDA_FUNCTION_NAME is not set on the worker: cannot fan \
+             /estimation25 out"
+        );
         return reply(
             job,
             clients,
@@ -685,49 +694,60 @@ async fn plan_estimation(
     )
     .await?;
 
-    let indices: Vec<u32> = (0..parts).collect();
-    for chunk in indices.chunks(10) {
-        let mut entries = Vec::with_capacity(chunk.len());
-        for &index in chunk {
-            let part = estimation_job(
-                job,
-                overrides,
-                EstimationStage::Part {
-                    run_id: run_id.clone(),
+    // The parts invoke this worker asynchronously instead of going through SQS: its trigger adds
+    // pollers a few per second, so the last parts of a 16-part run waited ~14 s to start.
+    let sent_at_ms = now_ms();
+    let mut invokes = JoinSet::new();
+    for index in 0..parts {
+        let part = estimation_job(
+            job,
+            overrides,
+            EstimationStage::Part {
+                run_id: run_id.clone(),
+                index,
+                parts,
+                input: input.clone(),
+                sent_at_ms: Some(sent_at_ms),
+            },
+        );
+        // Same shape as an SQS event, so `handler` takes both.
+        let event = serde_json::json!({ "Records": [{ "body": serde_json::to_string(&part)? }] });
+        let invoke = clients
+            .lambda
+            .invoke()
+            .function_name(function_name)
+            .invocation_type(InvocationType::Event)
+            .payload(Blob::new(serde_json::to_vec(&event)?));
+        invokes.spawn(async move { (index, invoke.send().await) });
+    }
+    let mut started = true;
+    while let Some(joined) = invokes.join_next().await {
+        match joined {
+            Ok((_, Ok(_))) => {}
+            Ok((index, Err(e))) => {
+                error!(
+                    "Invoke of part {} of run {} failed: {}",
                     index,
-                    parts,
-                    input: input.clone(),
-                },
-            );
-            entries.push(
-                SendMessageBatchRequestEntry::builder()
-                    .id(index.to_string())
-                    .message_body(serde_json::to_string(&part)?)
-                    .build()?,
-            );
-        }
-        let sent = clients
-            .sqs
-            .send_message_batch()
-            .queue_url(queue_url)
-            .set_entries(Some(entries))
-            .send()
-            .await;
-        let failed = match sent {
-            Ok(out) => !out.failed().is_empty(),
-            Err(e) => {
-                error!("SendMessageBatch failed for run {}: {}", run_id, e);
-                true
+                    run_id,
+                    DisplayErrorContext(&e)
+                );
+                started = false;
             }
-        };
-        if failed {
-            return reply(
-                job,
-                clients,
-                "❌ La recherche n'a pas pu démarrer. Réessayez.",
-            )
-            .await;
+            Err(e) => {
+                error!("Invoke task of run {} failed: {}", run_id, e);
+                started = false;
+            }
         }
+    }
+    if !started {
+        // Claims the run, so the parts already started cancel at their first progress check.
+        return deliver_failure(
+            job,
+            clients,
+            &run_id,
+            "❌ La recherche n'a pas pu démarrer. Réessayez.",
+        )
+        .await;
     }
     info!("Estimation run {} fanned out to {} parts", run_id, parts);
 
@@ -951,7 +971,9 @@ async fn main() -> Result<(), Error> {
             .expect("failed to build reqwest client"),
         sqs: aws_sdk_sqs::Client::new(&aws_config),
         dynamodb: aws_sdk_dynamodb::Client::new(&aws_config),
+        lambda: aws_sdk_lambda::Client::new(&aws_config),
         queue_url: std::env::var("SQS_QUEUE_URL").ok(),
+        function_name: std::env::var("AWS_LAMBDA_FUNCTION_NAME").ok(),
     };
     info!("Starting DebordoLambda Worker");
     lambda_runtime::run(service_fn(move |event| {
@@ -997,19 +1019,6 @@ mod tests {
             assert_eq!(job.job_type, JobType::Estimation);
             assert_eq!(job.estimation, bench_job(parts).estimation, "{parts} parts");
         }
-    }
-
-    #[test]
-    fn test_queue_wait_is_first_receive_minus_sent() {
-        let attributes = HashMap::from([
-            ("SentTimestamp".to_string(), "1000".to_string()),
-            (
-                "ApproximateFirstReceiveTimestamp".to_string(),
-                "1250".to_string(),
-            ),
-        ]);
-        assert_eq!(queue_wait_ms(&attributes), Some(250));
-        assert_eq!(queue_wait_ms(&HashMap::new()), None);
     }
 
     #[test]
