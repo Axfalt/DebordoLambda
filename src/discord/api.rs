@@ -196,20 +196,6 @@ pub fn cancelled_message_body(content: &str) -> serde_json::Value {
     serde_json::json!({ "content": content, "components": [] })
 }
 
-/// Deletes the original (deferred) response of the interaction.
-pub async fn delete_original(
-    client: &reqwest::Client,
-    application_id: &str,
-    token: &str,
-) -> Result<(), reqwest::Error> {
-    client
-        .delete(followup_message_url(application_id, token))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{build_followup_body, cancel_button_components, mention_body};

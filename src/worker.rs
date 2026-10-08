@@ -19,8 +19,8 @@ use debordo_lib::config::{
 };
 use debordo_lib::database;
 use debordo_lib::discord::api::{
-    delete_original, post_followup_mentioning, send_followup, send_followup_with_button,
-    send_followup_with_cancel, send_followup_without_buttons,
+    post_followup_mentioning, send_followup, send_followup_with_button, send_followup_with_cancel,
+    send_followup_without_buttons,
 };
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{
@@ -87,6 +87,11 @@ fn progress_message(run_id: &str, step: u64) -> &'static str {
         .unwrap_or(0);
     let len = PROGRESS_MESSAGES.len() as u64;
     PROGRESS_MESSAGES[((offset % len + step % len) % len) as usize]
+}
+
+/// What the waiting message becomes once the outcome is posted below it.
+fn finished_message(run_id: &str) -> String {
+    format!("🔭 Recherche terminée, réponse ci-dessous.\n-# `{run_id}`")
 }
 
 fn waiting_message(run_id: &str, step: u64, searched: u64) -> String {
@@ -395,8 +400,9 @@ fn config_button_id(run_id: &str) -> String {
 }
 
 /// Final outcome of a run (result or failure). Editing a message never notifies a mention, so
-/// it is posted as a new message mentioning the caller and the waiting message is removed;
-/// if that post fails, the waiting message is edited instead so the outcome is never lost.
+/// it is posted as a new message mentioning the caller. The waiting message stays, as it shows
+/// the command that started the run, with the run id (to find it in the logs) instead of its
+/// progress; if the post fails, the outcome is edited into it so it is never lost.
 /// `button` adds the "Voir la configuration" button (results only).
 async fn deliver(
     job: &SimulationJob,
@@ -421,8 +427,9 @@ async fn deliver(
     let text = discord_text(&format!("<@{user_id}>\n{content}"));
     match post_followup_mentioning(http, app, token, &text, &user_id, button).await {
         Ok(()) => {
-            if let Err(e) = delete_original(http, app, token).await {
-                info!("Could not delete the waiting message: {}", e);
+            let done = finished_message(&database::estimation_run_id(token));
+            if let Err(e) = send_followup_without_buttons(http, app, token, &done).await {
+                info!("Could not close the waiting message: {}", e);
             }
             Ok(())
         }
@@ -1070,5 +1077,13 @@ mod tests {
             format!("{}\n`▰▰▰▰▱▱▱▱▱▱` 42 %", PROGRESS_MESSAGES[1])
         );
         assert!(waiting_message("", 0, ESTIMATION_SEEDS).ends_with("` 99 %"));
+    }
+
+    #[test]
+    fn test_finished_message_keeps_the_run_id() {
+        assert_eq!(
+            finished_message("ee46056d"),
+            "🔭 Recherche terminée, réponse ci-dessous.\n-# `ee46056d`"
+        );
     }
 }
