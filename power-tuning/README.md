@@ -91,8 +91,8 @@ For P in 8, 16, 32, 64 and 128 (and each P must fit within the concurrency quota
    - `Estimation part i/P of <run> waited N ms to start`: from the plan's invoke to the start of
      the part. The largest wait is the start-up ramp. Through SQS (before the asynchronous
      invocations), the last parts of a 16-part run waited ~14 s.
-   - `Estimation run <run> complete: P part(s), N bytes of matches`: each part stores its
-     matches in its own item (limited to 400 KB), out of the run item.
+   - `Estimation run <run> complete: P part(s), summary …`: the parts store only their summary
+     (attack range and run count) in the run item, which every 5 s progress report rewrites.
 
 ## 4. Choosing P and applying it
 

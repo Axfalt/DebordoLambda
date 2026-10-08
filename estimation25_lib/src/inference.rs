@@ -401,6 +401,37 @@ impl Estimate {
             (a.min(w.attack.0), b.max(w.attack.1))
         })
     }
+
+    #[must_use]
+    pub fn summary(&self) -> Summary {
+        Summary {
+            attack: self.attack(),
+            seeds: self.seed_count(),
+        }
+    }
+}
+
+/// What the result needs from an [`Estimate`]: the union of its attack ranges and its number of
+/// runs. A window's attack range does not depend on the other windows, so the summaries of
+/// slices of the seeds [`merge`](Summary::merge) into the summary of the whole search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    /// Before the red-soul factor.
+    pub attack: (i64, i64),
+    pub seeds: u64,
+}
+
+impl Summary {
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            attack: (
+                self.attack.0.min(other.attack.0),
+                self.attack.1.max(other.attack.1),
+            ),
+            seeds: self.seeds + other.seeds,
+        }
+    }
 }
 
 /// Checks that the readings are valid, consistent and reachable by the generator, without
@@ -479,6 +510,24 @@ pub fn finish(
         observations,
         windows,
     })
+}
+
+/// [`finish`] reduced to its [`Summary`], for a slice of the seeds: `None` when none of its
+/// windows is left.
+///
+/// # Errors
+///
+/// Any validation error of [`observations`].
+pub fn summarize(
+    input: &EstimationInput,
+    conf: &EstimConf,
+    matches: Vec<WindowMatch>,
+) -> Result<Option<Summary>, EstimationError> {
+    match finish(input, conf, matches) {
+        Ok(estimate) => Ok(Some(estimate.summary())),
+        Err(EstimationError::Inconsistent) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// [`search_seeds`] then [`finish`]; `seeds` is normally `0..=u32::MAX`.
@@ -763,6 +812,29 @@ mod tests {
             finish(&input, &conf, Vec::new()).unwrap_err(),
             EstimationError::Inconsistent
         );
+    }
+
+    #[test]
+    fn test_slice_summaries_merge_into_the_whole_summary() {
+        let input = fixture_input(include_str!("../tests/data/j15_real_attack_2587.txt"));
+        let conf = EstimConf::default();
+        let whole = search(&input, 0x123f_0000..=0x123f_ffff).unwrap();
+
+        let mut merged: Option<Summary> = None;
+        for slice in [
+            0x123f_0000..=0x123f_3fff,
+            0x123f_4000..=0x123f_7fff,
+            0x123f_8000..=0x123f_bfff,
+            0x123f_c000..=0x123f_ffff,
+        ] {
+            let (progress, cancel) = (AtomicU64::new(0), AtomicBool::new(false));
+            let matches = search_seeds(&input, &conf, slice, &progress, &cancel).unwrap();
+            if let Some(summary) = summarize(&input, &conf, matches).unwrap() {
+                merged = Some(merged.map_or(summary, |m| m.merge(summary)));
+            }
+        }
+        assert_eq!(merged, Some(whole.summary()));
+        assert_eq!(summarize(&input, &conf, Vec::new()).unwrap(), None);
     }
 
     #[test]

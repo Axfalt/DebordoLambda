@@ -12,8 +12,8 @@ pub mod seed;
 pub use engine::{AttackMode, EstimConf, HiddenTarget};
 pub use format::format_summary;
 pub use inference::{
-    Estimate, EstimationError, EstimationInput, Reading, WindowEstimate, check_input, estimate,
-    finish, search_seeds,
+    Estimate, EstimationError, EstimationInput, Observation, Reading, Summary, WindowEstimate,
+    check_input, estimate, finish, observations, search_seeds, summarize,
 };
 pub use parse::{ParsedText, parse_text};
 pub use seed::{Window, WindowMatch, seed_slice};

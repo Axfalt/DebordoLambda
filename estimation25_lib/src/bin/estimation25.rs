@@ -318,7 +318,10 @@ fn run() -> Result<(), String> {
 
     let start = Instant::now();
     let (estimate, footer) = run_search(&input, args.seeds.clone())?;
-    println!("{}", format_summary(&input, &estimate));
+    println!(
+        "{}",
+        format_summary(&input, &estimate.observations, estimate.summary())
+    );
     println!("-# ⏱️ {footer} en {:.1} s", start.elapsed().as_secs_f64());
     Ok(())
 }

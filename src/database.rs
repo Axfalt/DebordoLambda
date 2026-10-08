@@ -190,10 +190,9 @@ pub async fn get_user_key(
     Ok(Some(plaintext))
 }
 
-// `/estimation25` runs: the 2^32 seeds are split across parallel worker invocations, which track
-// the run in one DynamoDB item (table `ESTIMATION_TABLE_NAME`, key `run_id`, TTL `expires_at`)
-// and store their matches in an item of their own (key `<run_id>#p<index>`). Every write is
-// idempotent so SQS redeliveries cannot corrupt a run.
+// `/estimation25` runs: the 2^32 seeds are split across parallel worker invocations, which merge
+// their summaries in one DynamoDB item (table `ESTIMATION_TABLE_NAME`, key `run_id`, TTL
+// `expires_at`). Every write is idempotent so SQS redeliveries cannot corrupt a run.
 
 const ESTIMATION_RUN_TTL_SECS: u64 = 24 * 3600;
 
@@ -237,6 +236,7 @@ pub async fn create_estimation_run(
             "expires_at",
             AttributeValue::N((now + ESTIMATION_RUN_TTL_SECS).to_string()),
         )
+        .item("summaries", AttributeValue::M(Default::default()))
         .item("config", AttributeValue::S(config.to_string()));
     if let Some(user_id) = user_id {
         put = put.item("user_id", AttributeValue::S(user_id.to_string()));
@@ -424,10 +424,11 @@ pub async fn report_estimation_progress(
     }))
 }
 
-/// All parts of a run are done: the merged matches, handed to exactly one caller.
+/// All parts of a run are done: their merged summary (`None` when no seed matched), handed to
+/// exactly one caller.
 #[derive(Debug)]
 pub struct CompletedRun {
-    pub matches: Vec<estimation25_lib::WindowMatch>,
+    pub summary: Option<estimation25_lib::Summary>,
     pub started_at: u64,
 }
 
@@ -441,55 +442,33 @@ fn patient_retries() -> aws_sdk_dynamodb::config::Builder {
     )
 }
 
-/// Key of the item holding the matches of part `index`: they are kept out of the run item, which
-/// every progress report rewrites (and pays for in full) and which is limited to 400 KB.
-fn part_key(run_id: &str, index: u32) -> AttributeValue {
-    AttributeValue::S(format!("{run_id}#p{index}"))
-}
-
-/// Records the matching windows of part `index` (which searched `searched` seeds); returns the
-/// whole run once every part is recorded, to the single caller that wins the right to post it.
+/// Records the summary of part `index` (which searched `searched` seeds); returns the whole run
+/// once every part is recorded, to the single caller that wins the right to post it.
+///
+/// A part stores its summary, not its matching windows: a loose search finds thousands of windows
+/// per part, more than the run item's 400 KB.
 pub async fn record_estimation_part(
     run_id: &str,
     index: u32,
     searched: u64,
-    matches: &[estimation25_lib::WindowMatch],
+    summary: Option<estimation25_lib::Summary>,
     db_client: &aws_sdk_dynamodb::Client,
 ) -> Result<Option<CompletedRun>, lambda_runtime::Error> {
     let table = estimation_table();
     let key = AttributeValue::S(run_id.to_string());
-    let json = serde_json::to_string(matches)?;
+    let json = serde_json::to_string(&summary)?;
 
-    // The matches are stored before the part counts as done, so whoever sees the run complete
-    // finds every part's matches. Rewriting them on a redelivery is harmless.
-    db_client
-        .put_item()
-        .table_name(&table)
-        .item("run_id", part_key(run_id, index))
-        .item("matches", AttributeValue::S(json))
-        .item(
-            "expires_at",
-            AttributeValue::N((now_secs() + ESTIMATION_RUN_TTL_SECS).to_string()),
-        )
-        .customize()
-        .config_override(patient_retries())
-        .send()
-        .await
-        .map_err(|e| {
-            let e = DisplayErrorContext(&e);
-            error!("DynamoDB put_item (estimation part {index} of {run_id}) failed: {e}");
-            lambda_runtime::Error::from(format!("Database write failed: {e}"))
-        })?;
-
-    // `ADD` to a number set and `SET` of this part's counter are both idempotent.
+    // `ADD` to a number set and `SET` of this part's slot are both idempotent.
     let updated = db_client
         .update_item()
         .table_name(&table)
         .key("run_id", key.clone())
-        .update_expression("ADD done :part SET #searched = :searched")
+        .update_expression("ADD done :part SET summaries.#part = :summary, #searched = :searched")
+        .expression_attribute_names("#part", format!("p{index}"))
         .expression_attribute_names("#searched", searched_attribute(index))
         .expression_attribute_values(":searched", AttributeValue::N(searched.to_string()))
         .expression_attribute_values(":part", AttributeValue::Ns(vec![index.to_string()]))
+        .expression_attribute_values(":summary", AttributeValue::S(json))
         .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
         .customize()
         .config_override(patient_retries())
@@ -505,13 +484,13 @@ pub async fn record_estimation_part(
     let parts = attrs
         .get("parts")
         .and_then(|v| v.as_n().ok())
-        .and_then(|n| n.parse::<u32>().ok())
-        .unwrap_or(u32::MAX);
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
     let done = attrs
         .get("done")
         .and_then(|v| v.as_ns().ok())
         .map_or(0, Vec::len);
-    if done < parts as usize {
+    if done < parts {
         return Ok(None);
     }
 
@@ -541,23 +520,20 @@ pub async fn record_estimation_part(
         )));
     }
 
-    let mut reads = tokio::task::JoinSet::new();
-    for part in 0..parts {
-        let (db_client, table, run_id) = (db_client.clone(), table.clone(), run_id.to_string());
-        reads.spawn(async move { read_part_matches(&run_id, part, &table, &db_client).await });
-    }
-    let mut all = Vec::new();
-    let mut stored = 0;
-    while let Some(read) = reads.join_next().await {
-        let json = read??;
-        stored += json.len();
-        all.extend(serde_json::from_str::<Vec<estimation25_lib::WindowMatch>>(
-            &json,
-        )?);
+    let mut merged: Option<estimation25_lib::Summary> = None;
+    if let Some(slots) = attrs.get("summaries").and_then(|v| v.as_m().ok()) {
+        for slot in slots.values() {
+            if let Ok(json) = slot.as_s()
+                && let Some(summary) =
+                    serde_json::from_str::<Option<estimation25_lib::Summary>>(json)?
+            {
+                merged = Some(merged.map_or(summary, |m| m.merge(summary)));
+            }
+        }
     }
     info!(
-        "Estimation run {} complete: {} part(s), {} bytes of matches",
-        run_id, parts, stored
+        "Estimation run {} complete: {} part(s), summary {:?}",
+        run_id, parts, merged
     );
     let started_at = attrs
         .get("started_at")
@@ -565,42 +541,9 @@ pub async fn record_estimation_part(
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(now_secs);
     Ok(Some(CompletedRun {
-        matches: all,
+        summary: merged,
         started_at,
     }))
-}
-
-/// The matches (JSON) part `index` stored. The read is consistent: the part stored them before
-/// counting itself as done, possibly an instant before the run was seen complete.
-async fn read_part_matches(
-    run_id: &str,
-    index: u32,
-    table: &str,
-    db_client: &aws_sdk_dynamodb::Client,
-) -> Result<String, lambda_runtime::Error> {
-    let item = db_client
-        .get_item()
-        .table_name(table)
-        .key("run_id", part_key(run_id, index))
-        .consistent_read(true)
-        .customize()
-        .config_override(patient_retries())
-        .send()
-        .await
-        .map_err(|e| {
-            let e = DisplayErrorContext(&e);
-            error!("DynamoDB get_item (estimation part {index} of {run_id}) failed: {e}");
-            lambda_runtime::Error::from(format!("Database read failed: {e}"))
-        })?
-        .item;
-    item.as_ref()
-        .and_then(|i| i.get("matches"))
-        .and_then(|v| v.as_s().ok())
-        .cloned()
-        .ok_or_else(|| {
-            error!("Matches of part {index} of {run_id} are missing");
-            lambda_runtime::Error::from(format!("Matches of part {index} are missing"))
-        })
 }
 
 /// Claims the right to post for a run that has not posted yet (the watchdog). Returns the number

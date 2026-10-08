@@ -798,13 +798,17 @@ async fn run_estimation_part(
     let search_input = input.clone();
     let (search_progress, search_cancel) = (Arc::clone(&progress), Arc::clone(&cancel));
     let search = tokio::task::spawn_blocking(move || {
-        estimation25_lib::search_seeds(
+        let conf = EstimConf::default();
+        let matches = estimation25_lib::search_seeds(
             &search_input,
-            &EstimConf::default(),
+            &conf,
             slice,
             &search_progress,
             &search_cancel,
-        )
+        )?;
+        // Only the summary is stored: a loose search finds thousands of windows per part.
+        let windows = matches.len();
+        estimation25_lib::summarize(&search_input, &conf, matches).map(|s| (windows, s))
     });
     let deadline = sleep(Duration::from_secs(ESTIMATION_TIMEOUT_SECS));
     tokio::pin!(search, deadline);
@@ -834,8 +838,8 @@ async fn run_estimation_part(
             }
         }
     };
-    let matches = match searched {
-        Some(Ok(Ok(matches))) => matches,
+    let (windows, summary) = match searched {
+        Some(Ok(Ok(searched))) => searched,
         Some(Ok(Err(EstimationError::Cancelled))) => return Ok(()),
         Some(Ok(Err(e))) => {
             return deliver_failure(job, clients, run_id, &format!("❌ Erreur : {e}")).await;
@@ -863,11 +867,12 @@ async fn run_estimation_part(
         }
     };
     info!(
-        "Estimation part {}/{} of {}: {} seed(s) in {:.1} s",
+        "Estimation part {}/{} of {}: {} window(s), summary {:?}, in {:.1} s",
         index + 1,
         parts,
         run_id,
-        matches.len(),
+        windows,
+        summary,
         start.elapsed().as_secs_f64()
     );
 
@@ -875,7 +880,7 @@ async fn run_estimation_part(
         run_id,
         index,
         slice_len,
-        &matches,
+        summary,
         &clients.dynamodb,
     )
     .await
@@ -894,18 +899,21 @@ async fn run_estimation_part(
         }
     };
     let button = config_button_id(run_id);
-    let (content, button) =
-        match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
-            Ok(estimate) => (
-                format!(
-                    "{}\n-# ⏱️ {ESTIMATION_SEEDS} runs testées en {} s",
-                    format_summary(&input, &estimate),
-                    database::seconds_since(done.started_at)
-                ),
-                Some(button.as_str()),
+    let estimate = done
+        .summary
+        .ok_or(EstimationError::Inconsistent)
+        .and_then(|summary| Ok((estimation25_lib::observations(&input)?, summary)));
+    let (content, button) = match estimate {
+        Ok((observations, summary)) => (
+            format!(
+                "{}\n-# ⏱️ {ESTIMATION_SEEDS} runs testées en {} s",
+                format_summary(&input, &observations, summary),
+                database::seconds_since(done.started_at)
             ),
-            Err(e) => (format!("❌ Erreur : {e}"), None),
-        };
+            Some(button.as_str()),
+        ),
+        Err(e) => (format!("❌ Erreur : {e}"), None),
+    };
     deliver(job, clients, &content, button).await?;
     info!("Estimation run {} result sent to Discord", run_id);
     Ok(())
