@@ -191,7 +191,7 @@ pub async fn get_user_key(
 }
 
 // `/estimation25` runs: the 2^32 seeds are split across parallel worker invocations, which merge
-// their results in one DynamoDB item (table `ESTIMATION_TABLE_NAME`, key `run_id`, TTL
+// their summaries in one DynamoDB item (table `ESTIMATION_TABLE_NAME`, key `run_id`, TTL
 // `expires_at`). Every write is idempotent so SQS redeliveries cannot corrupt a run.
 
 const ESTIMATION_RUN_TTL_SECS: u64 = 24 * 3600;
@@ -236,7 +236,7 @@ pub async fn create_estimation_run(
             "expires_at",
             AttributeValue::N((now + ESTIMATION_RUN_TTL_SECS).to_string()),
         )
-        .item("matches", AttributeValue::M(Default::default()))
+        .item("summaries", AttributeValue::M(Default::default()))
         .item("config", AttributeValue::S(config.to_string()));
     if let Some(user_id) = user_id {
         put = put.item("user_id", AttributeValue::S(user_id.to_string()));
@@ -424,10 +424,11 @@ pub async fn report_estimation_progress(
     }))
 }
 
-/// All parts of a run are done: the merged matches, handed to exactly one caller.
+/// All parts of a run are done: their merged summary (`None` when no seed matched), handed to
+/// exactly one caller.
 #[derive(Debug)]
 pub struct CompletedRun {
-    pub matches: Vec<estimation25_lib::WindowMatch>,
+    pub summary: Option<estimation25_lib::Summary>,
     pub started_at: u64,
 }
 
@@ -441,41 +442,42 @@ fn patient_retries() -> aws_sdk_dynamodb::config::Builder {
     )
 }
 
-/// Records the matching windows of part `index` (which searched `searched` seeds); returns the
-/// whole run once every part is recorded, to the single caller that wins the right to post it.
+/// Records the summary of part `index` (which searched `searched` seeds); returns the whole run
+/// once every part is recorded, to the single caller that wins the right to post it.
+///
+/// A part stores its summary, not its matching windows: a loose search finds thousands of windows
+/// per part, more than the run item's 400 KB.
 pub async fn record_estimation_part(
     run_id: &str,
     index: u32,
     searched: u64,
-    matches: &[estimation25_lib::WindowMatch],
+    summary: Option<estimation25_lib::Summary>,
     db_client: &aws_sdk_dynamodb::Client,
 ) -> Result<Option<CompletedRun>, lambda_runtime::Error> {
     let table = estimation_table();
     let key = AttributeValue::S(run_id.to_string());
-    let json = serde_json::to_string(matches)?;
+    let json = serde_json::to_string(&summary)?;
 
     // `ADD` to a number set and `SET` of this part's slot are both idempotent.
     let updated = db_client
         .update_item()
         .table_name(&table)
         .key("run_id", key.clone())
-        .update_expression("ADD done :part SET matches.#part = :matches, #searched = :searched")
+        .update_expression("ADD done :part SET summaries.#part = :summary, #searched = :searched")
         .expression_attribute_names("#part", format!("p{index}"))
         .expression_attribute_names("#searched", searched_attribute(index))
         .expression_attribute_values(":searched", AttributeValue::N(searched.to_string()))
         .expression_attribute_values(":part", AttributeValue::Ns(vec![index.to_string()]))
-        .expression_attribute_values(":matches", AttributeValue::S(json))
+        .expression_attribute_values(":summary", AttributeValue::S(json))
         .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
         .customize()
         .config_override(patient_retries())
         .send()
         .await
         .map_err(|e| {
-            error!(
-                "DynamoDB update_item (estimation part) failed: {}",
-                DisplayErrorContext(&e)
-            );
-            lambda_runtime::Error::from(format!("Database write failed: {}", e))
+            let e = DisplayErrorContext(&e);
+            error!("DynamoDB update_item (estimation part {index} of {run_id}) failed: {e}");
+            lambda_runtime::Error::from(format!("Database write failed: {e}"))
         })?;
     let attrs = updated.attributes.unwrap_or_default();
 
@@ -511,32 +513,27 @@ pub async fn record_estimation_part(
         {
             return Ok(None);
         }
-        error!(
-            "DynamoDB update_item (estimation claim) failed: {}",
-            DisplayErrorContext(&e)
-        );
+        let e = DisplayErrorContext(&e);
+        error!("DynamoDB update_item (estimation claim of {run_id}) failed: {e}");
         return Err(lambda_runtime::Error::from(format!(
-            "Database write failed: {}",
-            e
+            "Database write failed: {e}"
         )));
     }
 
-    let mut all = Vec::new();
-    // Every part's matches share the run item (400 KB maximum, written on each progress report).
-    let mut stored = 0;
-    if let Some(slots) = attrs.get("matches").and_then(|v| v.as_m().ok()) {
+    let mut merged: Option<estimation25_lib::Summary> = None;
+    if let Some(slots) = attrs.get("summaries").and_then(|v| v.as_m().ok()) {
         for slot in slots.values() {
-            if let Ok(json) = slot.as_s() {
-                stored += json.len();
-                all.extend(serde_json::from_str::<Vec<estimation25_lib::WindowMatch>>(
-                    json,
-                )?);
+            if let Ok(json) = slot.as_s()
+                && let Some(summary) =
+                    serde_json::from_str::<Option<estimation25_lib::Summary>>(json)?
+            {
+                merged = Some(merged.map_or(summary, |m| m.merge(summary)));
             }
         }
     }
     info!(
-        "Estimation run {} complete: {} part(s), {} bytes of matches in its item",
-        run_id, parts, stored
+        "Estimation run {} complete: {} part(s), summary {:?}",
+        run_id, parts, merged
     );
     let started_at = attrs
         .get("started_at")
@@ -544,7 +541,7 @@ pub async fn record_estimation_part(
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(now_secs);
     Ok(Some(CompletedRun {
-        matches: all,
+        summary: merged,
         started_at,
     }))
 }

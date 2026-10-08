@@ -1,29 +1,39 @@
 //! French result message of an estimate (Discord markdown), shared by `/estimation25` and the CLI.
 
 use crate::engine::{AttackMode, factors_differ, future_blocks};
-use crate::inference::{Estimate, EstimationInput};
+use crate::inference::{EstimationInput, Observation, Summary};
 use std::fmt::{self, Write};
 
-/// The estimate without its timing footer: callers add `-# ⏱️ …` with what they measured.
+/// The estimate (its readings' `observations` and its [`Summary`]) without its timing footer:
+/// callers add `-# ⏱️ …` with what they measured.
 #[must_use]
-pub fn format_summary(input: &EstimationInput, estimate: &Estimate) -> String {
+pub fn format_summary(
+    input: &EstimationInput,
+    observations: &[Observation],
+    summary: Summary,
+) -> String {
     let mut out = String::with_capacity(768);
-    write_summary(&mut out, input, estimate).expect("writing to a String cannot fail");
+    write_summary(&mut out, input, observations, summary).expect("writing to a String cannot fail");
     out
 }
 
-fn write_summary(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
+fn write_summary(
+    out: &mut String,
+    input: &EstimationInput,
+    observations: &[Observation],
+    summary: Summary,
+) -> fmt::Result {
     writeln!(
         out,
         "## 🔭 Estimation de l'attaque du J{}\n",
         input.estimated_day()
     )?;
-    write_parameters(out, input, estimate)?;
-    write_attack(out, input, estimate)?;
-    write_seeds(out, estimate)
+    write_parameters(out, input, observations)?;
+    write_attack(out, input, summary)?;
+    write_seeds(out, summary)
 }
 
-fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
+fn write_parameters(out: &mut String, input: &EstimationInput, obs: &[Observation]) -> fmt::Result {
     out.push_str("**Paramètres:**\n");
     write!(out, "• **📅 Jour**: {}", input.estimated_day())?;
     if input.future {
@@ -31,7 +41,6 @@ fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estima
     }
     out.push('\n');
 
-    let obs = &estimate.observations;
     if let (Some(first), Some(last)) = (obs.first(), obs.last()) {
         writeln!(
             out,
@@ -77,8 +86,8 @@ fn write_parameters(out: &mut String, input: &EstimationInput, estimate: &Estima
     Ok(())
 }
 
-fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) -> fmt::Result {
-    let (lo, hi) = estimate.attack();
+fn write_attack(out: &mut String, input: &EstimationInput, summary: Summary) -> fmt::Result {
+    let (lo, hi) = summary.attack;
     if input.has_red_souls() {
         // NightlyHandler: the night attack is round(zombies * soulFactor).
         let soul = input.night_soul_factor();
@@ -91,8 +100,8 @@ fn write_attack(out: &mut String, input: &EstimationInput, estimate: &Estimate) 
     Ok(())
 }
 
-fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
-    let count = estimate.seed_count();
+fn write_seeds(out: &mut String, summary: Summary) -> fmt::Result {
+    let count = summary.seeds;
     if count > 1 {
         writeln!(out, "-# {count} runs compatibles")?;
     }
@@ -102,8 +111,12 @@ fn write_seeds(out: &mut String, estimate: &Estimate) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::{Observation, Reading, WindowEstimate};
+    use crate::inference::{Estimate, Reading, WindowEstimate};
     use crate::seed::Window;
+
+    fn format_estimate(input: &EstimationInput, estimate: &Estimate) -> String {
+        format_summary(input, &estimate.observations, estimate.summary())
+    }
 
     fn estimate(seeds: u64) -> Estimate {
         Estimate {
@@ -140,7 +153,7 @@ mod tests {
             day: 17,
             ..EstimationInput::default()
         };
-        let text = format_summary(&input, &estimate(1));
+        let text = format_estimate(&input, &estimate(1));
         assert!(text.starts_with("## 🔭 Estimation de l'attaque du J17\n"));
         assert!(text.contains("🎯 **Attaque: 3949 - 3971**\n"));
         assert!(text.contains("• **🔭 Dernier relevé**: 3869 - 4218 (100 %)\n"));
@@ -156,7 +169,7 @@ mod tests {
             soul_factor: 1.04,
             ..EstimationInput::default()
         };
-        let text = format_summary(&input, &estimate(1));
+        let text = format_estimate(&input, &estimate(1));
         assert!(text.contains("🎯 **Attaque: 4107 - 4130**\n"));
         assert!(text.contains("-# Attaque avant âmes rouges : 3949 - 3971\n"));
         assert!(text.contains("• **👻 Âmes rouges**: ×1.04\n"));
@@ -175,7 +188,7 @@ mod tests {
             }],
             ..EstimationInput::default()
         };
-        let text = format_summary(&input, &estimate(1));
+        let text = format_estimate(&input, &estimate(1));
         assert!(text.contains("• **👻 Âmes rouges**: ×1.04 (veille ×1.08)\n"));
     }
 
@@ -188,7 +201,7 @@ mod tests {
             attack_soul_factor: Some(1.02),
             ..EstimationInput::default()
         };
-        let text = format_summary(&input, &estimate(1));
+        let text = format_estimate(&input, &estimate(1));
         // round(3949 × 1.02) - round(3971 × 1.02)
         assert!(text.contains("🎯 **Attaque: 4028 - 4050**\n"));
         assert!(text.contains("• **👻 Âmes rouges**: ×1.04 (attaque ×1.02)\n"));
@@ -200,7 +213,7 @@ mod tests {
             day: 17,
             ..EstimationInput::default()
         };
-        let text = format_summary(&input, &estimate(8));
+        let text = format_estimate(&input, &estimate(8));
         assert!(text.contains("-# 8 runs compatibles\n"));
         assert!(!text.contains("Seed 0x"));
     }

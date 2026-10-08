@@ -19,8 +19,8 @@ use debordo_lib::config::{
 };
 use debordo_lib::database;
 use debordo_lib::discord::api::{
-    delete_original, post_followup_mentioning, send_followup, send_followup_with_button,
-    send_followup_with_cancel, send_followup_without_buttons,
+    send_followup, send_followup_with_button, send_followup_with_cancel,
+    send_followup_without_buttons,
 };
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::simulation::{
@@ -394,9 +394,8 @@ fn config_button_id(run_id: &str) -> String {
     format!("{ESTIMATION_CONFIG_BUTTON}{run_id}")
 }
 
-/// Final outcome of a run (result or failure). Editing a message never notifies a mention, so
-/// it is posted as a new message mentioning the caller and the waiting message is removed;
-/// if that post fails, the waiting message is edited instead so the outcome is never lost.
+/// Final outcome of a run (result or failure), edited into the waiting message: it stays under
+/// the command that started the run. An edit notifies no mention, so the caller is not pinged.
 /// `button` adds the "Voir la configuration" button (results only).
 async fn deliver(
     job: &SimulationJob,
@@ -404,35 +403,20 @@ async fn deliver(
     content: &str,
     button: Option<&str>,
 ) -> Result<(), Error> {
-    let (http, app, token) = (&clients.http, &job.application_id, &job.token);
-    let edit_waiting_message = || async {
-        match button {
-            Some(custom_id) => {
-                let content = discord_text(content);
-                send_followup_with_button(http, app, token, &content, custom_id).await?;
-                Ok(())
-            }
-            None => reply(job, clients, content).await,
-        }
-    };
-    let Some(user_id) = caller(job) else {
-        return edit_waiting_message().await;
-    };
-    let text = discord_text(&format!("<@{user_id}>\n{content}"));
-    match post_followup_mentioning(http, app, token, &text, &user_id, button).await {
-        Ok(()) => {
-            if let Err(e) = delete_original(http, app, token).await {
-                info!("Could not delete the waiting message: {}", e);
-            }
+    match button {
+        Some(custom_id) => {
+            let content = discord_text(content);
+            send_followup_with_button(
+                &clients.http,
+                &job.application_id,
+                &job.token,
+                &content,
+                custom_id,
+            )
+            .await?;
             Ok(())
         }
-        Err(e) => {
-            error!(
-                "Notified follow-up failed, editing the waiting message: {}",
-                e
-            );
-            edit_waiting_message().await
-        }
+        None => reply(job, clients, content).await,
     }
 }
 
@@ -798,13 +782,17 @@ async fn run_estimation_part(
     let search_input = input.clone();
     let (search_progress, search_cancel) = (Arc::clone(&progress), Arc::clone(&cancel));
     let search = tokio::task::spawn_blocking(move || {
-        estimation25_lib::search_seeds(
+        let conf = EstimConf::default();
+        let matches = estimation25_lib::search_seeds(
             &search_input,
-            &EstimConf::default(),
+            &conf,
             slice,
             &search_progress,
             &search_cancel,
-        )
+        )?;
+        // Only the summary is stored: a loose search finds thousands of windows per part.
+        let windows = matches.len();
+        estimation25_lib::summarize(&search_input, &conf, matches).map(|s| (windows, s))
     });
     let deadline = sleep(Duration::from_secs(ESTIMATION_TIMEOUT_SECS));
     tokio::pin!(search, deadline);
@@ -834,8 +822,8 @@ async fn run_estimation_part(
             }
         }
     };
-    let matches = match searched {
-        Some(Ok(Ok(matches))) => matches,
+    let (windows, summary) = match searched {
+        Some(Ok(Ok(searched))) => searched,
         Some(Ok(Err(EstimationError::Cancelled))) => return Ok(()),
         Some(Ok(Err(e))) => {
             return deliver_failure(job, clients, run_id, &format!("❌ Erreur : {e}")).await;
@@ -863,11 +851,12 @@ async fn run_estimation_part(
         }
     };
     info!(
-        "Estimation part {}/{} of {}: {} seed(s) in {:.1} s",
+        "Estimation part {}/{} of {}: {} window(s), summary {:?}, in {:.1} s",
         index + 1,
         parts,
         run_id,
-        matches.len(),
+        windows,
+        summary,
         start.elapsed().as_secs_f64()
     );
 
@@ -875,7 +864,7 @@ async fn run_estimation_part(
         run_id,
         index,
         slice_len,
-        &matches,
+        summary,
         &clients.dynamodb,
     )
     .await
@@ -894,18 +883,21 @@ async fn run_estimation_part(
         }
     };
     let button = config_button_id(run_id);
-    let (content, button) =
-        match estimation25_lib::finish(&input, &EstimConf::default(), done.matches) {
-            Ok(estimate) => (
-                format!(
-                    "{}\n-# ⏱️ {ESTIMATION_SEEDS} runs testées en {} s",
-                    format_summary(&input, &estimate),
-                    database::seconds_since(done.started_at)
-                ),
-                Some(button.as_str()),
+    let estimate = done
+        .summary
+        .ok_or(EstimationError::Inconsistent)
+        .and_then(|summary| Ok((estimation25_lib::observations(&input)?, summary)));
+    let (content, button) = match estimate {
+        Ok((observations, summary)) => (
+            format!(
+                "{}\n-# ⏱️ {ESTIMATION_SEEDS} runs testées en {} s",
+                format_summary(&input, &observations, summary),
+                database::seconds_since(done.started_at)
             ),
-            Err(e) => (format!("❌ Erreur : {e}"), None),
-        };
+            Some(button.as_str()),
+        ),
+        Err(e) => (format!("❌ Erreur : {e}"), None),
+    };
     deliver(job, clients, &content, button).await?;
     info!("Estimation run {} result sent to Discord", run_id);
     Ok(())
