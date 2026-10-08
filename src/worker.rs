@@ -19,7 +19,7 @@ use debordo_lib::config::{
 };
 use debordo_lib::database;
 use debordo_lib::discord::api::{
-    post_followup_mentioning, send_followup, send_followup_with_button, send_followup_with_cancel,
+    send_followup, send_followup_with_button, send_followup_with_cancel,
     send_followup_without_buttons,
 };
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
@@ -87,11 +87,6 @@ fn progress_message(run_id: &str, step: u64) -> &'static str {
         .unwrap_or(0);
     let len = PROGRESS_MESSAGES.len() as u64;
     PROGRESS_MESSAGES[((offset % len + step % len) % len) as usize]
-}
-
-/// What the waiting message becomes once the outcome is posted below it.
-fn finished_message(run_id: &str) -> String {
-    format!("🔭 Recherche terminée, réponse ci-dessous.\n-# `{run_id}`")
 }
 
 fn waiting_message(run_id: &str, step: u64, searched: u64) -> String {
@@ -399,10 +394,8 @@ fn config_button_id(run_id: &str) -> String {
     format!("{ESTIMATION_CONFIG_BUTTON}{run_id}")
 }
 
-/// Final outcome of a run (result or failure). Editing a message never notifies a mention, so
-/// it is posted as a new message mentioning the caller. The waiting message stays, as it shows
-/// the command that started the run, with the run id (to find it in the logs) instead of its
-/// progress; if the post fails, the outcome is edited into it so it is never lost.
+/// Final outcome of a run (result or failure), edited into the waiting message: it stays under
+/// the command that started the run. An edit notifies no mention, so the caller is not pinged.
 /// `button` adds the "Voir la configuration" button (results only).
 async fn deliver(
     job: &SimulationJob,
@@ -410,36 +403,20 @@ async fn deliver(
     content: &str,
     button: Option<&str>,
 ) -> Result<(), Error> {
-    let (http, app, token) = (&clients.http, &job.application_id, &job.token);
-    let edit_waiting_message = || async {
-        match button {
-            Some(custom_id) => {
-                let content = discord_text(content);
-                send_followup_with_button(http, app, token, &content, custom_id).await?;
-                Ok(())
-            }
-            None => reply(job, clients, content).await,
-        }
-    };
-    let Some(user_id) = caller(job) else {
-        return edit_waiting_message().await;
-    };
-    let text = discord_text(&format!("<@{user_id}>\n{content}"));
-    match post_followup_mentioning(http, app, token, &text, &user_id, button).await {
-        Ok(()) => {
-            let done = finished_message(&database::estimation_run_id(token));
-            if let Err(e) = send_followup_without_buttons(http, app, token, &done).await {
-                info!("Could not close the waiting message: {}", e);
-            }
+    match button {
+        Some(custom_id) => {
+            let content = discord_text(content);
+            send_followup_with_button(
+                &clients.http,
+                &job.application_id,
+                &job.token,
+                &content,
+                custom_id,
+            )
+            .await?;
             Ok(())
         }
-        Err(e) => {
-            error!(
-                "Notified follow-up failed, editing the waiting message: {}",
-                e
-            );
-            edit_waiting_message().await
-        }
+        None => reply(job, clients, content).await,
     }
 }
 
@@ -1077,13 +1054,5 @@ mod tests {
             format!("{}\n`▰▰▰▰▱▱▱▱▱▱` 42 %", PROGRESS_MESSAGES[1])
         );
         assert!(waiting_message("", 0, ESTIMATION_SEEDS).ends_with("` 99 %"));
-    }
-
-    #[test]
-    fn test_finished_message_keeps_the_run_id() {
-        assert_eq!(
-            finished_message("ee46056d"),
-            "🔭 Recherche terminée, réponse ci-dessous.\n-# `ee46056d`"
-        );
     }
 }
