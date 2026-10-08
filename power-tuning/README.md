@@ -91,14 +91,12 @@ For P in 8, 16, 32, 64 and 128 (and each P must fit within the concurrency quota
    - `Estimation part i/P of <run> waited N ms to start`: from the plan's invoke to the start of
      the part. The largest wait is the start-up ramp. Through SQS (before the asynchronous
      invocations), the last parts of a 16-part run waited ~14 s.
-   - `Estimation run <run> complete: P part(s), N bytes of matches in its item`: the item is
-     limited to 400 KB and rewritten by every 5 s progress report.
+   - `Estimation run <run> complete: P part(s), N bytes of matches`: each part stores its
+     matches in its own item (limited to 400 KB), out of the run item.
 
 ## 4. Choosing P and applying it
 
 - Choose the smallest P whose footer time is within ~10% of the best one.
-- **Item size**: if the matches near ~100 KB, move each part's matches to its own item before
-  going further.
 - Apply M and P to the "Deploy Worker Lambda" steps of both workflows (`--memory M`,
   `--env-var ESTIMATION_PARTS=P`) and to `DEFAULT_ESTIMATION_PARTS` in `src/worker.rs`.
 - Once at least 100 executions stay unreserved, give the receiver reserved concurrency (e.g. 10)
