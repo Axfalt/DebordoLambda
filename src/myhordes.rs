@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tracing::{error, info};
 
 #[derive(Deserialize, Debug, Clone)]
@@ -20,6 +20,7 @@ pub struct MHMap {
 pub struct MHCity {
     pub defense: Option<MHDefense>,
     pub buildings: Vec<MHBuilding>,
+    #[serde(default, deserialize_with = "deserialize_estimations")]
     pub estimations: Option<MHEstimation>,
     pub chaos: Option<bool>,
     pub devast: Option<bool>,
@@ -52,6 +53,25 @@ pub struct MHBuilding {
 pub struct MHEstimation {
     pub min: i32,
     pub max: i32,
+}
+
+/// MyHordes sends `"estimations": []` (PHP's empty array) when the town has no
+/// watchtower estimate yet; treat it, like `null`, as no estimate.
+fn deserialize_estimations<'de, D>(deserializer: D) -> Result<Option<MHEstimation>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawEstimations {
+        Estimation(MHEstimation),
+        Empty([(); 0]),
+    }
+
+    Ok(match Option::<RawEstimations>::deserialize(deserializer)? {
+        Some(RawEstimations::Estimation(e)) => Some(e),
+        Some(RawEstimations::Empty(_)) | None => None,
+    })
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -203,6 +223,30 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert_eq!(min_def, 12);
+    }
+
+    #[test]
+    fn test_parse_city_empty_estimations_array_is_none() {
+        let city: MHCity = serde_json::from_value(serde_json::json!({
+            "buildings": [],
+            "estimations": []
+        }))
+        .unwrap();
+        assert!(city.estimations.is_none());
+    }
+
+    #[test]
+    fn test_parse_city_null_or_missing_estimations_is_none() {
+        let null_city: MHCity = serde_json::from_value(serde_json::json!({
+            "buildings": [],
+            "estimations": null
+        }))
+        .unwrap();
+        assert!(null_city.estimations.is_none());
+
+        let missing_city: MHCity =
+            serde_json::from_value(serde_json::json!({ "buildings": [] })).unwrap();
+        assert!(missing_city.estimations.is_none());
     }
 
     #[test]

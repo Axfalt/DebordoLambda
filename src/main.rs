@@ -518,18 +518,11 @@ async fn handle_command(
                             .and_then(|c| c.defense.as_ref())
                             .map(|d| d.total)
                             .unwrap_or(0);
-                        let api_tdg_min = map
+                        let api_tdg = map
                             .city
                             .as_ref()
                             .and_then(|c| c.estimations.as_ref())
-                            .map(|e| e.min)
-                            .unwrap_or(0);
-                        let api_tdg_max = map
-                            .city
-                            .as_ref()
-                            .and_then(|c| c.estimations.as_ref())
-                            .map(|e| e.max)
-                            .unwrap_or(0);
+                            .map(|e| (e.min, e.max));
                         let api_reactor = map
                             .city
                             .as_ref()
@@ -595,6 +588,8 @@ async fn handle_command(
                         }
 
                         let day = user_day.unwrap_or(api_day);
+                        let (api_tdg_min, api_tdg_max) =
+                            api_tdg.unwrap_or_else(|| possible_attack_range(day));
                         let defense = if user_risque.is_some() {
                             0
                         } else {
@@ -608,12 +603,17 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
+                        // A house without upgrades has 0 defense, so min_def 0 is valid.
                         if (defense <= 0 && user_risque.is_none())
                             || tdg_min <= 0
                             || tdg_max <= 0
-                            || min_def <= 0
+                            || min_def < 0
+                            || nb_hab <= 0
                         {
-                            let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
+                            let error_msg = format!(
+                                "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.\n(défense : {}, TDG : {} - {}, défense min : {}, habitants : {})",
+                                defense, tdg_min, tdg_max, min_def, nb_hab
+                            );
                             let response = DiscordResponse {
                                 response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
                                 data: Some(serde_json::json!({
@@ -739,6 +739,16 @@ async fn handle_command(
     }
 }
 
+/// Whole attack range of `day`, used in place of the watchtower estimate while MyHordes has
+/// none to show yet.
+fn possible_attack_range(day: i32) -> (i32, i32) {
+    let (min, max) = estimation25_lib::engine::attack_range(
+        i64::from(day),
+        estimation25_lib::AttackMode::Normal,
+    );
+    (min as i32, max as i32)
+}
+
 async fn handle_reparo_command(
     interaction: DiscordInteraction,
     dynamodb_client: &aws_sdk_dynamodb::Client,
@@ -816,18 +826,11 @@ async fn handle_reparo_command(
                             .and_then(|c| c.defense.as_ref())
                             .map(|d| d.watchmen)
                             .unwrap_or(0);
-                        let api_tdg_min = map
+                        let api_tdg = map
                             .city
                             .as_ref()
                             .and_then(|c| c.estimations.as_ref())
-                            .map(|e| e.min)
-                            .unwrap_or(0);
-                        let api_tdg_max = map
-                            .city
-                            .as_ref()
-                            .and_then(|c| c.estimations.as_ref())
-                            .map(|e| e.max)
-                            .unwrap_or(0);
+                            .map(|e| (e.min, e.max));
                         let api_buildings: Vec<reparo_lib::SimBuilding> = map
                             .city
                             .as_ref()
@@ -845,6 +848,9 @@ async fn handle_reparo_command(
                                     .collect()
                             })
                             .unwrap_or_default();
+
+                        let (api_tdg_min, api_tdg_max) =
+                            api_tdg.unwrap_or_else(|| possible_attack_range(map.days));
 
                         let buildings = if api_buildings.is_empty() {
                             reparo_lib::default_buildings()
@@ -1668,6 +1674,14 @@ async fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_possible_attack_range_matches_myhordes_formula() {
+        // round(1.1 * (13 * 0.75 + 2.5)^3) and round(1.1 * (14 * 0.75 + 3.5)^3)
+        assert_eq!(possible_attack_range(14), (2022, 3018));
+        // Day 1: round(0.75 * 3.25^3) and round(0.5 * 4.25^3)
+        assert_eq!(possible_attack_range(1), (26, 38));
+    }
 
     #[test]
     fn test_resolve_citizens_applies_home_bonus() {
