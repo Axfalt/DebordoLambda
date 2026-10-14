@@ -603,12 +603,17 @@ async fn handle_command(
                         let nb_drapo = user_nb_drapo.unwrap_or(0);
                         let iterations = user_iterations.unwrap_or(10000) as u32;
 
+                        // A house without upgrades has 0 defense, so min_def 0 is valid.
                         if (defense <= 0 && user_risque.is_none())
                             || tdg_min <= 0
                             || tdg_max <= 0
-                            || min_def <= 0
+                            || min_def < 0
+                            || nb_hab <= 0
                         {
-                            let error_msg = "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.";
+                            let error_msg = format!(
+                                "Erreur : Impossible de récupérer des données de ville valides via l'API (êtes-vous actuellement en vie dans une ville ?). Veuillez saisir les paramètres requis manuellement.\n(défense : {}, TDG : {} - {}, défense min : {}, habitants : {})",
+                                defense, tdg_min, tdg_max, min_def, nb_hab
+                            );
                             let response = DiscordResponse {
                                 response_type: response_types::CHANNEL_MESSAGE_WITH_SOURCE,
                                 data: Some(serde_json::json!({
