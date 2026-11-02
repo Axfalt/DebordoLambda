@@ -24,8 +24,8 @@ use debordo_lib::discord::api::{
 };
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
 use debordo_lib::screenshot::{
-    MAX_CAPTURE_BYTES, OcrWord, REVIEW_CITIZENS_BUTTON, citizens_from_rows, is_discord_cdn_url,
-    parse_citizen_rows, reconcile_with_api, review_message,
+    MAX_CAPTURE_BYTES, OcrWord, REVIEW_CITIZENS_BUTTON, capture_for_textract, citizens_from_rows,
+    is_discord_cdn_url, parse_citizen_rows, reconcile_with_api, review_message,
 };
 use debordo_lib::simulation::{
     complete_overflow_probability, overflow_probability, required_defense,
@@ -236,12 +236,26 @@ async fn process_screenshot_job(job: SimulationJob, clients: &Clients) -> Result
     let url = job.citizen_screenshot.as_deref().unwrap_or_default();
 
     let read = async {
-        let image = download_capture(url, http_client).await?;
-        detect_words(image, &clients.textract).await
+        let capture = download_capture(url, http_client).await?;
+        let image = match capture_for_textract(capture) {
+            Ok(image) => image,
+            Err(reason) => {
+                error!("Unusable citizen list capture: {}", reason);
+                return Ok(None);
+            }
+        };
+        detect_words(image, &clients.textract).await.map(Some)
     }
     .await;
     let words = match read {
-        Ok(words) => words,
+        Ok(Some(words)) => words,
+        Ok(None) => {
+            let content =
+                "❌ Format d'image non pris en charge. Envoyez une capture PNG, JPEG ou WebP.";
+            send_followup_without_buttons(http_client, &job.application_id, &job.token, content)
+                .await?;
+            return Ok(());
+        }
         Err(e) => {
             error!("Failed to read the citizen list capture: {}", e);
             let content = "❌ Lecture de la capture impossible. Réessayez, ou saisissez les défenses dans le formulaire de `/debordo-complete`.";

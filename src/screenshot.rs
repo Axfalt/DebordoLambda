@@ -7,7 +7,9 @@
 //! a `--`, and that citizen must not disappear from the list.
 
 use crate::config::SimulationCitizen;
+use image::ImageFormat;
 use std::collections::HashSet;
+use std::io::Cursor;
 
 /// Below this confidence (in %), a name or defense is pointed out in the review message.
 const LOW_CONFIDENCE: f32 = 90.0;
@@ -463,6 +465,26 @@ pub fn review_message_conf(content: &str) -> Option<&str> {
     Some(conf)
 }
 
+/// The capture in a format Textract reads, going by the file's content: PNG and JPEG as they are,
+/// WebP converted to PNG. The error says why the file can't be used.
+pub fn capture_for_textract(capture: Vec<u8>) -> Result<Vec<u8>, String> {
+    let format = image::guess_format(&capture).map_err(|e| e.to_string())?;
+    tracing::info!("Capture format: {:?}", format);
+    match format {
+        ImageFormat::Png | ImageFormat::Jpeg => Ok(capture),
+        ImageFormat::WebP => {
+            let decoded = image::load_from_memory_with_format(&capture, ImageFormat::WebP)
+                .map_err(|e| e.to_string())?;
+            let mut png = Cursor::new(Vec::new());
+            decoded
+                .write_to(&mut png, ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            Ok(png.into_inner())
+        }
+        other => Err(format!("unsupported format {other:?}")),
+    }
+}
+
 /// Whether the worker may download `url`: the interaction is signed, but it fetches this address
 /// with its own network access, so only Discord's CDN is accepted.
 #[must_use]
@@ -477,6 +499,38 @@ pub fn is_discord_cdn_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encoded_image(format: ImageFormat) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(3, 2)
+            .write_to(&mut out, format)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn capture_for_textract_keeps_png_and_jpeg() {
+        let png = encoded_image(ImageFormat::Png);
+        assert_eq!(capture_for_textract(png.clone()).unwrap(), png);
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0];
+        assert_eq!(capture_for_textract(jpeg.clone()).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn capture_for_textract_converts_webp_to_png() {
+        let converted = capture_for_textract(encoded_image(ImageFormat::WebP)).unwrap();
+        assert_eq!(image::guess_format(&converted).unwrap(), ImageFormat::Png);
+        let decoded = image::load_from_memory(&converted).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+    }
+
+    #[test]
+    fn capture_for_textract_rejects_the_rest() {
+        assert!(capture_for_textract(b"GIF89a......".to_vec()).is_err());
+        assert!(capture_for_textract(b"not an image".to_vec()).is_err());
+        // A WebP header with no image behind it.
+        assert!(capture_for_textract(b"RIFF\0\0\0\0WEBPVP8 ".to_vec()).is_err());
+    }
 
     /// Textract's output for a real capture (`E:\code\demo-mh.png`), reduced to its WORD blocks:
     /// a town where all the heroes have 2 defense and the two non-heroes show `--`.

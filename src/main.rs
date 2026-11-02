@@ -1365,12 +1365,17 @@ fn target_message_capture_url(interaction: &DiscordInteraction) -> Result<String
 }
 
 fn checked_capture_url(attachment: &Attachment) -> Result<String, &'static str> {
-    // The formats Textract accepts.
-    if !matches!(
-        attachment.content_type.as_deref(),
-        Some("image/png" | "image/jpeg")
-    ) {
-        return Err("Erreur : la capture doit être une image PNG ou JPEG.");
+    info!(
+        "Capture attachment: type {:?}, {} bytes",
+        attachment.content_type, attachment.size
+    );
+    // Discord's type is only a hint and can be missing: the worker checks the file itself.
+    if attachment
+        .content_type
+        .as_deref()
+        .is_some_and(|content_type| !content_type.starts_with("image/"))
+    {
+        return Err("Erreur : la capture doit être une image PNG, JPEG ou WebP.");
     }
     if attachment.size > MAX_CAPTURE_BYTES {
         return Err("Erreur : la capture ne doit pas dépasser 5 Mo.");
@@ -1666,14 +1671,14 @@ fn defenses_modal_with_upload(citizens_str: &str) -> serde_json::Value {
         {
             "type": 18, // LABEL
             "label": "Capture de la liste des citoyens",
-            "description": "Facultatif : remplace les défenses ci-dessus (PNG ou JPEG, 5 Mo max).",
+            "description": "Facultatif : remplace les défenses ci-dessus (PNG, JPEG ou WebP, 5 Mo max).",
             "component": {
                 "type": 19, // FILE_UPLOAD
                 "custom_id": CAPTURE_INPUT,
                 "min_values": 0,
                 "max_values": 1,
                 "required": false,
-                "file_types": [".png", ".jpg", ".jpeg"]
+                "file_types": [".png", ".jpg", ".jpeg", ".webp"]
             }
         }
     ])
@@ -1868,9 +1873,13 @@ mod tests {
             "content_type": "image/png",
             "size": 1000
         });
-        let webp = serde_json::json!({
-            "url": "https://cdn.discordapp.com/a.webp",
-            "content_type": "image/webp",
+        let text = serde_json::json!({
+            "url": "https://cdn.discordapp.com/a.txt",
+            "content_type": "text/plain",
+            "size": 1000
+        });
+        let untyped = serde_json::json!({
+            "url": "https://cdn.discordapp.com/b.png",
             "size": 1000
         });
 
@@ -1883,8 +1892,14 @@ mod tests {
         assert!(target_message_capture_url(&none).is_err());
         let two = message_command_interaction(serde_json::json!([png, png]));
         assert!(target_message_capture_url(&two).is_err());
-        let wrong_type = message_command_interaction(serde_json::json!([webp]));
+        let wrong_type = message_command_interaction(serde_json::json!([text]));
         assert!(target_message_capture_url(&wrong_type).is_err());
+        // The worker checks the file itself when Discord gives no type.
+        let no_type = message_command_interaction(serde_json::json!([untyped]));
+        assert_eq!(
+            target_message_capture_url(&no_type).as_deref(),
+            Ok("https://cdn.discordapp.com/b.png")
+        );
     }
 
     #[test]
@@ -1896,7 +1911,9 @@ mod tests {
         );
         assert!(validated_capture_url(&png, "2").is_err());
         let webp = capture_interaction("image/webp", 1000);
-        assert!(validated_capture_url(&webp, "1").is_err());
+        assert!(validated_capture_url(&webp, "1").is_ok());
+        let text = capture_interaction("text/plain", 1000);
+        assert!(validated_capture_url(&text, "1").is_err());
         let large = capture_interaction("image/jpeg", MAX_CAPTURE_BYTES + 1);
         assert!(validated_capture_url(&large, "1").is_err());
     }

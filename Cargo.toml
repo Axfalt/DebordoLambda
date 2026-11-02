@@ -54,4 +54,5 @@ hex = "0.4"
 # Tracing pour les logs Lambda
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 
