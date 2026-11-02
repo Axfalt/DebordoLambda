@@ -35,13 +35,42 @@ pub struct InteractionData {
     pub options: Option<Vec<CommandOption>>,
     pub custom_id: Option<String>,
     pub components: Option<Vec<ModalActionRow>>,
+    pub resolved: Option<ResolvedData>,
+    /// The message a message command was used on, found in the resolved messages.
+    pub target_id: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ResolvedData {
+    #[serde(default)]
+    pub attachments: std::collections::HashMap<String, Attachment>,
+    #[serde(default)]
+    pub messages: std::collections::HashMap<String, ResolvedMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolvedMessage {
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Attachment {
+    pub url: String,
+    pub content_type: Option<String>,
+    pub size: u64,
+}
+
+/// A top-level component of a submitted modal: an action row (`components`) or a label
+/// (`component`).
 #[derive(Debug, Deserialize)]
 pub struct ModalActionRow {
     #[serde(rename = "type")]
     pub component_type: u8,
+    #[serde(default)]
     pub components: Vec<ModalComponent>,
+    #[serde(default)]
+    pub component: Option<ModalComponent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +79,9 @@ pub struct ModalComponent {
     pub component_type: u8,
     pub custom_id: String,
     pub value: Option<String>,
+    /// Ids of the uploaded files of a file upload, found in the resolved attachments.
+    #[serde(default)]
+    pub values: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,21 +100,41 @@ impl DiscordInteraction {
             .map(|u| u.id.as_str())
             .or_else(|| self.member.as_ref().map(|m| m.user.id.as_str()))
     }
-    
-    pub fn get_modal_value(&self, custom_id: &str) -> Option<&str> {
+
+    /// The uploaded file an id from `get_modal_files` refers to.
+    pub fn attachment(&self, id: &str) -> Option<&Attachment> {
+        self.data.as_ref()?.resolved.as_ref()?.attachments.get(id)
+    }
+
+    /// The files of the message a message command was used on.
+    pub fn target_message_attachments(&self) -> &[Attachment] {
+        let attachments = || {
+            let data = self.data.as_ref()?;
+            let target = data.target_id.as_ref()?;
+            let message = data.resolved.as_ref()?.messages.get(target)?;
+            Some(message.attachments.as_slice())
+        };
+        attachments().unwrap_or_default()
+    }
+
+    fn get_modal_component(&self, custom_id: &str) -> Option<&ModalComponent> {
         self.data
-            .as_ref()
-            .and_then(|d| d.components.as_ref())
-            .and_then(|rows| {
-                for row in rows {
-                    for comp in &row.components {
-                        if comp.custom_id == custom_id {
-                            return comp.value.as_deref();
-                        }
-                    }
-                }
-                None
-            })
+            .as_ref()?
+            .components
+            .as_ref()?
+            .iter()
+            .flat_map(|row| row.components.iter().chain(&row.component))
+            .find(|comp| comp.custom_id == custom_id)
+    }
+
+    pub fn get_modal_value(&self, custom_id: &str) -> Option<&str> {
+        self.get_modal_component(custom_id)?.value.as_deref()
+    }
+
+    /// Ids of the files uploaded in a modal's file upload.
+    pub fn get_modal_files(&self, custom_id: &str) -> &[String] {
+        self.get_modal_component(custom_id)
+            .map_or(&[], |comp| comp.values.as_slice())
     }
 }
 
@@ -133,6 +185,124 @@ mod tests {
         });
         let interaction: DiscordInteraction = serde_json::from_value(interaction_json).unwrap();
         assert_eq!(interaction.user_id(), Some("987654321"));
+    }
+
+    #[test]
+    fn test_parse_modal_submit_with_labels_and_file() {
+        let interaction_json = json!({
+            "type": 5,
+            "data": {
+                "custom_id": "dm:api:comp",
+                "components": [
+                    {
+                        "type": 18,
+                        "id": 1,
+                        "component": {
+                            "type": 4,
+                            "id": 2,
+                            "custom_id": "defenses_input",
+                            "value": "defense: 100"
+                        }
+                    },
+                    {
+                        "type": 18,
+                        "id": 3,
+                        "component": {
+                            "type": 19,
+                            "id": 4,
+                            "custom_id": "capture_input",
+                            "values": ["111"]
+                        }
+                    }
+                ],
+                "resolved": {
+                    "attachments": {
+                        "111": {
+                            "id": "111",
+                            "filename": "citoyens.png",
+                            "url": "https://cdn.discordapp.com/ephemeral-attachments/1/111/citoyens.png",
+                            "proxy_url": "https://media.discordapp.net/ephemeral-attachments/1/111/citoyens.png",
+                            "content_type": "image/png",
+                            "size": 12345,
+                            "width": 600,
+                            "height": 1292
+                        }
+                    }
+                }
+            }
+        });
+        let interaction: DiscordInteraction = serde_json::from_value(interaction_json).unwrap();
+        assert_eq!(
+            interaction.get_modal_value("defenses_input"),
+            Some("defense: 100")
+        );
+        assert_eq!(interaction.get_modal_files("capture_input"), ["111"]);
+        assert!(interaction.get_modal_files("defenses_input").is_empty());
+        assert!(interaction.get_modal_files("non_existent").is_empty());
+        let attachment = interaction.attachment("111").unwrap();
+        assert_eq!(attachment.content_type.as_deref(), Some("image/png"));
+        assert_eq!(attachment.size, 12345);
+        assert!(interaction.attachment("222").is_none());
+    }
+
+    #[test]
+    fn test_parse_message_command_attachments() {
+        let interaction_json = json!({
+            "type": 2,
+            "data": {
+                "id": "866818195033292851",
+                "name": "Simuler depuis la capture",
+                "type": 3,
+                "target_id": "42",
+                "resolved": {
+                    "messages": {
+                        "42": {
+                            "id": "42",
+                            "channel_id": "772908445358620702",
+                            "content": "",
+                            "author": {"id": "167348773423415296", "username": "ian"},
+                            "attachments": [{
+                                "id": "111",
+                                "filename": "image.png",
+                                "url": "https://cdn.discordapp.com/attachments/1/111/image.png?ex=1&is=2&hm=3",
+                                "proxy_url": "https://media.discordapp.net/attachments/1/111/image.png",
+                                "content_type": "image/png",
+                                "size": 12345,
+                                "width": 600,
+                                "height": 1292
+                            }]
+                        },
+                        "43": {"id": "43"}
+                    }
+                }
+            }
+        });
+        let mut interaction: DiscordInteraction = serde_json::from_value(interaction_json).unwrap();
+        let attachments = interaction.target_message_attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].content_type.as_deref(), Some("image/png"));
+
+        // Only the target's files count, and a message without any has none.
+        interaction.data.as_mut().unwrap().target_id = Some("43".to_string());
+        assert!(interaction.target_message_attachments().is_empty());
+        interaction.data = None;
+        assert!(interaction.target_message_attachments().is_empty());
+    }
+
+    #[test]
+    fn test_parse_modal_submit_without_a_file() {
+        let interaction_json = json!({
+            "type": 5,
+            "data": {
+                "custom_id": "dm:api:comp",
+                "components": [
+                    {"type": 18, "component": {"type": 4, "custom_id": "defenses_input", "value": "x"}},
+                    {"type": 18, "component": {"type": 19, "custom_id": "capture_input", "values": []}}
+                ]
+            }
+        });
+        let interaction: DiscordInteraction = serde_json::from_value(interaction_json).unwrap();
+        assert!(interaction.get_modal_files("capture_input").is_empty());
     }
 
     #[test]

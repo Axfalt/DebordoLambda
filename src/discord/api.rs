@@ -144,6 +144,39 @@ pub async fn send_followup_with_cancel(
     patch_followup(client, application_id, token, &body).await
 }
 
+/// The "Simuler" button row of a screenshot's review message.
+fn review_button_components(custom_id: &str) -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": 1, // ACTION_ROW
+            "components": [
+                {
+                    "type": 2, // BUTTON
+                    "style": 1, // PRIMARY (blurple)
+                    "label": "Simuler",
+                    "custom_id": custom_id
+                }
+            ]
+        }
+    ])
+}
+
+/// Edits the original response with `content` and a "Simuler" button whose interaction carries
+/// `custom_id`.
+pub async fn send_followup_with_review(
+    client: &reqwest::Client,
+    application_id: &str,
+    token: &str,
+    content: &str,
+    custom_id: &str,
+) -> Result<(), reqwest::Error> {
+    let body = serde_json::json!({
+        "content": content,
+        "components": review_button_components(custom_id)
+    });
+    patch_followup(client, application_id, token, &body).await
+}
+
 /// Edits the original response with `content` and removes its buttons.
 pub async fn send_followup_without_buttons(
     client: &reqwest::Client,

@@ -118,6 +118,13 @@ pub struct SimulationJob {
     pub buildings: Vec<reparo_lib::SimBuilding>,
     #[serde(default)]
     pub estimation: Option<EstimationJob>,
+    /// Discord URL of a citizen list screenshot: the worker reads it and posts the citizens for
+    /// review instead of simulating.
+    #[serde(default)]
+    pub citizen_screenshot: Option<String>,
+    /// `citizens` holds the town's real citizens (from the API), not placeholders.
+    #[serde(default)]
+    pub citizens_from_api: bool,
 }
 
 /// `custom_id` prefix of the "Voir la configuration" button of an `/estimation25` result; the

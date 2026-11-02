@@ -169,6 +169,11 @@ commands = [
         ]
     },
     {
+        # Clic droit sur un message > Applications : lit la capture jointe au message
+        "name": "Simuler depuis la capture",
+        "type": 3  # MESSAGE
+    },
+    {
         "name": "reparo",
         "description": "Estime les dégâts de réparation nécessaires après une attaque",
         "options": [

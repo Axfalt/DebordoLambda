@@ -39,6 +39,7 @@ aws-sdk-sqs = "1"
 aws-sdk-dynamodb = "1"
 aws-sdk-ssm = "1"
 aws-sdk-lambda = "1"
+aws-sdk-textract = "1"
 aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
@@ -53,4 +54,5 @@ hex = "0.4"
 # Tracing pour les logs Lambda
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 
