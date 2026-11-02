@@ -12,6 +12,7 @@ dependencies = [
  "aws-sdk-lambda",
  "aws-sdk-sqs",
  "aws-sdk-ssm",
+ "aws-sdk-textract",
  "aws_lambda_events",
  "base64 0.22.1",
  "ed25519-dalek",
@@ -402,6 +403,32 @@ dependencies = [
  "aws-smithy-types",
  "aws-smithy-xml",
  "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.2",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-textract"
+version = "1.103.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c40fcbe4af920e07178d98a68f8dc03bc2888134129220a8ace856a284a64be8"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
  "fastrand",
  "http 0.2.12",
  "http 1.4.2",

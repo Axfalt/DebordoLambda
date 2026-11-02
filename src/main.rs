@@ -16,6 +16,9 @@ use debordo_lib::discord::{
     DiscordInteraction, DiscordResponse, interaction_types, response_types,
     verify_discord_signature,
 };
+use debordo_lib::screenshot::{
+    CAPTURE_INPUT, MAX_CAPTURE_BYTES, REVIEW_CITIZENS_BUTTON, review_message_conf,
+};
 use debordo_lib::{database, myhordes};
 use estimation25_lib::parse::InputOverrides;
 
@@ -178,7 +181,26 @@ async fn handle_component_interaction(
             .unwrap_or_default();
 
         let (config, citizens) = parse_result_message_content(msg_content);
-        return respond_with_defenses_modal(&config, false, &citizens);
+        return respond_with_defenses_modal(&config, false, &citizens, false);
+    }
+
+    // Screenshot review: the configuration lives in the message's code block.
+    if custom_id == REVIEW_CITIZENS_BUTTON {
+        let msg_content = interaction
+            .message
+            .as_ref()
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or_default();
+        return match review_message_conf(msg_content) {
+            Some(conf) => {
+                let (mut config, citizens) = parse_complete_modal_text(conf);
+                config.is_complete = true;
+                respond_with_defenses_modal(&config, false, &citizens, false)
+            }
+            None => Ok(ephemeral_message(
+                "Erreur : configuration illisible. Relancez `/debordo-complete`.",
+            )),
+        };
     }
 
     if custom_id == "vconf_reparo" {
@@ -399,6 +421,8 @@ async fn handle_command(
             "Erreur : indiquez soit `defense`, soit `risque`, pas les deux.",
         ));
     }
+    // `/debordo-complete` takes each citizen's defense in its form, typed or from a capture.
+    let has_min_def = user_min_def.is_some() || is_complete_cmd;
     let has_defense_or_risque = user_defense.is_some() || user_risque.is_some();
     let has_all_critical = has_defense_or_risque
         && user_tdg_min.is_some()
@@ -458,7 +482,7 @@ async fn handle_command(
             if !has_defense_or_risque
                 || user_tdg_min.is_none()
                 || user_tdg_max.is_none()
-                || user_min_def.is_none()
+                || !has_min_def
             {
                 let error_msg = "Certains paramètres requis sont manquants (defense ou risque, tdg_min, tdg_max, min_def) et vous n'avez pas enregistré votre clé API MyHordes. Veuillez utiliser `/register-key` ou fournir tous les paramètres manuellement.";
                 let response = DiscordResponse {
@@ -682,7 +706,7 @@ async fn handle_command(
                     if !has_defense_or_risque
                         || user_tdg_min.is_none()
                         || user_tdg_max.is_none()
-                        || user_min_def.is_none()
+                        || !has_min_def
                     {
                         let error_msg = format!(
                             "Erreur de connexion à l'API MyHordes : {}. Veuillez vérifier votre clé avec `/register-key` ou saisir les paramètres requis manuellement.",
@@ -1242,7 +1266,12 @@ async fn finalize_and_dispatch(
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     if job.config.is_interactive || (job.config.is_complete && job.config.custom_defenses.is_none())
     {
-        return respond_with_defenses_modal(&job.config, is_api, &job.citizens);
+        return respond_with_defenses_modal(
+            &job.config,
+            is_api,
+            &job.citizens,
+            job.config.is_complete,
+        );
     }
 
     enqueue_simulation(&job, sqs_client, queue_url).await
@@ -1288,6 +1317,27 @@ fn defense_search_work_error(job: &SimulationJob) -> Option<String> {
         "Erreur : avec `risque`, itérations ({}) × largeur de la TDG ({}) ne doit pas dépasser {}. Réduisez le nombre d'itérations ou resserrez la plage TDG.",
         config.iterations, tdg_width, MAX_SEARCH_TOTAL_WORK
     ))
+}
+
+/// The URL of a file uploaded in the form, or why it can't be used.
+fn validated_capture_url(
+    interaction: &DiscordInteraction,
+    attachment_id: &str,
+) -> Result<String, &'static str> {
+    let attachment = interaction
+        .attachment(attachment_id)
+        .ok_or("Erreur : capture introuvable. Réessayez.")?;
+    // The formats Textract accepts.
+    if !matches!(
+        attachment.content_type.as_deref(),
+        Some("image/png" | "image/jpeg")
+    ) {
+        return Err("Erreur : la capture doit être une image PNG ou JPEG.");
+    }
+    if attachment.size > MAX_CAPTURE_BYTES {
+        return Err("Erreur : la capture ne doit pas dépasser 5 Mo.");
+    }
+    Ok(attachment.url.clone())
 }
 
 fn ephemeral_message(content: &str) -> ApiGatewayV2httpResponse {
@@ -1559,10 +1609,43 @@ fn parse_complete_modal_text(text: &str) -> (SimConfig, Vec<SimulationCitizen>) 
     (config, citizens)
 }
 
+/// The components of the defenses form with its file upload, which must sit in labels.
+fn defenses_modal_with_upload(citizens_str: &str) -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": 18, // LABEL
+            "label": "Configuration et défenses",
+            "component": {
+                "type": 4, // TEXT_INPUT
+                "custom_id": "defenses_input",
+                "style": 2, // PARAGRAPH
+                "min_length": 1,
+                "max_length": 4000,
+                "value": citizens_str,
+                "required": true
+            }
+        },
+        {
+            "type": 18, // LABEL
+            "label": "Capture de la liste des citoyens",
+            "description": "Facultatif : remplace les défenses ci-dessus (PNG ou JPEG, 5 Mo max).",
+            "component": {
+                "type": 19, // FILE_UPLOAD
+                "custom_id": CAPTURE_INPUT,
+                "min_values": 0,
+                "max_values": 1,
+                "required": false,
+                "file_types": [".png", ".jpg", ".jpeg"]
+            }
+        }
+    ])
+}
+
 fn respond_with_defenses_modal(
     config: &SimConfig,
     is_api: bool,
     citizens: &[SimulationCitizen],
+    with_capture_upload: bool,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
     info!("Responding with defenses edit modal");
 
@@ -1580,23 +1663,27 @@ fn respond_with_defenses_modal(
         data: Some(serde_json::json!({
             "title": "Configuration & Défenses",
             "custom_id": custom_id,
-            "components": [
-                {
-                    "type": 1, // ACTION_ROW
-                    "components": [
-                        {
-                            "type": 4, // TEXT_INPUT
-                            "custom_id": "defenses_input",
-                            "label": "Configuration et défenses",
-                            "style": 2, // PARAGRAPH
-                            "min_length": 1,
-                            "max_length": 4000,
-                            "value": citizens_str,
-                            "required": true
-                        }
-                    ]
-                }
-            ]
+            "components": if with_capture_upload {
+                defenses_modal_with_upload(&citizens_str)
+            } else {
+                serde_json::json!([
+                    {
+                        "type": 1, // ACTION_ROW
+                        "components": [
+                            {
+                                "type": 4, // TEXT_INPUT
+                                "custom_id": "defenses_input",
+                                "label": "Configuration et défenses",
+                                "style": 2, // PARAGRAPH
+                                "min_length": 1,
+                                "max_length": 4000,
+                                "value": citizens_str,
+                                "required": true
+                            }
+                        ]
+                    }
+                ])
+            }
         })),
     };
 
@@ -1622,11 +1709,23 @@ async fn handle_debordo_modal_submit(
     config.is_complete = was_complete;
     config.custom_defenses = Some(defenses_val.to_string());
 
+    let capture_url = match interaction.get_modal_files(CAPTURE_INPUT).first() {
+        Some(id) => match validated_capture_url(&interaction, id) {
+            Ok(url) => Some(url),
+            Err(message) => return Ok(ephemeral_message(message)),
+        },
+        None => None,
+    };
+    // In the API's form, the citizens listed are the town's real ones.
+    let citizens_from_api = custom_id.contains(":api:") && !citizens.is_empty();
+
     let job = SimulationJob {
         token,
         application_id,
         config,
         citizens,
+        citizen_screenshot: capture_url,
+        citizens_from_api,
         ..Default::default()
     };
 
@@ -1691,6 +1790,102 @@ mod tests {
         assert_eq!(citizens[0].defense, 10); // Custom defense used as-is
         assert_eq!(citizens[1].name, "Citoyen 1");
         assert_eq!(citizens[1].defense, 9); // 5 (min_def) + 4 (home_bonus)
+    }
+
+    fn capture_interaction(content_type: &str, size: u64) -> DiscordInteraction {
+        serde_json::from_value(serde_json::json!({
+            "type": 2,
+            "data": {
+                "resolved": {
+                    "attachments": {
+                        "1": {
+                            "url": "https://cdn.discordapp.com/a.png",
+                            "content_type": content_type,
+                            "size": size
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_capture_validation() {
+        let png = capture_interaction("image/png", 1000);
+        assert_eq!(
+            validated_capture_url(&png, "1").as_deref(),
+            Ok("https://cdn.discordapp.com/a.png")
+        );
+        assert!(validated_capture_url(&png, "2").is_err());
+        let webp = capture_interaction("image/webp", 1000);
+        assert!(validated_capture_url(&webp, "1").is_err());
+        let large = capture_interaction("image/jpeg", MAX_CAPTURE_BYTES + 1);
+        assert!(validated_capture_url(&large, "1").is_err());
+    }
+
+    #[test]
+    fn test_upload_form_respects_discord_limits() {
+        let components = defenses_modal_with_upload("defense: 100");
+        let labels = components.as_array().unwrap();
+        for label in labels {
+            assert_eq!(label["type"], 18);
+            assert!(label["label"].as_str().unwrap().chars().count() <= 45);
+            let description = label["description"].as_str().unwrap_or_default();
+            assert!(description.chars().count() <= 100);
+        }
+        assert_eq!(labels[0]["component"]["custom_id"], "defenses_input");
+        assert_eq!(labels[0]["component"]["value"], "defense: 100");
+        assert!(
+            labels[0]["component"].get("label").is_none(),
+            "deprecated inside a label"
+        );
+        assert_eq!(labels[1]["component"]["type"], 19);
+        assert_eq!(labels[1]["component"]["required"], false);
+        assert_eq!(labels[1]["component"]["min_values"], 0);
+    }
+
+    #[test]
+    fn test_review_message_configuration_survives_the_modal_parser() {
+        let config = SimConfig {
+            defense: 250,
+            tdg_min: 300,
+            tdg_max: 320,
+            day: 7,
+            iterations: 10000,
+            nb_hab: 2,
+            is_reactor_built: true,
+            is_complete: true,
+            ..Default::default()
+        };
+        let citizens = [
+            SimulationCitizen {
+                name: "Csag".to_string(),
+                defense: 0,
+            },
+            SimulationCitizen {
+                name: "Axfalt".to_string(),
+                defense: 12,
+            },
+        ];
+        let message = debordo_lib::screenshot::review_message(
+            2,
+            &format_conf(&config, &citizens),
+            &["Attention : relisez.".to_string()],
+        )
+        .unwrap();
+
+        let (parsed, parsed_citizens) =
+            parse_complete_modal_text(review_message_conf(&message).unwrap());
+        assert_eq!(parsed.defense, 250);
+        assert_eq!((parsed.tdg_min, parsed.tdg_max), (300, 320));
+        assert_eq!(parsed.day, 7);
+        assert!(parsed.is_reactor_built);
+        assert_eq!(parsed_citizens.len(), 2);
+        assert_eq!(parsed_citizens[0].name, "Axfalt");
+        assert_eq!(parsed_citizens[0].defense, 12);
+        assert_eq!(parsed_citizens[1].name, "Csag");
+        assert_eq!(parsed_citizens[1].defense, 0);
     }
 
     #[test]

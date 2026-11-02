@@ -14,15 +14,19 @@ use tracing::{error, info};
 
 use debordo_lib::config::{
     ESTIMATION_CANCEL_BUTTON, ESTIMATION_CONFIG_BUTTON, EstimationJob, EstimationSource,
-    EstimationStage, JobType, SimulationJob, format_defense_search_results, format_reparo_results,
-    format_results, truncate_for_discord,
+    EstimationStage, JobType, SimulationJob, format_conf, format_defense_search_results,
+    format_reparo_results, format_results, truncate_for_discord,
 };
 use debordo_lib::database;
 use debordo_lib::discord::api::{
-    send_followup, send_followup_with_button, send_followup_with_cancel,
+    send_followup, send_followup_with_button, send_followup_with_cancel, send_followup_with_review,
     send_followup_without_buttons,
 };
 use debordo_lib::quickchart::{build_chart_config, create_chart_url};
+use debordo_lib::screenshot::{
+    MAX_CAPTURE_BYTES, OcrWord, REVIEW_CITIZENS_BUTTON, citizens_from_rows, is_discord_cdn_url,
+    parse_citizen_rows, reconcile_with_api, review_message,
+};
 use debordo_lib::simulation::{
     complete_overflow_probability, overflow_probability, required_defense,
 };
@@ -109,6 +113,7 @@ struct Clients {
     sqs: aws_sdk_sqs::Client,
     dynamodb: aws_sdk_dynamodb::Client,
     lambda: aws_sdk_lambda::Client,
+    textract: aws_sdk_textract::Client,
     /// Queue of the `/estimation25` watchdogs.
     queue_url: Option<String>,
     /// This worker, which the `/estimation25` parts invoke asynchronously (set by Lambda).
@@ -163,6 +168,9 @@ async fn process_job(job: SimulationJob, clients: &Clients) -> Result<(), Error>
 
     let http_client = &clients.http;
     match job.job_type {
+        JobType::Debordo if job.citizen_screenshot.is_some() => {
+            process_screenshot_job(job, clients).await
+        }
         JobType::Debordo if config.target_death.is_some() => {
             process_defense_search_job(job, config, http_client).await
         }
@@ -170,6 +178,119 @@ async fn process_job(job: SimulationJob, clients: &Clients) -> Result<(), Error>
         JobType::Reparation => process_reparo_job(job, config, http_client).await,
         JobType::Estimation => process_estimation_job(job, clients).await,
     }
+}
+
+/// Downloads the capture from Discord's CDN, stopping as soon as it exceeds the limit.
+async fn download_capture(url: &str, http_client: &reqwest::Client) -> Result<Vec<u8>, Error> {
+    if !is_discord_cdn_url(url) {
+        return Err("capture URL outside of Discord's CDN".into());
+    }
+    let mut response = http_client.get(url).send().await?.error_for_status()?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > MAX_CAPTURE_BYTES {
+            return Err("capture larger than the limit".into());
+        }
+    }
+    Ok(bytes)
+}
+
+/// The words Textract finds on the image.
+async fn detect_words(
+    image: Vec<u8>,
+    textract: &aws_sdk_textract::Client,
+) -> Result<Vec<OcrWord>, Error> {
+    let document = aws_sdk_textract::types::Document::builder()
+        .bytes(aws_sdk_textract::primitives::Blob::new(image))
+        .build();
+    let response = textract
+        .detect_document_text()
+        .document(document)
+        .send()
+        .await
+        .map_err(|e| Error::from(aws_sdk_textract::error::DisplayErrorContext(e).to_string()))?;
+
+    Ok(response
+        .blocks()
+        .iter()
+        .filter(|b| b.block_type() == Some(&aws_sdk_textract::types::BlockType::Word))
+        .filter_map(|b| {
+            let bounding_box = b.geometry()?.bounding_box()?;
+            Some(OcrWord {
+                text: b.text()?.to_string(),
+                left: bounding_box.left(),
+                top: bounding_box.top(),
+                width: bounding_box.width(),
+                height: bounding_box.height(),
+                confidence: b.confidence()?,
+            })
+        })
+        .collect())
+}
+
+/// Reads the citizens on the capture and posts them for review: the "Simuler" button opens the
+/// usual modal, so nothing is simulated before the user has seen what was read.
+async fn process_screenshot_job(job: SimulationJob, clients: &Clients) -> Result<(), Error> {
+    let http_client = &clients.http;
+    let url = job.citizen_screenshot.as_deref().unwrap_or_default();
+
+    let read = async {
+        let image = download_capture(url, http_client).await?;
+        detect_words(image, &clients.textract).await
+    }
+    .await;
+    let words = match read {
+        Ok(words) => words,
+        Err(e) => {
+            error!("Failed to read the citizen list capture: {}", e);
+            let content = "❌ Lecture de la capture impossible. Réessayez, ou saisissez les défenses dans le formulaire.";
+            send_followup_without_buttons(http_client, &job.application_id, &job.token, content)
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let capture = parse_citizen_rows(&words);
+    info!(
+        "Capture read: {} word(s), {} citizen row(s)",
+        words.len(),
+        capture.rows.len()
+    );
+    if capture.rows.is_empty() {
+        let content = "❌ Aucun citoyen trouvé sur la capture. Envoyez une capture de la liste des citoyens, avec la colonne **Déf.**";
+        send_followup_without_buttons(http_client, &job.application_id, &job.token, content)
+            .await?;
+        return Ok(());
+    }
+
+    let citizens = if job.citizens_from_api {
+        reconcile_with_api(&capture, &job.citizens)
+    } else {
+        citizens_from_rows(&capture)
+    };
+    let mut config = job.config.clone();
+    config.nb_hab = citizens.citizens.len() as i32;
+    let conf = format_conf(&config, &citizens.citizens);
+
+    match review_message(citizens.citizens.len(), &conf, &citizens.warnings) {
+        Some(content) => {
+            send_followup_with_review(
+                http_client,
+                &job.application_id,
+                &job.token,
+                &content,
+                REVIEW_CITIZENS_BUTTON,
+            )
+            .await?;
+        }
+        None => {
+            let content = "❌ Trop de texte lu sur la capture. Envoyez une capture de la liste des citoyens seule.";
+            send_followup_without_buttons(http_client, &job.application_id, &job.token, content)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn process_debordo_job(
@@ -968,6 +1089,7 @@ async fn main() -> Result<(), Error> {
         sqs: aws_sdk_sqs::Client::new(&aws_config),
         dynamodb: aws_sdk_dynamodb::Client::new(&aws_config),
         lambda: aws_sdk_lambda::Client::new(&aws_config),
+        textract: aws_sdk_textract::Client::new(&aws_config),
         queue_url: std::env::var("SQS_QUEUE_URL").ok(),
         function_name: std::env::var("AWS_LAMBDA_FUNCTION_NAME").ok(),
     };
