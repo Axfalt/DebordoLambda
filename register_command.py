@@ -170,7 +170,7 @@ commands = [
     },
     {
         # Clic droit sur un message > Applications : lit la capture jointe au message
-        "name": "Lire la capture",
+        "name": "Simuler depuis la capture",
         "type": 3  # MESSAGE
     },
     {

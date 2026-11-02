@@ -287,7 +287,7 @@ async fn process_screenshot_job(job: SimulationJob, clients: &Clients) -> Result
     config.nb_hab = citizens.citizens.len() as i32;
     let conf = format_conf(&config, &citizens.citizens);
 
-    // "Lire la capture" has no options: without a key, nothing has set these values yet.
+    // "Simuler depuis la capture" has no options: without a key, nothing has set these values yet.
     let mut warnings = citizens.warnings;
     if config.tdg_max <= 0 {
         warnings.insert(

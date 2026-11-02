@@ -251,7 +251,7 @@ mod tests {
             "type": 2,
             "data": {
                 "id": "866818195033292851",
-                "name": "Lire la capture",
+                "name": "Simuler depuis la capture",
                 "type": 3,
                 "target_id": "42",
                 "resolved": {

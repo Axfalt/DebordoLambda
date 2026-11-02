@@ -1353,7 +1353,7 @@ fn validated_capture_url(
     checked_capture_url(attachment)
 }
 
-/// The URL of the capture in the message "Lire la capture" was used on, or why it can't be used.
+/// The URL of the capture in the message command's target message, or why it can't be used.
 fn target_message_capture_url(interaction: &DiscordInteraction) -> Result<String, &'static str> {
     match interaction.target_message_attachments() {
         [attachment] => checked_capture_url(attachment),
