@@ -244,7 +244,7 @@ async fn process_screenshot_job(job: SimulationJob, clients: &Clients) -> Result
         Ok(words) => words,
         Err(e) => {
             error!("Failed to read the citizen list capture: {}", e);
-            let content = "❌ Lecture de la capture impossible. Réessayez, ou saisissez les défenses dans le formulaire.";
+            let content = "❌ Lecture de la capture impossible. Réessayez, ou saisissez les défenses dans le formulaire de `/debordo-complete`.";
             send_followup_without_buttons(http_client, &job.application_id, &job.token, content)
                 .await?;
             return Ok(());
@@ -273,7 +273,16 @@ async fn process_screenshot_job(job: SimulationJob, clients: &Clients) -> Result
     config.nb_hab = citizens.citizens.len() as i32;
     let conf = format_conf(&config, &citizens.citizens);
 
-    match review_message(citizens.citizens.len(), &conf, &citizens.warnings) {
+    // "Lire la capture" has no options: without a key, nothing has set these values yet.
+    let mut warnings = citizens.warnings;
+    if config.tdg_max <= 0 {
+        warnings.insert(
+            0,
+            "Sans clé API : renseignez `defense` et `tdg` dans le formulaire.".to_string(),
+        );
+    }
+
+    match review_message(citizens.citizens.len(), &conf, &warnings) {
         Some(content) => {
             send_followup_with_review(
                 http_client,

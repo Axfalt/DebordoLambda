@@ -27,6 +27,10 @@ pub const MAX_CAPTURE_BYTES: u64 = 5 * 1024 * 1024;
 /// `custom_id` of the file upload in the `/debordo-complete` form.
 pub const CAPTURE_INPUT: &str = "capture_input";
 
+/// Name of the message command that reads the capture sent in a message. Also in
+/// `register_command.py`.
+pub const READ_CAPTURE_COMMAND: &str = "Lire la capture";
+
 /// `custom_id` of the "Simuler" button of the review message.
 pub const REVIEW_CITIZENS_BUTTON: &str = "review_citizens";
 

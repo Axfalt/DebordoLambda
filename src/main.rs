@@ -13,11 +13,12 @@ use debordo_lib::config::{
     parse_result_message_content, parse_risk_percent, risk_percent_from_value,
 };
 use debordo_lib::discord::{
-    DiscordInteraction, DiscordResponse, interaction_types, response_types,
+    Attachment, DiscordInteraction, DiscordResponse, interaction_types, response_types,
     verify_discord_signature,
 };
 use debordo_lib::screenshot::{
-    CAPTURE_INPUT, MAX_CAPTURE_BYTES, REVIEW_CITIZENS_BUTTON, review_message_conf,
+    CAPTURE_INPUT, MAX_CAPTURE_BYTES, READ_CAPTURE_COMMAND, REVIEW_CITIZENS_BUTTON,
+    review_message_conf,
 };
 use debordo_lib::{database, myhordes};
 use estimation25_lib::parse::InputOverrides;
@@ -363,7 +364,17 @@ async fn handle_command(
         .as_ref()
         .and_then(|d| d.name.as_deref())
         .unwrap_or("debordo");
-    let is_complete_cmd = command_name == "debordo-complete" || command_name == "debordo_complete";
+    let capture_url = if command_name == READ_CAPTURE_COMMAND {
+        match target_message_capture_url(&interaction) {
+            Ok(url) => Some(url),
+            Err(message) => return Ok(ephemeral_message(message)),
+        }
+    } else {
+        None
+    };
+    let is_complete_cmd = command_name == "debordo-complete"
+        || command_name == "debordo_complete"
+        || capture_url.is_some();
 
     let mut user_defense: Option<i32> = None;
     let mut user_tdg_min: Option<i32> = None;
@@ -479,10 +490,12 @@ async fn handle_command(
 
     match user_key {
         None => {
-            if !has_defense_or_risque
-                || user_tdg_min.is_none()
-                || user_tdg_max.is_none()
-                || !has_min_def
+            // A message command has no options: the review's form asks for the values instead.
+            if capture_url.is_none()
+                && (!has_defense_or_risque
+                    || user_tdg_min.is_none()
+                    || user_tdg_max.is_none()
+                    || !has_min_def)
             {
                 let error_msg = "Certains paramètres requis sont manquants (defense ou risque, tdg_min, tdg_max, min_def) et vous n'avez pas enregistré votre clé API MyHordes. Veuillez utiliser `/register-key` ou fournir tous les paramètres manuellement.";
                 let response = DiscordResponse {
@@ -526,6 +539,7 @@ async fn handle_command(
                 application_id,
                 config,
                 citizens,
+                citizen_screenshot: capture_url,
                 ..Default::default()
             };
 
@@ -685,6 +699,7 @@ async fn handle_command(
                             application_id,
                             config,
                             citizens,
+                            citizen_screenshot: capture_url,
                             ..Default::default()
                         };
 
@@ -703,10 +718,11 @@ async fn handle_command(
                 }
                 Err(e) => {
                     error!("MyHordes API call failed: {}", e);
-                    if !has_defense_or_risque
-                        || user_tdg_min.is_none()
-                        || user_tdg_max.is_none()
-                        || !has_min_def
+                    if capture_url.is_none()
+                        && (!has_defense_or_risque
+                            || user_tdg_min.is_none()
+                            || user_tdg_max.is_none()
+                            || !has_min_def)
                     {
                         let error_msg = format!(
                             "Erreur de connexion à l'API MyHordes : {}. Veuillez vérifier votre clé avec `/register-key` ou saisir les paramètres requis manuellement.",
@@ -753,6 +769,7 @@ async fn handle_command(
                         application_id,
                         config,
                         citizens,
+                        citizen_screenshot: capture_url,
                         ..Default::default()
                     };
 
@@ -1259,11 +1276,17 @@ async fn handle_estimation25_modal_submit(
 }
 
 async fn finalize_and_dispatch(
-    job: SimulationJob,
+    mut job: SimulationJob,
     sqs_client: &aws_sdk_sqs::Client,
     queue_url: &str,
     is_api: bool,
 ) -> Result<ApiGatewayV2httpResponse, Error> {
+    // The form comes after the capture is read, from the review message.
+    if job.citizen_screenshot.is_some() {
+        job.citizens_from_api = is_api && !job.citizens.is_empty();
+        return enqueue_simulation(&job, sqs_client, queue_url).await;
+    }
+
     if job.config.is_interactive || (job.config.is_complete && job.config.custom_defenses.is_none())
     {
         return respond_with_defenses_modal(
@@ -1327,6 +1350,21 @@ fn validated_capture_url(
     let attachment = interaction
         .attachment(attachment_id)
         .ok_or("Erreur : capture introuvable. Réessayez.")?;
+    checked_capture_url(attachment)
+}
+
+/// The URL of the capture in the message "Lire la capture" was used on, or why it can't be used.
+fn target_message_capture_url(interaction: &DiscordInteraction) -> Result<String, &'static str> {
+    match interaction.target_message_attachments() {
+        [attachment] => checked_capture_url(attachment),
+        [] => Err(
+            "Erreur : ce message n'a pas de capture. Collez-la dans le salon, envoyez-la, puis utilisez la commande sur ce message.",
+        ),
+        _ => Err("Erreur : ce message contient plusieurs fichiers. Envoyez une seule capture."),
+    }
+}
+
+fn checked_capture_url(attachment: &Attachment) -> Result<String, &'static str> {
     // The formats Textract accepts.
     if !matches!(
         attachment.content_type.as_deref(),
@@ -1808,6 +1846,45 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn message_command_interaction(attachments: serde_json::Value) -> DiscordInteraction {
+        serde_json::from_value(serde_json::json!({
+            "type": 2,
+            "data": {
+                "name": READ_CAPTURE_COMMAND,
+                "type": 3,
+                "target_id": "42",
+                "resolved": {"messages": {"42": {"attachments": attachments}}}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_message_command_takes_a_single_valid_capture() {
+        let png = serde_json::json!({
+            "url": "https://cdn.discordapp.com/a.png",
+            "content_type": "image/png",
+            "size": 1000
+        });
+        let webp = serde_json::json!({
+            "url": "https://cdn.discordapp.com/a.webp",
+            "content_type": "image/webp",
+            "size": 1000
+        });
+
+        let one = message_command_interaction(serde_json::json!([png]));
+        assert_eq!(
+            target_message_capture_url(&one).as_deref(),
+            Ok("https://cdn.discordapp.com/a.png")
+        );
+        let none = message_command_interaction(serde_json::json!([]));
+        assert!(target_message_capture_url(&none).is_err());
+        let two = message_command_interaction(serde_json::json!([png, png]));
+        assert!(target_message_capture_url(&two).is_err());
+        let wrong_type = message_command_interaction(serde_json::json!([webp]));
+        assert!(target_message_capture_url(&wrong_type).is_err());
     }
 
     #[test]

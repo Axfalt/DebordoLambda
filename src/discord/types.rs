@@ -36,12 +36,22 @@ pub struct InteractionData {
     pub custom_id: Option<String>,
     pub components: Option<Vec<ModalActionRow>>,
     pub resolved: Option<ResolvedData>,
+    /// The message a message command was used on, found in the resolved messages.
+    pub target_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ResolvedData {
     #[serde(default)]
     pub attachments: std::collections::HashMap<String, Attachment>,
+    #[serde(default)]
+    pub messages: std::collections::HashMap<String, ResolvedMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolvedMessage {
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +104,17 @@ impl DiscordInteraction {
     /// The uploaded file an id from `get_modal_files` refers to.
     pub fn attachment(&self, id: &str) -> Option<&Attachment> {
         self.data.as_ref()?.resolved.as_ref()?.attachments.get(id)
+    }
+
+    /// The files of the message a message command was used on.
+    pub fn target_message_attachments(&self) -> &[Attachment] {
+        let attachments = || {
+            let data = self.data.as_ref()?;
+            let target = data.target_id.as_ref()?;
+            let message = data.resolved.as_ref()?.messages.get(target)?;
+            Some(message.attachments.as_slice())
+        };
+        attachments().unwrap_or_default()
     }
 
     fn get_modal_component(&self, custom_id: &str) -> Option<&ModalComponent> {
@@ -222,6 +243,50 @@ mod tests {
         assert_eq!(attachment.content_type.as_deref(), Some("image/png"));
         assert_eq!(attachment.size, 12345);
         assert!(interaction.attachment("222").is_none());
+    }
+
+    #[test]
+    fn test_parse_message_command_attachments() {
+        let interaction_json = json!({
+            "type": 2,
+            "data": {
+                "id": "866818195033292851",
+                "name": "Lire la capture",
+                "type": 3,
+                "target_id": "42",
+                "resolved": {
+                    "messages": {
+                        "42": {
+                            "id": "42",
+                            "channel_id": "772908445358620702",
+                            "content": "",
+                            "author": {"id": "167348773423415296", "username": "ian"},
+                            "attachments": [{
+                                "id": "111",
+                                "filename": "image.png",
+                                "url": "https://cdn.discordapp.com/attachments/1/111/image.png?ex=1&is=2&hm=3",
+                                "proxy_url": "https://media.discordapp.net/attachments/1/111/image.png",
+                                "content_type": "image/png",
+                                "size": 12345,
+                                "width": 600,
+                                "height": 1292
+                            }]
+                        },
+                        "43": {"id": "43"}
+                    }
+                }
+            }
+        });
+        let mut interaction: DiscordInteraction = serde_json::from_value(interaction_json).unwrap();
+        let attachments = interaction.target_message_attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].content_type.as_deref(), Some("image/png"));
+
+        // Only the target's files count, and a message without any has none.
+        interaction.data.as_mut().unwrap().target_id = Some("43".to_string());
+        assert!(interaction.target_message_attachments().is_empty());
+        interaction.data = None;
+        assert!(interaction.target_message_attachments().is_empty());
     }
 
     #[test]
